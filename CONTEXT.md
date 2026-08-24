@@ -71,3 +71,41 @@ _Avoid_: max debounce, deadline
 An optional lower bound on time between pushes. A rate limit on the network
 half, not a second schedule.
 _Avoid_: push interval, push period
+
+### The branch and the remote
+
+**Tracked branch**:
+The single branch obsync syncs. Resolved once at startup — the vault's current
+HEAD when attaching to an existing repo, the remote's default branch when
+cloning fresh — and fixed for the process lifetime.
+_Avoid_: sync branch, target branch, main
+
+**Sync state**:
+How the tracked branch relates to its remote counterpart at classify time: one
+of *equal*, *ahead*, *behind*, or *diverged*.
+_Avoid_: drift, status, sync status
+
+**Divergence**:
+The sync state where both sides hold commits the other lacks. The expected
+consequence of an external push landing while the vault is being edited — a
+normal event obsync resolves, not an error.
+
+**Upstream rewrite**:
+The remote tip ceasing to be a descendant of the tip obsync last saw. History
+has been rewritten underneath it. Distinct from divergence, and never resolved
+automatically.
+_Avoid_: force-push, rewind, reset
+
+### Freezes
+
+**Full freeze**:
+obsync stops touching the repo entirely — no commits, no network. Reserved for
+states where even committing would do the wrong thing.
+_Avoid_: halt, stop, lock
+
+**Network freeze**:
+The network half stops while the local half keeps committing. The vault keeps
+being captured; nothing leaves or enters. The degraded mode an unreachable
+remote already produces, reused wherever the vault is sound but its
+relationship to the remote is not.
+_Avoid_: offline mode, paused
