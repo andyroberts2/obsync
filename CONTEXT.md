@@ -148,6 +148,34 @@ in the vault, never authoritative over it, deleted when every section is empty,
 and never itself tracked.
 _Avoid_: marker file, conflict log, conflict note
 
+### Interlocks
+
+**Gate**:
+A condition that must hold before obsync is allowed to act on the vault at
+all. Every gate is a conclusive fact rather than a judgement, and gates are
+re-checked at the top of every sync run — so a gate that starts failing stops
+obsync, and a gate the human repairs releases it, with no restart in between.
+_Avoid_: check, guard, precondition, validation
+
+**Aborted run**:
+A sync run that gives up before changing anything, leaving the next run to try
+again. Distinct from a freeze: nothing is wrong with the vault or the remote,
+this pass simply lost a race. Never reported — a transient loss is not news.
+_Avoid_: failed run, retry, skipped run
+
+**Vault sentinel**:
+The presence of `.obsidian/` as obsync's proof that the vault is really there.
+Its absence means the mount is gone or misdirected, not that the human deleted
+their notes — the one distinction that separates infrastructure failure from a
+legitimate, syncable edit.
+_Avoid_: health check, liveness probe, canary
+
+**Write-verify**:
+The check that the tree obsync applied to the vault is the tree it computed.
+The last interlock before a result becomes a pushed result, and the only one
+whose failure means obsync can no longer trust its own view of the vault.
+_Avoid_: validation, assertion, sanity check
+
 ### Freezes
 
 **Full freeze**:
