@@ -96,6 +96,31 @@ has been rewritten underneath it. Distinct from divergence, and never resolved
 automatically.
 _Avoid_: force-push, rewind, reset
 
+### What obsync tracks
+
+**Ignore floor**:
+The fixed set of paths obsync excludes from the vault, written to the repo's
+own exclude file at every startup and never committed. A default rather than a
+rule — the vault's `.gitignore` outranks it, and belongs to the user alone.
+_Avoid_: ignore list, exclusions, default gitignore
+
+**Refused path**:
+A path obsync will not put in a commit, whatever its state — a
+credential-shaped filename, or a file over the size ceiling. Skipped, never a
+reason to stop: everything else still commits and pushes.
+_Avoid_: blocked file, rejected file, skipped file
+
+**Size ceiling**:
+The largest single file obsync will commit. Set from what the remote will
+accept, not from taste — the one value in this area that is configured.
+_Avoid_: file size limit, max blob
+
+**Committable set**:
+The paths a sync run would actually stage, once the ignore floor and refused
+paths are taken out. What "dirty" means to the loop: a tree holding nothing but
+refused paths is quiet, and produces no commit.
+_Avoid_: changed files, working set, staged set
+
 ### Conflicts
 
 **Keep-both rule**:
@@ -116,11 +141,12 @@ The losing remote version of a conflicted path, written beside it as a
 byte-identical sibling and committed. Never annotated, never overwritten.
 _Avoid_: sidecar, conflicted copy, duplicate
 
-**Conflict note**:
-The vault-root index of outstanding conflict copies. Derived from the copies
-present in the vault, never authoritative over them, and deleted when none
-remain.
-_Avoid_: marker file, conflict log
+**Attention note**:
+The vault-root note obsync writes when it needs a human to look at something —
+outstanding conflict copies and refused paths, in sections. Derived from what is
+in the vault, never authoritative over it, deleted when every section is empty,
+and never itself tracked.
+_Avoid_: marker file, conflict log, conflict note
 
 ### Freezes
 
