@@ -72,6 +72,35 @@ An optional lower bound on time between pushes. A rate limit on the network
 half, not a second schedule.
 _Avoid_: push interval, push period
 
+### Torn writes
+
+**Settle guard**:
+The per-path check that a file is not still being written: its size and mtime,
+sampled twice across the settle interval, must be unchanged. Distinct from the
+quiet window in kind, not degree — the quiet window is about history
+readability and the max-wait cap may waive it; the settle guard is about valid
+bytes and nothing waives it.
+_Avoid_: settle window, write debounce, stability check
+
+**Settle interval**:
+The gap between the settle guard's two samples. Not configurable — a constant
+read off what the filesystem does, not a preference.
+_Avoid_: settle delay, stability threshold
+
+**Unsettled path**:
+A path whose size or mtime moved across the settle interval. Neither committed
+nor overwritten while it stays that way. The second thing the committable set
+subtracts, alongside refused paths — and, once a path stays unsettled long
+enough to stop looking transient, a section of the attention note.
+_Avoid_: dirty file, in-flight file, busy file
+
+**Stage-verify**:
+The check that nothing moved on disk while a sync run was staging it. The read
+side's counterpart to write-verify: together they mean obsync verifies both ends
+of every tree it touches. Its subject is the third writer, whose writes no
+sampling window can anticipate.
+_Avoid_: recheck, restat, double-read
+
 ### The branch and the remote
 
 **Tracked branch**:
@@ -116,9 +145,10 @@ accept, not from taste — the one value in this area that is configured.
 _Avoid_: file size limit, max blob
 
 **Committable set**:
-The paths a sync run would actually stage, once the ignore floor and refused
-paths are taken out. What "dirty" means to the loop: a tree holding nothing but
-refused paths is quiet, and produces no commit.
+The paths a sync run would actually stage, once the ignore floor, refused paths,
+and unsettled paths are taken out. What "dirty" means to the loop: a tree
+holding nothing but refused and unsettled paths is quiet, and produces no
+commit.
 _Avoid_: changed files, working set, staged set
 
 ### Conflicts
@@ -143,8 +173,9 @@ _Avoid_: sidecar, conflicted copy, duplicate
 
 **Attention note**:
 The vault-root note obsync writes when it needs a human to look at something —
-outstanding conflict copies and refused paths, in sections. Derived from what is
-in the vault, never authoritative over it, deleted when every section is empty,
+outstanding conflict copies, refused paths, and paths that have stayed unsettled
+long enough to stop looking transient, in sections. Derived from what is in the
+vault, never authoritative over it, deleted when every section is empty,
 and never itself tracked.
 _Avoid_: marker file, conflict log, conflict note
 
