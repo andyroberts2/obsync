@@ -96,6 +96,32 @@ has been rewritten underneath it. Distinct from divergence, and never resolved
 automatically.
 _Avoid_: force-push, rewind, reset
 
+### Conflicts
+
+**Keep-both rule**:
+The single rule for resolving a conflicted path: the vault's view of the path
+wins — including absence, where the vault deleted it — and the remote's losing
+bytes are preserved as a conflict copy. There is exactly one rule, and it is not
+configurable.
+_Avoid_: conflict resolution, merge strategy
+
+**Out-of-tree merge**:
+Computing and resolving a merge entirely outside the working tree, so the vault
+only ever sees the finished result. The reason raw conflict markers can never
+reach a note.
+_Avoid_: dry run, staged merge, shadow merge
+
+**Conflict copy**:
+The losing remote version of a conflicted path, written beside it as a
+byte-identical sibling and committed. Never annotated, never overwritten.
+_Avoid_: sidecar, conflicted copy, duplicate
+
+**Conflict note**:
+The vault-root index of outstanding conflict copies. Derived from the copies
+present in the vault, never authoritative over them, and deleted when none
+remain.
+_Avoid_: marker file, conflict log
+
 ### Freezes
 
 **Full freeze**:
