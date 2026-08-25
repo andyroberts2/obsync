@@ -179,6 +179,49 @@ vault, never authoritative over it, deleted when every section is empty,
 and never itself tracked.
 _Avoid_: marker file, conflict log, conflict note
 
+### Configuration
+
+**Config surface**:
+The complete set of values obsync is configured with. It is a public interface
+rather than an accumulation: a value belongs here only if it is a fact about the
+deployment, and every retired name stays recognised so an upgrade can never
+silently revert one to its default.
+_Avoid_: settings, options, flags
+
+**Knob**:
+One value in the config surface. Earning one is a high bar — a fact about the
+vault, the remote, or the credential qualifies; a preference about timing or
+policy does not, and becomes a constant instead.
+_Avoid_: setting, option, parameter
+
+**Config error**:
+A refusal decidable from the configured values alone, without touching the vault
+or the remote. The only condition that makes obsync exit rather than park: a
+container handed nonsense cannot be repaired in place, and its operator needs it
+to fail visibly.
+_Avoid_: startup failure, validation error, fatal error
+
+**Credential file**:
+The file the remote's secret is read from — re-read at the top of every network
+half rather than held from startup. What makes a rotated credential recover on
+its own, with no restart, and the reason the secret is a file at all.
+_Avoid_: token, secret, password file
+
+**Configured remote**:
+The normalised host-and-path pair obsync was told to sync with, and the thing the
+repo's own remote is checked against every run. Scheme, credentials, port, case
+and a `.git` suffix are not part of it — they vary without changing where bytes
+go. A mismatch is a human's job to resolve; obsync never re-points a remote
+itself.
+_Avoid_: remote URL, upstream, origin
+
+**Commit identity**:
+The git author obsync writes under. Where provenance lives, which is why the
+name — not the address — is the part that carries meaning: it is what filtering
+history by author matches on, and the only part guaranteed stable across a
+container's lifetime.
+_Avoid_: author, signature, attribution
+
 ### Interlocks
 
 **Gate**:
