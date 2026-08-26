@@ -188,16 +188,21 @@ func runObsync(t *testing.T, env []string, args ...string) (stdout, stderr strin
 	return outBuf.String(), errBuf.String(), exitCode
 }
 
-// A loop is a running sync loop — §10's default subcommand, which runs until
+// A process is obsync running as §10's default subcommand, which runs until
 // SIGTERM. It is the half of this seam that does not exit on its own, so the
 // harness reads its stderr as it is written and stops it with a signal.
+//
+// It is named for what it is rather than for what it runs: the sync loop it
+// turns is a type of its own, driven in-process by the seam-1 harness beside
+// this one, because a clock and a watcher cannot be injected across a process
+// boundary.
 //
 // It reaps obsync itself, in the same goroutine that reads its stderr, because
 // that is the only way an exit is observable before the test asks for one: an
 // exited child that has not been Waited for is a zombie, and a zombie takes a
 // signal without complaint, so a signal-0 liveness check reports a dead obsync
 // as running.
-type loop struct {
+type process struct {
 	t     *testing.T
 	cmd   *exec.Cmd
 	stop  context.CancelFunc
@@ -230,7 +235,7 @@ const pendingLines = 64
 
 // startLoop starts obsync with the given environment block and nothing else in
 // its environment.
-func startLoop(t *testing.T, env ...string) *loop {
+func startLoop(t *testing.T, env ...string) *process {
 	t.Helper()
 
 	ctx, stop := context.WithCancel(t.Context())
@@ -256,7 +261,7 @@ func startLoop(t *testing.T, env ...string) *loop {
 
 	lines := make(chan string, pendingLines)
 	exited := make(chan struct{})
-	l := &loop{t: t, cmd: cmd, stop: stop, lines: lines, exited: exited, out: &out}
+	l := &process{t: t, cmd: cmd, stop: stop, lines: lines, exited: exited, out: &out}
 	go func() {
 		defer close(exited)
 		scanner := bufio.NewScanner(stderr)
@@ -284,7 +289,7 @@ func startLoop(t *testing.T, env ...string) *loop {
 // The deadline is a bound on failure, not a wait for obsync: a loop that never
 // says what it was going to say fails here with everything it did say, rather
 // than hanging until the suite's own timeout.
-func (l *loop) awaitLine(want string) string {
+func (l *process) awaitLine(want string) string {
 	l.t.Helper()
 
 	deadline := time.NewTimer(30 * time.Second)
@@ -312,7 +317,7 @@ func (l *loop) awaitLine(want string) string {
 // The grace is a bound on failure rather than a wait for obsync — see
 // parkGrace — and the question is asked of a reaped process rather than of a
 // signal, because a signal cannot tell a parked obsync from a zombie one.
-func (l *loop) running() bool {
+func (l *process) running() bool {
 	l.t.Helper()
 
 	grace := time.NewTimer(parkGrace)
@@ -328,7 +333,7 @@ func (l *loop) running() bool {
 // stopAndWait sends SIGTERM, drains what obsync wrote on its way out, and
 // returns its exit status. Calling it twice is harmless: the cleanup this
 // harness registers is the second call in a test that stopped the loop itself.
-func (l *loop) stopAndWait() int {
+func (l *process) stopAndWait() int {
 	l.t.Helper()
 
 	if l.stopped {
@@ -358,7 +363,7 @@ func (l *loop) stopAndWait() int {
 // stderr returns everything obsync wrote, and is meaningful once it has
 // stopped: an assertion that a line is *absent* needs the whole of the output
 // rather than the part of it that has arrived.
-func (l *loop) stderr() string {
+func (l *process) stderr() string {
 	l.t.Helper()
 
 	l.stopAndWait()
@@ -368,7 +373,7 @@ func (l *loop) stderr() string {
 // stdout returns everything obsync wrote to stdout, which for the sync loop is
 // nothing at all: its output is logfmt on stderr, and stdout belongs to the
 // subcommands (§9).
-func (l *loop) stdout() string {
+func (l *process) stdout() string {
 	l.t.Helper()
 
 	l.stopAndWait()

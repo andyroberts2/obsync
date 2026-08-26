@@ -13,13 +13,18 @@ one-shot script with no daemon, debounce, or credential handling.
 
 ## Status
 
-**Early implementation, and nothing syncs yet.** The design is settled and
-written up as one spec, [#21](../../issues/21), which was worked as a
+**Early implementation.** The design is settled and written up as one spec,
+[#21](../../issues/21), which was worked as a
 [wayfinder map](../../issues?q=label%3Awayfinder%3Amap) — a tracked set of
 decision tickets, resolved one at a time. What exists today is the project
-skeleton — a version-stamped binary and a green CI — plus the config surface:
-obsync reads its nine environment variables, says in one line what it thinks it
-was told, refuses nonsense it can judge from that block alone, and waits.
+skeleton, the config surface — nine environment variables, one required, echoed
+in a startup line — and the walking skeleton of the sync loop: a wake-up makes
+obsync ask git what changed in the vault, commit it as one commit whose message
+says what changed, and push it to the tracked branch.
+
+Not yet: the tick and the quiet window, the safety interlocks, the settle guard,
+conflicts, the attention note, the status file and the container image. obsync
+is not something to point at a vault yet.
 
 ## Reference deployment
 

@@ -251,6 +251,14 @@ rather than held from startup or cached for the life of a run. What makes a rota
 its own, with no restart, and the reason the secret is a file at all.
 _Avoid_: token, secret, password file
 
+**Private git config**:
+The per-process `GIT_CONFIG_GLOBAL` obsync writes at startup and every git it
+runs reads — the commit identity, the credential helper, a forced `core.askPass`
+and the two integrity settings. Outranked by the vault's own `.git/config`,
+deliberately: that is the escape hatch a repo carrying legacy-malformed objects
+uses, and the vault's config is the human's file, which obsync only ever reads.
+_Avoid_: global config, gitconfig, git settings
+
 **Configured remote**:
 The normalised host-and-path pair obsync was told to sync with, and the thing the
 repo's own remote is checked against every run. Scheme, credentials, port, case

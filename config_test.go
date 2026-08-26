@@ -226,7 +226,11 @@ func TestEveryVariableOnTheConfigSurfaceIsRecognisedAndEchoed(t *testing.T) {
 			t.Errorf("the startup line is %q, want it to carry %q", line, want)
 		}
 	}
-	if stderr := loop.stderr(); strings.Contains(stderr, "unknown variable") || strings.Contains(stderr, "level=ERROR") {
+	// The refusal obsync would report is its config error, named rather than
+	// matched by level: this vault path does not exist, so the sync loop has
+	// its own ERROR to log about it, and that one is a gate doing its job
+	// rather than a variable being refused.
+	if stderr := loop.stderr(); strings.Contains(stderr, "unknown variable") || strings.Contains(stderr, "obsync cannot start") {
 		t.Errorf("obsync wrote %q for a block holding nothing but its own nine variables, want none "+
 			"of them refused or unrecognised", stderr)
 	}

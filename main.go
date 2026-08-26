@@ -4,8 +4,9 @@
 //
 // The design is issue #21 — body plus both comments — and section references
 // (§1–§12) throughout this repo are its sections. This build recognises the
-// declared surface's subcommands (§10), reports the build version, and
-// resolves the config surface (§8) — and nothing syncs yet.
+// declared surface's subcommands (§10), reports the build version, resolves the
+// config surface (§8), and turns a sync loop that commits the vault and pushes
+// it (#24).
 package main
 
 import (
@@ -17,7 +18,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/andyroberts2/obsync/internal/clock"
 	"github.com/andyroberts2/obsync/internal/config"
+	"github.com/andyroberts2/obsync/internal/loop"
 )
 
 // version is stamped at link time with -ldflags "-X main.version=<version>",
@@ -52,7 +55,7 @@ func run(args []string, environ []string, stdout, stderr io.Writer) int {
 		// The write errors are dropped explicitly rather than by omission: a
 		// failed write to stdout has nowhere left to be reported.
 		_, _ = fmt.Fprintf(stdout, "obsync %s\n", version)
-		_, _ = fmt.Fprintln(stdout, "the sync loop is not implemented in this build")
+		_, _ = fmt.Fprintln(stdout, "the sync loop keeps no status file in this build")
 		return 0
 
 	case "":
@@ -84,22 +87,21 @@ obsync is configured entirely by OBSYNC_* environment variables.
 }
 
 // syncLoop is §10's default subcommand. It resolves the config surface, says
-// in one line what it thinks it was told, and then parks until SIGTERM.
+// in one line what it thinks it was told, and turns the sync loop until
+// SIGTERM.
 //
-// Parking is the point rather than a placeholder: §8 puts exactly one class of
-// failure on the exit path — a config error, decidable from the environment
-// block alone — and everything else obsync meets is a gate, which parks alive
-// and keeps re-checking. The loop that would turn between the echo and the
-// signal is the tracer bullet's (#24).
+// Only one class of failure is on the exit path — a config error, decidable
+// from the environment block alone (§8). Everything obsync meets after that is
+// a gate or a failed run, and neither exits: obsync parks alive and keeps
+// re-checking, because exiting discards backoff state and turns a diagnosable
+// stuck state into a crash loop.
 func syncLoop(environ []string, stderr io.Writer) int {
 	// Installed before anything else, so a SIGTERM arriving during startup is
 	// a clean exit rather than a kill.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
-	// The resolved config is dropped because there is nothing yet to hand it
-	// to; Resolve has already echoed it, which is this build's whole job.
-	_, log, err := config.Resolve(environ, stderr)
+	cfg, log, err := config.Resolve(environ, stderr)
 	if err != nil {
 		var configErr *config.Error
 		if !errors.As(err, &configErr) {
@@ -114,8 +116,13 @@ func syncLoop(environ []string, stderr io.Writer) int {
 		return 1
 	}
 
-	log.Warn("the sync loop is not implemented in this build; obsync has resolved its configuration " +
-		"and will wait for SIGTERM")
-	<-ctx.Done()
+	// The watcher is the loop's other injected dependency and it does not
+	// exist yet (#39), so obsync has no wake-up but the startup run: the tick
+	// that will drive the rest is #25's. A nil channel is exactly that — a
+	// loop with nothing to wake it — rather than a placeholder to remove.
+	l := loop.New(cfg, log, clock.System{}, nil)
+	defer func() { _ = l.Close() }()
+
+	l.Run(ctx)
 	return 0
 }
