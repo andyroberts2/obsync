@@ -133,6 +133,17 @@ has been rewritten underneath it. Distinct from divergence, and never resolved
 automatically.
 _Avoid_: force-push, rewind, reset
 
+**Remote rejection**:
+A push the remote received, evaluated, and declined — a hook, a policy, a quota,
+or a blob over a limit obsync cannot discover. Told apart from a lost race and
+from an unreachable remote by git's documented porcelain summary, never by the
+prose beside it. The one network failure that no amount of waiting repairs,
+which is why it escalates on its first occurrence rather than on a streak: the
+remote has already returned a verdict, and a second identical one carries
+nothing new. obsync *refuses*, the remote *rejects* — two verbs, two actors,
+never interchangeable.
+_Avoid_: push failure, rejected push, refused push
+
 ### What obsync tracks
 
 **Ignore floor**:
@@ -330,9 +341,18 @@ _Avoid_: offline mode, paused
 **Health**:
 obsync's answer to exactly one question — *does this need a human?* Deliberately
 not "is everything working": a remote that is down and backing off is behaving
-as designed and is healthy, while a freeze, or a push that has never once
-succeeded, is not.
+as designed and is healthy until the backoff ceiling, while a freeze, a remote
+rejection, or a push that has never once succeeded, is not.
 _Avoid_: status, liveness, uptime
+
+**Backoff ceiling**:
+The point at which a remote that has merely gone quiet stops being healthy. Not
+a retry limit — obsync keeps backing off and retrying past it, and only the
+health verdict changes. The one judgement an unbounded backoff cannot make for
+itself: waiting is the correct behaviour and stays correct, so nothing about
+the failure ever escalates it, and only elapsed time separates a remote that
+will come back from one that will not.
+_Avoid_: timeout, max backoff, retry limit, give-up
 
 **Status file**:
 The private record of the loop's own state, rewritten at the end of every
