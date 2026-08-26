@@ -46,6 +46,14 @@ The filesystem watch over the vault. Its only role is to wake the loop sooner
 than the next tick would; it never tells obsync *what* changed.
 _Avoid_: listener, observer
 
+**Tick-only mode**:
+The mode obsync runs in when no watcher is available — the tick becomes the only
+thing that wakes the loop. Latency degrades to the tick interval; what obsync
+commits does not change. Entered wholesale rather than partially: a vault where
+only some of the tree is watched would sync at two different speeds with nothing
+to tell them apart.
+_Avoid_: polling mode, fallback mode, degraded mode
+
 **Local half**:
 The part of a sync run that touches only the vault and its `.git` — status and
 commit. Cannot fail for network reasons, and keeps running when the remote is
@@ -202,8 +210,8 @@ to fail visibly.
 _Avoid_: startup failure, validation error, fatal error
 
 **Credential file**:
-The file the remote's secret is read from — re-read at the top of every network
-half rather than held from startup. What makes a rotated credential recover on
+The file the remote's secret is read from — re-read every time git asks for it,
+rather than held from startup or cached for the life of a run. What makes a rotated credential recover on
 its own, with no restart, and the reason the secret is a file at all.
 _Avoid_: token, secret, password file
 
