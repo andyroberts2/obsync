@@ -395,16 +395,20 @@ The full list of things obsync will never do is the README's never-list.
 
 Stated so that nothing here is mistaken for a promise:
 
-- **The status file's location and layout.** It is private; `obsync status` and
-  `obsync healthcheck` are its interface.
+- **The status file's name and layout.** `.git/obsync/` is an owned path above,
+  so where obsync writes is declared; what it writes inside it is private, and
+  `obsync status` and `obsync healthcheck` are its interface.
 - **The log's individual messages.** The format — logfmt on stderr — has no knob
   and the startup line's keys are above; the wording of everything else is not
   a promise.
 - **obsync's timing constants**, except the ones stated above. The quiet
   window, the max-wait cap, the tick, the push floor, the backoff floor, the
   conflict-storm ceiling and the settle interval are constants rather than
-  knobs, and moving one is not a surface change. The health contract's 300s
-  staleness window and 24h backoff ceiling are stated above and are.
+  knobs, and moving one is not a surface change. The ones stated above are on
+  the surface: the `HEALTHCHECK` directive's four parameters, the health
+  contract's 300s staleness window and 24h backoff ceiling, and the ~30s
+  deadline on a SIGTERM, which is what the reference `compose.yaml`'s
+  `stop_grace_period` is set against.
 - **A bare binary.** The container image is the supported artifact. A binary is
   a non-goal rather than a prohibition: nothing will make one impossible, and
   nothing is promised about one.
