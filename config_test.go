@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -112,6 +113,9 @@ func TestAnUnacceptableRepoIsAConfigErrorAndExits(t *testing.T) {
 		{"an absolute path, which is file://'s job", "/srv/git/vault.git"},
 		{"a relative path", "vault.git"},
 		{"a URL that does not parse", "https://git.lan:not-a-port/owner/vault"},
+		{"a URL naming no repository", "https://github.com/"},
+		{"scp-style naming no repository", "git@github.com:"},
+		{"a URL naming no host", "https:///owner/vault"},
 	} {
 		t.Run(refused.name, func(t *testing.T) {
 			t.Parallel()
@@ -135,13 +139,42 @@ func TestAnUnacceptableRepoIsAConfigErrorAndExits(t *testing.T) {
 func TestNoCredentialInTheRepoURLReachesTheLog(t *testing.T) {
 	t.Parallel()
 
-	loop := startLoop(t, "OBSYNC_REPO=https://obsync:hunter2@github.com/owner/vault.git",
-		"OBSYNC_TOKEN_FILE="+credentialFile(t, "a-token"))
-	loop.awaitLine(startupLine)
+	for _, embedded := range []struct {
+		name string
+		env  []string
+		// survives is what the echo may still carry: for ssh, the login name,
+		// which is not a secret and is half of what an operator is diffing.
+		survives string
+	}{
+		{
+			name: "https, where the userinfo is the credential",
+			env: []string{"OBSYNC_REPO=https://obsync:hunter2@github.com/owner/vault.git",
+				"OBSYNC_TOKEN_FILE=" + credentialFile(t, "a-token")},
+		},
+		{
+			// ssh has no use for a password — git hands the URL to ssh, which
+			// takes a key — so one here is a secret in a URL under a scheme
+			// that cannot even spend it, and the echo is where it would surface.
+			name:     "ssh, where only the login name is not a secret",
+			env:      []string{"OBSYNC_REPO=ssh://git:hunter2@git.lan/owner/vault.git"},
+			survives: "git@git.lan",
+		},
+	} {
+		t.Run(embedded.name, func(t *testing.T) {
+			t.Parallel()
 
-	if stderr := loop.stderr(); strings.Contains(stderr, "hunter2") {
-		t.Errorf("obsync wrote %q, want the credential absent entirely — not redacted, not its "+
-			"first four characters: absent (§8)", stderr)
+			loop := startLoop(t, embedded.env...)
+			line := loop.awaitLine(startupLine)
+
+			if stderr := loop.stderr(); strings.Contains(stderr, "hunter2") {
+				t.Errorf("obsync wrote %q, want the credential absent entirely — not redacted, not its "+
+					"first four characters: absent (§8)", stderr)
+			}
+			if embedded.survives != "" && !strings.Contains(line, embedded.survives) {
+				t.Errorf("the startup line is %q, want it to still carry %q — the echo is what an "+
+					"operator diffs against their compose file", line, embedded.survives)
+			}
+		})
 	}
 }
 
@@ -355,6 +388,18 @@ func TestACredentialFileThatCannotBeReadIsAConfigErrorAndExits(t *testing.T) {
 	}{
 		{"a path that is not there", func(t *testing.T) string { return filepath.Join(t.TempDir(), "absent") }},
 		{"a directory", func(t *testing.T) string { return t.TempDir() }},
+		// A named pipe is not a plausible credential file; it is here because
+		// it is the shape whose open blocks rather than fails. obsync installs
+		// its SIGTERM handler before it resolves anything, so a startup that
+		// blocks is a container that never starts, says nothing, and takes a
+		// SIGKILL to stop.
+		{"a named pipe, whose open blocks rather than failing", func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "pipe")
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatalf("making a named pipe: %v", err)
+			}
+			return path
+		}},
 	} {
 		t.Run(broken.name, func(t *testing.T) {
 			t.Parallel()
@@ -397,6 +442,29 @@ func TestASizeCeilingTakesAHumanSuffix(t *testing.T) {
 				t.Errorf("obsync resolved a size ceiling of %q to a line reading %q, want %q", size.set, line, want)
 			}
 		})
+	}
+}
+
+// Every problem in the block, not just the first. Each one an operator finds
+// separately costs them a redeploy, and a container handed three wrong values
+// should be repairable in one pass (§8).
+func TestEveryProblemInABlockIsReportedRatherThanTheFirst(t *testing.T) {
+	t.Parallel()
+
+	_, stderr, exitCode := runObsync(t, []string{
+		"OBSYNC_REPO=https://github.com/owner/vault.git", // http(s), and no credential file with it
+		"OBSYNC_SIZE_CEILING=104857600",
+		"OBSYNC_LOG_LEVEL=loud",
+	})
+
+	if exitCode != 1 {
+		t.Errorf("obsync exited %d for a block holding three config errors, want 1", exitCode)
+	}
+	for _, want := range []string{"OBSYNC_TOKEN_FILE", "OBSYNC_SIZE_CEILING", "OBSYNC_LOG_LEVEL"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("obsync wrote %q, want it to name %s too — all three problems are in the block "+
+				"and finding them one redeploy at a time is what reporting the first costs", stderr, want)
+		}
 	}
 }
 

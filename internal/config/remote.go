@@ -75,6 +75,20 @@ func parseRemote(raw string) (scheme string, remote ConfiguredRemote, err error)
 	path := strings.Trim(parsed.Path, "/")
 	path = strings.TrimSuffix(path, ".git")
 
+	// A URL missing either half names no repository, and which half is missing
+	// is decidable from the environment block alone — so it exits rather than
+	// parking (§8). The alternative is worse than it looks: gate 5 would spend
+	// every run comparing the vault's origin against half a pair, and the
+	// operator would meet a full freeze where they should have met a message
+	// naming the variable. file:// is the one scheme whose host is meant to be
+	// empty.
+	if host == "" && parsed.Scheme != "file" {
+		return "", ConfiguredRemote{}, fmt.Errorf("%q names no host. %s", raw, acceptedForms)
+	}
+	if path == "" {
+		return "", ConfiguredRemote{}, fmt.Errorf("%q names no repository path. %s", raw, acceptedForms)
+	}
+
 	return parsed.Scheme, ConfiguredRemote{Host: host, Path: path}, nil
 }
 
@@ -85,14 +99,35 @@ func parseRemote(raw string) (scheme string, remote ConfiguredRemote, err error)
 // — but an operator can, and this line is the one place obsync would otherwise
 // read one straight back out. So for the two schemes §8 says authenticate with
 // a credential, any embedded userinfo gets the same treatment as the token
-// itself: absent, rather than redacted or shortened. ssh's userinfo is a login
-// name and stays.
+// itself: absent, rather than redacted or shortened.
+//
+// ssh's userinfo is a login name and stays — but only the name. A password
+// there is never a login name and git's ssh transport cannot use one anyway,
+// so it is a secret in a URL under a scheme that has no use for it, and it
+// gets the token's treatment rather than the name's.
+//
+// A URL with nothing to drop is returned exactly as it was set, rather than
+// re-encoded by url.String(): the line exists to be diffed against a compose
+// file, and a value that came back spelled differently would read as obsync
+// having understood something else.
 func echoURL(raw string) string {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.User == nil || !needsCredential(parsed.Scheme) {
+	if err != nil || parsed.User == nil {
 		return raw
 	}
-	parsed.User = nil
+	if needsCredential(parsed.Scheme) {
+		parsed.User = nil
+		return parsed.String()
+	}
+
+	if _, hasPassword := parsed.User.Password(); !hasPassword {
+		return raw
+	}
+	if name := parsed.User.Username(); name != "" {
+		parsed.User = url.User(name)
+	} else {
+		parsed.User = nil
+	}
 	return parsed.String()
 }
 

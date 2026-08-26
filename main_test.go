@@ -110,6 +110,32 @@ func TestEveryDeclaredSubcommandIsRecognised(t *testing.T) {
 	}
 }
 
+// §10's default subcommand runs until SIGTERM, and that is the whole of what
+// makes the rest of the config surface observable: "an unknown variable never
+// exits" says nothing about a process that exits either way. So this is the
+// row the subcommand table above cannot carry — the one subcommand whose
+// contract is that it does not finish.
+func TestTheSyncLoopRunsUntilSIGTERM(t *testing.T) {
+	t.Parallel()
+
+	loop := startLoop(t, "OBSYNC_REPO=ssh://git@git.lan/owner/vault.git")
+	loop.awaitLine(startupLine)
+
+	if !loop.running() {
+		t.Error("obsync exited on its own after resolving a configuration it accepted, want it " +
+			"parked until SIGTERM (§10) — a refused obsync parks alive and a satisfied one has " +
+			"even less reason to leave")
+	}
+	if exitCode := loop.stopAndWait(); exitCode != 0 {
+		t.Errorf("obsync exited %d on SIGTERM, want 0 — anything else is obsync being killed rather "+
+			"than stopping (§1)", exitCode)
+	}
+	if stdout := loop.stdout(); stdout != "" {
+		t.Errorf("the sync loop wrote %q to stdout, want logfmt on stderr and stdout left to the "+
+			"subcommands (§9)", stdout)
+	}
+}
+
 func TestUnknownSubcommandIsRefusedAndNamed(t *testing.T) {
 	t.Parallel()
 
@@ -165,15 +191,42 @@ func runObsync(t *testing.T, env []string, args ...string) (stdout, stderr strin
 // A loop is a running sync loop — §10's default subcommand, which runs until
 // SIGTERM. It is the half of this seam that does not exit on its own, so the
 // harness reads its stderr as it is written and stops it with a signal.
+//
+// It reaps obsync itself, in the same goroutine that reads its stderr, because
+// that is the only way an exit is observable before the test asks for one: an
+// exited child that has not been Waited for is a zombie, and a zombie takes a
+// signal without complaint, so a signal-0 liveness check reports a dead obsync
+// as running.
 type loop struct {
-	t        *testing.T
-	cmd      *exec.Cmd
-	stop     context.CancelFunc
-	lines    <-chan string
+	t     *testing.T
+	cmd   *exec.Cmd
+	stop  context.CancelFunc
+	lines <-chan string
+	// exited is closed once obsync's stderr has ended and it has been reaped;
+	// waitErr is what Wait returned and is read only after exited is closed.
+	exited  <-chan struct{}
+	waitErr error
+
+	out      *strings.Builder
 	seen     []string
 	exitCode int
 	stopped  bool
 }
+
+// parkGrace is how long running() waits for an exit before concluding obsync
+// parked. obsync writes its last startup line and then either parks or returns
+// immediately after it, so a second is far more slack than an exit needs to
+// show up in. It can only ever under-detect — a parked obsync passes however
+// loaded the machine is — so a slow runner makes the check weaker, never
+// flaky.
+const parkGrace = time.Second
+
+// pendingLines is the stderr backlog the reader goroutine may hold while the
+// test is not consuming: enough that obsync's whole startup — the unknown and
+// http warnings, the startup line, the not-implemented warning — never blocks
+// the goroutine before it reaches Wait, which is what lets running() see an
+// exit the test has not read up to yet.
+const pendingLines = 64
 
 // startLoop starts obsync with the given environment block and nothing else in
 // its environment.
@@ -188,6 +241,9 @@ func startLoop(t *testing.T, env ...string) *loop {
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = 30 * time.Second
 
+	var out strings.Builder
+	cmd.Stdout = &out
+
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		stop()
@@ -198,16 +254,27 @@ func startLoop(t *testing.T, env ...string) *loop {
 		t.Fatalf("starting obsync: %v", err)
 	}
 
-	lines := make(chan string)
+	lines := make(chan string, pendingLines)
+	exited := make(chan struct{})
+	l := &loop{t: t, cmd: cmd, stop: stop, lines: lines, exited: exited, out: &out}
 	go func() {
-		defer close(lines)
+		defer close(exited)
 		scanner := bufio.NewScanner(stderr)
+		// A knob's value can be far longer than a line of prose, and the
+		// startup line carries all nine of them, so the default 64KB token
+		// limit is raised rather than left to turn an over-long line into a
+		// stderr that merely appears to have ended.
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		for scanner.Scan() {
 			lines <- scanner.Text()
 		}
+		close(lines)
+		// Wait only once the pipe has ended, which is what os/exec requires,
+		// and here rather than in stopAndWait so that obsync exiting on its
+		// own is a fact the harness holds before anyone asks for it.
+		l.waitErr = cmd.Wait()
 	}()
 
-	l := &loop{t: t, cmd: cmd, stop: stop, lines: lines}
 	t.Cleanup(func() { l.stopAndWait() })
 	return l
 }
@@ -241,12 +308,21 @@ func (l *loop) awaitLine(want string) string {
 }
 
 // running reports whether obsync is still parked rather than having exited.
+//
+// The grace is a bound on failure rather than a wait for obsync — see
+// parkGrace — and the question is asked of a reaped process rather than of a
+// signal, because a signal cannot tell a parked obsync from a zombie one.
 func (l *loop) running() bool {
 	l.t.Helper()
 
-	// Signal 0 delivers nothing and reports whether the process is still there
-	// to deliver it to.
-	return l.cmd.Process.Signal(syscall.Signal(0)) == nil
+	grace := time.NewTimer(parkGrace)
+	defer grace.Stop()
+	select {
+	case <-l.exited:
+		return false
+	case <-grace.C:
+		return true
+	}
 }
 
 // stopAndWait sends SIGTERM, drains what obsync wrote on its way out, and
@@ -263,13 +339,14 @@ func (l *loop) stopAndWait() int {
 	for line := range l.lines {
 		l.seen = append(l.seen, line)
 	}
+	<-l.exited
 
 	// A loop that handled SIGTERM and exited cleanly comes back as the
 	// cancellation that sent the signal, so the process's own status is read
 	// off ProcessState either way. It is -1 when obsync was killed by the
 	// signal rather than handling it, which is the distinction being tested.
 	var exit *exec.ExitError
-	switch err := l.cmd.Wait(); {
+	switch err := l.waitErr; {
 	case err == nil, errors.Is(err, context.Canceled), errors.As(err, &exit):
 		l.exitCode = l.cmd.ProcessState.ExitCode()
 	default:
@@ -286,4 +363,14 @@ func (l *loop) stderr() string {
 
 	l.stopAndWait()
 	return strings.Join(l.seen, "\n")
+}
+
+// stdout returns everything obsync wrote to stdout, which for the sync loop is
+// nothing at all: its output is logfmt on stderr, and stdout belongs to the
+// subcommands (§9).
+func (l *loop) stdout() string {
+	l.t.Helper()
+
+	l.stopAndWait()
+	return l.out.String()
 }

@@ -328,25 +328,32 @@ func needsCredential(scheme string) bool {
 //
 // A credential file configured but unreadable at startup is a config error;
 // the same file turning unreadable later is not, it is the self-healing
-// bad-credential tier (§7, §8). A directory is checked for as well as a
-// permission, because opening one succeeds and reading a token out of it never
-// will, and a compose file naming the mount point rather than the file inside
-// it is how that happens.
+// bad-credential tier (§7, §8). Anything that is not a regular file is refused
+// as well as an unreadable one, because opening a directory succeeds and
+// reading a token out of it never will, and a compose file naming the mount
+// point rather than the file inside it is how that happens.
+//
+// The shape check comes before the open, and that order is load-bearing rather
+// than tidy: opening a FIFO blocks until a writer appears, and it would block
+// here with the SIGTERM handler already installed and nothing yet reading it —
+// a container that never starts, says nothing, and cannot be stopped without
+// SIGKILL, out of one wrong path in a compose file. A regular file is the one
+// shape whose open cannot block, so obsync opens nothing else.
 func readable(path string) error {
-	file, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("cannot be read: %w", err)
-	}
-	// Nothing was read, so nothing is lost by dropping the close error; it is
-	// dropped explicitly rather than by omission.
-	defer func() { _ = file.Close() }()
-
-	info, err := file.Stat()
+	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("cannot be read: %w", err)
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%q is not a file, so no credential can be read from it", path)
 	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("cannot be read: %w", err)
+	}
+	// Nothing was read, so nothing is lost by dropping the close error; it is
+	// dropped explicitly rather than by omission.
+	_ = file.Close()
 	return nil
 }
