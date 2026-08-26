@@ -144,12 +144,17 @@ _Avoid_: ignore list, exclusions, default gitignore
 **Refused path**:
 A path obsync will not put in a commit, whatever its state — a
 credential-shaped filename, or a file over the size ceiling. Skipped, never a
-reason to stop: everything else still commits and pushes.
+reason to stop: everything else still commits and pushes. A staging-time verb:
+inside a merged tree, where every path must hold something, there is nothing for
+it to mean.
 _Avoid_: blocked file, rejected file, skipped file
 
 **Size ceiling**:
 The largest single file obsync will commit. Set from what the remote will
-accept, not from taste — the one value in this area that is configured.
+accept, not from taste — the one value in this area that is configured. Applied
+wherever obsync would introduce new bytes to the remote: staging, and the one
+blob a merge can invent. Never applied to bytes the remote already holds, which
+is why a conflict copy is exempt at any size.
 _Avoid_: file size limit, max blob
 
 **Committable set**:
