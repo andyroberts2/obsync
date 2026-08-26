@@ -123,13 +123,14 @@ func (r *Repo) Close() error {
 //   - fetch.fsckObjects, the one integrity check proportional to what arrived
 //     rather than to the size of the repo (§7);
 //   - gc.autoDetach off, which forbids a detached background repack (§7);
-//   - the credential isolation's own two settings — obsync as its own
-//     credential helper, and a forced core.askPass — which are transcribed and
+//   - the credential isolation's forced core.askPass, which is transcribed and
 //     therefore quarantined in isolation.go (§12).
 //
 // Deliberately absent: any merge strategy, so a real conflict is a real
-// conflict resolved by §4's rule rather than a silent -X ours; and gc.auto,
-// which keeps its default.
+// conflict resolved by §4's rule rather than a silent -X ours; gc.auto, which
+// keeps its default; and credential.helper, which is pinned per invocation
+// instead, because a helper written here would be joined by any the vault's own
+// config adds rather than replacing it (isolation.go's environment).
 func (r *Repo) writeConfig(identity config.CommitIdentity) error {
 	settings := [][2]string{
 		{"user.name", identity.Name},
@@ -424,7 +425,7 @@ func (r *Repo) killGroup(cmd *exec.Cmd, waited <-chan error) {
 // because ssh reaches a key through HOME and that is how a key arrives (§8).
 func (r *Repo) env() []string {
 	inherited := os.Environ()
-	env := make([]string, 0, len(inherited)+8)
+	env := make([]string, 0, len(inherited)+14)
 	for _, entry := range inherited {
 		if strings.HasPrefix(entry, "GIT_") || strings.HasPrefix(entry, "OBSYNC_") {
 			continue

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/andyroberts2/obsync/internal/config"
+	"github.com/andyroberts2/obsync/internal/credential"
 )
 
 // The credential path (#36), driven at both of its ends: the subcommand git
@@ -52,12 +53,12 @@ func TestTheCredentialHelperSpeaksGitsCredentialProtocol(t *testing.T) {
 		// environment entirely, which is an ssh:// or file:// deployment.
 		credential string
 		absent     bool
-		// unreadable points the variable at something no credential can come
-		// out of, in the shape the case names.
-		unreadable func(t *testing.T) string
-		username   string
-		stdout     string
-		exitCode   int
+		// at builds the path the variable points at, for a case that is about
+		// the shape of that path rather than about the bytes behind it.
+		at       func(t *testing.T) string
+		username string
+		stdout   string
+		exitCode int
 	}{{
 		name:       "a credential file is read and answered",
 		operation:  "get",
@@ -79,23 +80,58 @@ func TestTheCredentialHelperSpeaksGitsCredentialProtocol(t *testing.T) {
 		username:   "oauth2",
 		stdout:     "username=oauth2\npassword=glpat_the_operators_token\n",
 	}, {
+		// A token file an operator edited on Windows, or wrote through a
+		// bind mount from one. It names the same token as every other row.
+		name:       "a credential file with a CRLF line ending",
+		operation:  "get",
+		credential: "ghp_the_operators_token\r\n",
+		stdout:     "username=obsync\npassword=ghp_the_operators_token\n",
+	}, {
+		// Docker Swarm and Kubernetes both mount a secret as a symlink into a
+		// directory of them, so this is the ordinary production shape rather
+		// than an edge case — and the shape a stricter check on "is a regular
+		// file" would silently refuse, taking every such deployment with it.
+		name:      "a credential file mounted as a symlink, which is what a secret is",
+		operation: "get",
+		at: func(t *testing.T) string {
+			link := filepath.Join(t.TempDir(), "token")
+			if err := os.Symlink(writeCredential(t, "ghp_the_operators_token\n"), link); err != nil {
+				t.Fatalf("mounting the credential file as a symlink: %v", err)
+			}
+			return link
+		},
+		stdout: "username=obsync\npassword=ghp_the_operators_token\n",
+	}, {
+		// The cap's two sides. A credential is tens of bytes, so both of these
+		// are absurd — which is the point: the cap is where a mistake lives,
+		// and a truncated credential is a worse answer than none.
+		name:       "a credential file exactly at the size cap",
+		operation:  "get",
+		credential: strings.Repeat("a", credential.MaxBytes),
+		stdout:     "username=obsync\npassword=" + strings.Repeat("a", credential.MaxBytes) + "\n",
+	}, {
+		name:       "a credential file one byte past the size cap",
+		operation:  "get",
+		credential: strings.Repeat("a", credential.MaxBytes+1),
+		exitCode:   1,
+	}, {
 		// ssh:// and file:// take no credential file, and git may still ask.
 		// Answering nothing is what a helper with nothing to say does.
 		name:      "no credential file configured",
 		operation: "get",
 		absent:    true,
 	}, {
-		name:       "a credential file that is not there",
-		operation:  "get",
-		unreadable: func(t *testing.T) string { return filepath.Join(t.TempDir(), "gone") },
-		exitCode:   1,
+		name:      "a credential file that is not there",
+		operation: "get",
+		at:        func(t *testing.T) string { return filepath.Join(t.TempDir(), "gone") },
+		exitCode:  1,
 	}, {
 		// The mount point rather than the file inside it, which is how a
 		// compose file gets this wrong.
-		name:       "a credential file that is a directory",
-		operation:  "get",
-		unreadable: func(t *testing.T) string { return t.TempDir() },
-		exitCode:   1,
+		name:      "a credential file that is a directory",
+		operation: "get",
+		at:        func(t *testing.T) string { return t.TempDir() },
+		exitCode:  1,
 	}, {
 		name:       "an empty credential file",
 		operation:  "get",
@@ -130,8 +166,8 @@ func TestTheCredentialHelperSpeaksGitsCredentialProtocol(t *testing.T) {
 
 			env := []string{}
 			switch {
-			case c.unreadable != nil:
-				env = append(env, "OBSYNC_TOKEN_FILE="+c.unreadable(t))
+			case c.at != nil:
+				env = append(env, "OBSYNC_TOKEN_FILE="+c.at(t))
 			case !c.absent:
 				env = append(env, "OBSYNC_TOKEN_FILE="+writeCredential(t, c.credential))
 			}
@@ -328,43 +364,189 @@ func TestTheCredentialReachesNoLogNoURLAndNoFileObsyncWrote(t *testing.T) {
 func TestTheShippedBinaryAuthenticatesFromAPathThatIsNotAShellWord(t *testing.T) {
 	t.Parallel()
 
+	installed := newInstalledVault(t, "an odd 'install' dir")
+	installed.writeNote("Daily/2026-08-24.md", "pushed by the installed obsync\n")
+
+	installed.run()
+
+	if got := installed.remoteFile("Daily/2026-08-24.md"); got != "pushed by the installed obsync\n" {
+		t.Errorf("the remote holds %q, want the note the installed obsync pushed", got)
+	}
+	if got, want := installed.remote.handed(), "obsync:"+installedCredential; !slices.Contains(got, want) {
+		t.Errorf("the remote was handed %v, want %q", got, want)
+	}
+}
+
+// git's credential helpers are a *list*, and the vault's own `.git/config` is
+// read after obsync's private one — so a `credential.helper` a human has in
+// their repo does not replace obsync's, it joins it. git then hands the
+// credential to every helper on that list with `store` the moment the remote
+// accepts it, which turns one successful push into a token written to
+// `~/.git-credentials` in cleartext. §8 says that file never exists.
+//
+// So the list is emptied before obsync's helper is pinned onto it, and this is
+// the test that says so. It runs as its own process because HOME is the thing
+// under assertion and only a real obsync has one of its own.
+//
+// `store` is git's own helper and the one a human is most likely to have run
+// `git config credential.helper store` for; `cache` would additionally be the
+// daemon, socket and orphan process §8 designed the whole path to avoid.
+func TestAHelperInTheVaultsOwnConfigIsNeverHandedTheCredential(t *testing.T) {
+	t.Parallel()
+
+	installed := newInstalledVault(t, "bin")
+	mustGit(t, installed.vault, "config", "credential.helper", "store")
+	installed.writeNote("Daily/2026-08-24.md", "pushed past a second helper\n")
+
+	installed.run()
+
+	// Not vacuous only if the push really happened: git offers the credential
+	// to a helper on `store`, which it only reaches once the remote said yes.
+	if got := installed.remoteFile("Daily/2026-08-24.md"); got != "pushed past a second helper\n" {
+		t.Fatalf("the remote holds %q, want the note obsync pushed — a second helper in the "+
+			"vault's own config must not stop obsync authenticating either", got)
+	}
+	for _, path := range filesUnder(t, installed.home) {
+		t.Errorf("%s exists after a successful push, want an untouched home directory — a helper in "+
+			"the vault's own .git/config is never handed the credential, and there is never a "+
+			".git-credentials file (§8)", path)
+		if strings.Contains(readFile(t, path), installedCredential) {
+			t.Errorf("  and it holds the credential in cleartext")
+		}
+	}
+}
+
+// A credential file that turns unreadable *later* is not a config error — it is
+// the self-healing bad-credential path (§8). obsync does not exit, does not
+// freeze, and keeps capturing the vault; putting the file back heals it with no
+// restart.
+//
+// This is the one route where the helper answers git with nothing at all rather
+// than with a credential the remote refuses, so it is a different path through
+// git than a rotated token is: measured on both matrix points, git relays the
+// helper's failure, falls back to the forced askpass, and the push fails 128.
+func TestACredentialFileThatVanishesHealsWhenItComesBack(t *testing.T) {
+	t.Parallel()
+
 	const credential = "ghp_the_operators_token"
+	credentialFile := writeCredential(t, credential+"\n")
+	env, _ := newAuthenticatedVault(t, credentialFile, credential)
+
+	env.writeNote("Daily/2026-08-24.md", "written while the file was there\n")
+	env.wake()
+
+	// The mount dropped, or a rotation deleted the file before writing it.
+	if err := os.Remove(credentialFile); err != nil {
+		t.Fatalf("taking the credential file away: %v", err)
+	}
+	env.writeNote("Daily/2026-08-25.md", "written while the file was gone\n")
+	env.wake()
+
+	if _, code := env.git(env.remote, "cat-file", "-e", "refs/heads/main:Daily/2026-08-25.md"); code == 0 {
+		t.Error("the remote holds the note although obsync had no credential to send, want a push " +
+			"that did not happen")
+	}
+	if got, want := strings.TrimSpace(env.mustGit(env.vault, "rev-list", "--count", "refs/heads/main")), "3"; got != want {
+		t.Errorf("the vault holds %s commits, want %s — a credential obsync cannot read is a "+
+			"network-half failure and the local half keeps committing (§7)", got, want)
+	}
+
+	if err := os.WriteFile(credentialFile, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatalf("putting the credential file back: %v", err)
+	}
+	env.wake()
+
+	if got := env.remoteFile("Daily/2026-08-25.md"); got != "written while the file was gone\n" {
+		t.Errorf("the remote holds %q, want the note that could not be pushed without a credential "+
+			"— the file is read when git asks, so putting it back heals with no restart (§8)", got)
+	}
+}
+
+// installedCredential is what the http remote in front of an installedVault
+// accepts. It is a constant rather than a parameter because no test here is
+// about which bytes the token is.
+const installedCredential = "ghp_the_operators_token"
+
+// installedVault is the process-level half of seam 1: a real vault, a real
+// bare remote behind real git-http-backend and Basic auth, and the shipped
+// binary installed at a path the test chose, run as its own process.
+//
+// It exists for the two properties nothing driving the loop in-process can see
+// — where obsync is installed, and what is in its HOME — and it is the only
+// place the credential helper git invokes is the built binary rather than
+// obsync's code inside the suite.
+type installedVault struct {
+	t *testing.T
+
+	vault      string
+	remotePath string
+	// home is obsync's own, empty, and separate from everything else under the
+	// test's directory so that anything in it is something obsync put there.
+	home   string
+	remote *authenticatedRemote
+
+	binary         string
+	credentialFile string
+}
+
+func newInstalledVault(t *testing.T, installDir string) *installedVault {
+	t.Helper()
+
 	base := t.TempDir()
-	installed := installObsync(t, filepath.Join(base, "an odd 'install' dir"))
+	e := &installedVault{
+		t:              t,
+		vault:          filepath.Join(base, "vault"),
+		remotePath:     filepath.Join(base, "remote.git"),
+		home:           filepath.Join(base, "home"),
+		binary:         installObsync(t, filepath.Join(base, installDir)),
+		credentialFile: writeCredential(t, installedCredential+"\n"),
+	}
+	if err := os.MkdirAll(e.home, 0o755); err != nil {
+		t.Fatalf("creating obsync's home directory: %v", err)
+	}
 
-	remotePath := filepath.Join(base, "remote.git")
-	mustGit(t, base, "init", "--bare", "--quiet", "-b", "main", remotePath)
-	remote := serveRemote(t, base, remotePath, credential)
+	mustGit(t, base, "init", "--bare", "--quiet", "-b", "main", e.remotePath)
+	e.remote = serveRemote(t, base, e.remotePath, installedCredential)
 
-	vault := filepath.Join(base, "vault")
-	if err := os.MkdirAll(filepath.Join(vault, "Daily"), 0o755); err != nil {
+	if err := os.MkdirAll(e.vault, 0o755); err != nil {
 		t.Fatalf("creating the vault: %v", err)
 	}
-	mustGit(t, vault, "init", "--quiet", "-b", "main")
-	mustGit(t, vault, "remote", "add", config.RemoteName, remote.url)
-	writeFile(t, filepath.Join(vault, ".obsidian", "app.json"), "{}\n")
-	mustGit(t, vault, "add", "-A")
-	mustGit(t, vault, append(append([]string{}, humanIdentity...), "commit", "--quiet", "-m", "the vault before obsync")...)
-	mustGit(t, vault, "push", "--quiet", "file://"+remotePath, "refs/heads/main:refs/heads/main")
+	mustGit(t, e.vault, "init", "--quiet", "-b", "main")
+	mustGit(t, e.vault, "remote", "add", config.RemoteName, e.remote.url)
+	e.writeNote(".obsidian/app.json", "{}\n")
+	mustGit(t, e.vault, "add", "-A")
+	mustGit(t, e.vault, append(append([]string{}, humanIdentity...), "commit", "--quiet", "-m", "the vault before obsync")...)
+	// Over file://, so that building a vault stays credential-free whatever
+	// route obsync is later given — the same two steps newVaultReachedBy takes.
+	mustGit(t, e.vault, "push", "--quiet", "file://"+e.remotePath, "refs/heads/main:refs/heads/main")
+	mustGit(t, e.vault, "update-ref", "refs/remotes/"+config.RemoteName+"/main", "HEAD")
+	return e
+}
 
-	writeFile(t, filepath.Join(vault, "Daily", "2026-08-24.md"), "pushed by the installed obsync\n")
+func (e *installedVault) writeNote(path, content string) {
+	e.t.Helper()
+	writeFile(e.t, filepath.Join(e.vault, path), content)
+}
 
-	loop := startLoopFrom(t, installed,
+// run starts the installed obsync, waits for its startup run to push, and stops
+// it with SIGTERM.
+func (e *installedVault) run() {
+	e.t.Helper()
+
+	loop := startLoopFrom(e.t, e.binary,
 		"PATH="+os.Getenv("PATH"),
-		"HOME="+base,
-		"OBSYNC_REPO="+remote.url,
-		"OBSYNC_VAULT_PATH="+vault,
-		"OBSYNC_TOKEN_FILE="+writeCredential(t, credential+"\n"),
+		"HOME="+e.home,
+		"OBSYNC_REPO="+e.remote.url,
+		"OBSYNC_VAULT_PATH="+e.vault,
+		"OBSYNC_TOKEN_FILE="+e.credentialFile,
 	)
 	loop.awaitLine("msg=pushed")
 	loop.stopAndWait()
+}
 
-	if got := mustGit(t, remotePath, "cat-file", "blob", "refs/heads/main:Daily/2026-08-24.md"); got != "pushed by the installed obsync\n" {
-		t.Errorf("the remote holds %q, want the note the installed obsync pushed", got)
-	}
-	if got, want := remote.handed(), "obsync:"+credential; !slices.Contains(got, want) {
-		t.Errorf("the remote was handed %v, want %q", got, want)
-	}
+func (e *installedVault) remoteFile(path string) string {
+	e.t.Helper()
+	return mustGit(e.t, e.remotePath, "cat-file", "blob", "refs/heads/main:"+path)
 }
 
 // installObsync puts a copy of the built binary where a test wants it, which is

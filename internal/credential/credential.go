@@ -24,12 +24,16 @@ import (
 	"github.com/andyroberts2/obsync/internal/config"
 )
 
-// maxCredentialBytes bounds both what is read from the credential file and
-// what is read from git's request. A credential is tens of bytes and a request
-// is a handful of short lines; the bound is four orders of magnitude above
-// either, and exists so that a path that turns out to name something enormous
-// is a refusal rather than an allocation.
-const maxCredentialBytes = 64 << 10
+// MaxBytes bounds both what is read from the credential file and what is read
+// from git's request. A credential is tens of bytes and a request is a handful
+// of short lines; the bound is four orders of magnitude above either, and
+// exists so that a path that turns out to name something enormous is a refusal
+// rather than an allocation.
+//
+// It is exported so that the one test standing on the edge of the cap builds
+// its input from the number itself: a threshold with two definitions is a
+// threshold that drifts.
+const MaxBytes = 64 << 10
 
 // Helper answers one credential-helper invocation and returns obsync's exit
 // status. operation is the word git appends to the configured command — `get`,
@@ -51,7 +55,7 @@ func Helper(operation string, environ []string, stdin io.Reader, stdout io.Write
 	// leaves it unread is one git meets a write error on. Nothing is parsed
 	// out of it: obsync drives exactly one remote, so a git obsync started can
 	// only be asking about that one.
-	_, _ = io.Copy(io.Discard, io.LimitReader(stdin, maxCredentialBytes))
+	_, _ = io.Copy(io.Discard, io.LimitReader(stdin, MaxBytes))
 
 	// git defines three operations and tells a helper to ignore any other, so
 	// that a future git can add one. `store` is git offering the credential
@@ -116,12 +120,12 @@ func read(path string) (string, error) {
 	// One byte past the bound, so a file over it is a refusal rather than a
 	// silent truncation — a truncated credential is a credential that fails,
 	// which is a worse answer than none.
-	content, err := io.ReadAll(io.LimitReader(file, maxCredentialBytes+1))
+	content, err := io.ReadAll(io.LimitReader(file, MaxBytes+1))
 	if err != nil {
 		return "", err
 	}
-	if len(content) > maxCredentialBytes {
-		return "", fmt.Errorf("%q holds more than %d bytes, which is not a credential", path, maxCredentialBytes)
+	if len(content) > MaxBytes {
+		return "", fmt.Errorf("%q holds more than %d bytes, which is not a credential", path, MaxBytes)
 	}
 
 	// Trimmed, because a token file written by an editor ends with a newline

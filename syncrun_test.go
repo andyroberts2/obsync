@@ -464,9 +464,11 @@ func TestTheNextRunPushesWhatTheLastOneCouldNot(t *testing.T) {
 // killing a local command halfway is how this design manufactures the one state
 // it cannot recover from (§1).
 //
-// Measured: a run that commits and pushes drives fourteen git commands — six of
-// them writing the private git config, of which two are the credential
-// isolation's — and takes out exactly one deadline.
+// Measured: a run that commits and pushes drives thirteen git commands — five
+// of them writing the private git config, of which one is the credential
+// isolation's forced askpass — and takes out exactly one deadline. The
+// credential helper is not among them: it is pinned per invocation rather than
+// written down (internal/git/isolation.go).
 func TestOnlyTheNetworkGitIsEverTimedOut(t *testing.T) {
 	t.Parallel()
 

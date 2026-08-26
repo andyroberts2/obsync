@@ -84,22 +84,38 @@ limitations under the License.
 //     variable in its own process environment and writes with `--global`. Same
 //     file, same isolation; obsync's loop never mutates its own environment
 //     because everything it runs takes an environment built for it.
+//   - `credential.helper` is pinned per invocation and preceded by a list
+//     reset, where upstream writes it into the private config and leaves it
+//     there. git's helper list is *cumulative* and the vault's own
+//     `.git/config` is read after the private one, so a repo-level
+//     `credential.helper = store` does not replace obsync's — it joins it, and
+//     git offers the credential to every helper in the list once the remote
+//     accepts it. Measured on both matrix points: with obsync's helper in the
+//     private config and `store` in the vault's, one push writes the token in
+//     cleartext to `~/.git-credentials`, which is the file §8 says never
+//     exists. The reset is the fix and it has to come last, so it travels as
+//     `GIT_CONFIG_COUNT` rather than in a file. See environment below.
 //
 // The rest of obsync's private git configuration — the commit identity,
-// fetch.fsckObjects and gc.autoDetach — is obsync's own and lives in git.go.
+// fetch.fsckObjects and gc.autoDetach — is obsync's own and lives in git.go,
+// as is anything in this file not quoted above: the header enumerates the
+// transcribed lines exactly so that which ones carry the obligation stays
+// answerable by reading it.
 package git
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 // isolation is the credential isolation every git obsync runs is placed
 // inside: a private git configuration that no other git and no ambient
-// ~/.gitconfig can reach, holding the helper that is obsync itself and the
-// forced askpass that keeps an interactive prompt from ever hanging the loop.
+// ~/.gitconfig can reach, holding the forced askpass that keeps an interactive
+// prompt from ever hanging the loop, plus the one helper obsync pins per
+// invocation because a helper list is cumulative (see environment).
 type isolation struct {
 	// dir holds the private configuration and is removed when the Repo closes.
 	// It sits outside the vault: bootstrap has to configure git before there
@@ -139,15 +155,18 @@ func newIsolation() (*isolation, error) {
 	}, nil
 }
 
-// settings are the credential half of obsync's private git configuration.
+// settings is the credential isolation's half of obsync's private git
+// configuration: one key, because the other one cannot live in a file.
 func (i *isolation) settings() [][2]string {
 	return [][2]string{
-		// obsync is its own credential helper, so the credential is read from
-		// the file the operator mounted exactly when git asks for it (§8).
-		{"credential.helper", i.helper},
 		// Forced, so an interactive prompt can never hang the loop. git runs
 		// it through a shell, and `true` produces an empty credential, which
 		// fails fast rather than waiting on a terminal that is not there.
+		//
+		// It sits in the private config rather than beside the helper below,
+		// because it is a single value the vault's own config may override the
+		// ordinary way — that is §1's escape hatch, and overriding it costs a
+		// human nothing they did not ask for.
 		{"core.askPass", "true"},
 	}
 }
@@ -155,11 +174,46 @@ func (i *isolation) settings() [][2]string {
 // environment is what every git obsync runs is given so that the private
 // configuration above is the only configuration in play besides the vault's
 // own — which outranks it deliberately, and is the human's file (§1).
+//
+// The one exception is the credential helper, and it is an exception because
+// git's helper list is cumulative rather than overriding: a second helper in
+// the vault's `.git/config` does not replace obsync's, it is asked alongside
+// it — and git hands the credential to every helper in the list with `store`
+// once the remote has accepted it. Measured on git 2.38.5 and 2.52.0: a vault
+// carrying `credential.helper = store`, or the url-scoped
+// `credential.<url>.helper`, turns one successful push into a token written in
+// cleartext to `~/.git-credentials`. §8 says that file never exists, so the
+// list is emptied before obsync's helper is added to it.
+//
+// The reset only works from the last place git reads configuration, which is
+// `-c` and its environment spelling — a value in the private config would be
+// read *before* the vault's and clear nothing. The environment spelling is the
+// one used because the token must never appear in an argv (§8), and argv is
+// what DEBUG logs; keeping the whole credential path out of it means the rule
+// has no exception to remember. Nothing here is the credential either way — it
+// is obsync's own path, which git runs when it wants one.
 func (i *isolation) environment() []string {
-	return []string{
+	env := []string{
 		"GIT_CONFIG_GLOBAL=" + i.configPath,
 		"GIT_CONFIG_NOSYSTEM=1",
 	}
+
+	// GIT_CONFIG_COUNT and its numbered pairs are git's documented environment
+	// spelling of `-c`, available since git 2.31 and so below the git floor.
+	// An empty `credential.helper` resets the list to empty, which is what the
+	// first pair is for; the second is the only helper left standing.
+	pinned := [][2]string{
+		{"credential.helper", ""},
+		{"credential.helper", i.helper},
+	}
+	env = append(env, "GIT_CONFIG_COUNT="+strconv.Itoa(len(pinned)))
+	for n, setting := range pinned {
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", n, setting[0]),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", n, setting[1]),
+		)
+	}
+	return env
 }
 
 func (i *isolation) close() error {

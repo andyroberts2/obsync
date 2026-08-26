@@ -253,11 +253,20 @@ _Avoid_: token, secret, password file
 
 **Private git config**:
 The per-process `GIT_CONFIG_GLOBAL` obsync writes at startup and every git it
-runs reads — the commit identity, the credential helper, a forced `core.askPass`
-and the two integrity settings. Outranked by the vault's own `.git/config`,
-deliberately: that is the escape hatch a repo carrying legacy-malformed objects
-uses, and the vault's config is the human's file, which obsync only ever reads.
+runs reads — the commit identity, a forced `core.askPass` and the two integrity
+settings. Outranked by the vault's own `.git/config`, deliberately: that is the
+escape hatch a repo carrying legacy-malformed objects uses, and the vault's
+config is the human's file, which obsync only ever reads.
 _Avoid_: global config, gitconfig, git settings
+
+**Credential isolation**:
+The private git config plus the one setting that cannot live in it — the
+credential helper, which git accumulates rather than overrides, and which is
+therefore pinned per invocation after emptying the list. That single key is the
+one thing the vault's own `.git/config` does not outrank, because a second
+helper there is not a human overriding obsync but a human's config being handed
+obsync's credential.
+_Avoid_: credential setup, git isolation, helper config
 
 **Configured remote**:
 The normalised host-and-path pair obsync was told to sync with, and the thing the

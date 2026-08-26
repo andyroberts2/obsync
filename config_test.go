@@ -423,6 +423,29 @@ func TestACredentialFileThatCannotBeReadIsAConfigErrorAndExits(t *testing.T) {
 	}
 }
 
+// The other side of the table above, and the reason it has to be stated rather
+// than left implied: Docker Swarm and Kubernetes both mount a secret as a
+// symlink into a directory of them, so the shape obsync is most likely to be
+// handed in production is not a plain regular file. A shape check tightened to
+// look at the link rather than what it points at would refuse every one of
+// those deployments at startup, by exiting 1 (§8).
+func TestACredentialFileMountedAsASymlinkIsAnOrdinaryCredentialFile(t *testing.T) {
+	t.Parallel()
+
+	link := filepath.Join(t.TempDir(), "token")
+	if err := os.Symlink(credentialFile(t, "a-token"), link); err != nil {
+		t.Fatalf("mounting the credential file as a symlink: %v", err)
+	}
+
+	loop := startLoop(t, "OBSYNC_REPO=https://github.com/owner/vault.git", "OBSYNC_TOKEN_FILE="+link)
+	loop.awaitLine(startupLine)
+	if !loop.running() {
+		t.Errorf("obsync did not start with a credential file mounted as a symlink, which is what "+
+			"a Docker or Kubernetes secret is; it said:\n%s", loop.stderr())
+	}
+	loop.stopAndWait()
+}
+
 // A size takes a human suffix and never raw bytes (§8), and the startup line
 // echoes it back in the same form so that what an operator set and what obsync
 // resolved are comparable at a glance.
