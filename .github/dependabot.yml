@@ -1,0 +1,27 @@
+# Every pin in this project is meant to move deliberately rather than never
+# (§12): a base image digest that is bumped by nobody is a vault sidecar sitting
+# on an unpatched base.
+version: 2
+
+updates:
+  # Two direct dependencies today. A Dependabot PR that adds a third is the same
+  # change as a human adding one, and answers to the same argument.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+
+  # The base and builder images are digest-pinned, not tag-pinned — Alpine
+  # repoints a release tag on every patch, git included — so this is the only
+  # thing that moves them. A base CVE bump is a patch release.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Actions are SHA-pinned in the workflows, which has the same consequence:
+  # without this they never move.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

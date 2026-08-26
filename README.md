@@ -13,9 +13,11 @@ one-shot script with no daemon, debounce, or credential handling.
 
 ## Status
 
-**Design phase.** Nothing is implemented yet. The design is being worked as a
+**Early implementation, and nothing syncs yet.** The design is settled and
+written up as one spec, [#21](../../issues/21), which was worked as a
 [wayfinder map](../../issues?q=label%3Awayfinder%3Amap) — a tracked set of
-decision tickets, resolved one at a time until the spec is ready to build from.
+decision tickets, resolved one at a time. What exists today is the project
+skeleton: a version-stamped binary and a green CI.
 
 ## Reference deployment
 
@@ -41,4 +43,15 @@ Prior art and constraints, gathered before any design decisions were made:
 
 ## Licence
 
-Not yet chosen.
+[Apache-2.0](LICENSE), for the whole repo rather than dual-licensed. It is the
+licence of the `kubernetes/git-sync` credential-isolation code obsync
+transcribes verbatim into one quarantined file, and it carries a patent grant,
+which is not nothing for something handed a write-scoped credential.
+
+## Contributing
+
+obsync is **stdlib plus exactly two direct dependencies** — a filesystem-
+notification library, and `golang.org/x/sys` for `flock` and `statfs`. A third
+is not forbidden, it is argued for: the commit that adds it says what stdlib
+could not do. The rule is written down in `go.mod`, where a third dependency
+would be added, and the test suite fails if the count moves.
