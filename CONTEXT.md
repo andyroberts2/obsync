@@ -250,6 +250,8 @@ _Avoid_: check, guard, precondition, validation
 A sync run that gives up before changing anything, leaving the next run to try
 again. Distinct from a freeze: nothing is wrong with the vault or the remote,
 this pass simply lost a race. Never reported — a transient loss is not news.
+Silent, but not unrecorded: consecutive aborts in the local half are what the
+local failure streak counts.
 _Avoid_: failed run, retry, skipped run
 
 **Vault sentinel**:
@@ -273,11 +275,47 @@ running process: a restart cannot clear it, and a human clears it deliberately
 by deleting it once the tree is recovered.
 _Avoid_: latch, quarantine, marker
 
+### Damage
+
+**Damaged repo**:
+A repo obsync can no longer read — a corrupt or empty object, a truncated
+index, a ref pointing at nothing. Categorically unlike the states the gates
+catch: it is never a cheap conclusive fact, only something a command runs into,
+and waiting does not repair it. obsync detects it by working, not by checking:
+every sync run already reads exactly the objects obsync depends on, which is a
+proportional integrity check no scan of the whole repo improves on.
+_Avoid_: corruption, broken repo, bad repo
+
+**Local failure streak**:
+The count of consecutive sync runs whose local half failed, whatever the stated
+reason. The only thing permitted to conclude that a failure is permanent —
+git's own words may *name* a failure, but only persistence may *escalate* one,
+so behaviour never hangs on prose written for humans. Reset by any run whose
+local half completes.
+_Avoid_: retry count, error count, failure counter
+
+**Derived state**:
+Repository state obsync may discard because it holds no history — the index,
+and nothing else. Where the never-repair rule is drawn: obsync may discard
+derived state, never history. This is the whole difference between rebuilding
+an index, which loses only work obsync would have committed anyway, and
+re-cloning, which throws away the unpushed commits obsync exists to have made.
+_Avoid_: cache, scratch state, rebuildable state
+
+**Probe**:
+The single read-only look at the vault a frozen obsync takes each tick, to find
+out whether the damage is still there. Every other freeze self-clears by
+re-checking a gate; this is the one that self-clears by retrying the work, so
+the probe stands in for a gate that cannot exist.
+_Avoid_: retry, health check, poll
+
 ### Freezes
 
 **Full freeze**:
 obsync stops touching the repo entirely — no commits, no network. Reserved for
-states where even committing would do the wrong thing.
+states where committing would do the wrong thing, or is no longer possible at
+all. Released by whichever fact put obsync there ceasing to be true: a gate
+that starts passing again, or a probe that succeeds.
 _Avoid_: halt, stop, lock
 
 **Network freeze**:
