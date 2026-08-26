@@ -237,6 +237,14 @@ container handed nonsense cannot be repaired in place, and its operator needs it
 to fail visibly.
 _Avoid_: startup failure, validation error, fatal error
 
+**Startup line**:
+The single line obsync logs once it has resolved its configuration, naming
+every knob it ended up with — defaulted or set — and never the credential. It
+is what an operator diffs against the declared surface to find out what obsync
+thinks it was told, which is why it carries the knobs it defaulted as well as
+the ones it was given.
+_Avoid_: banner, config dump, startup echo
+
 **Credential file**:
 The file the remote's secret is read from — re-read every time git asks for it,
 rather than held from startup or cached for the life of a run. What makes a rotated credential recover on

@@ -17,7 +17,9 @@ one-shot script with no daemon, debounce, or credential handling.
 written up as one spec, [#21](../../issues/21), which was worked as a
 [wayfinder map](../../issues?q=label%3Awayfinder%3Amap) — a tracked set of
 decision tickets, resolved one at a time. What exists today is the project
-skeleton: a version-stamped binary and a green CI.
+skeleton — a version-stamped binary and a green CI — plus the config surface:
+obsync reads its nine environment variables, says in one line what it thinks it
+was told, refuses nonsense it can judge from that block alone, and waits.
 
 ## Reference deployment
 
