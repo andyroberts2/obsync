@@ -13,6 +13,14 @@ import (
 //
 // go.mod is parsed by hand rather than with golang.org/x/mod, which would make
 // the file that records the two-dependency rule the file that broke it.
+//
+// It is read here, in process, and that is load-bearing rather than incidental:
+// `go test` keys its result cache on the files a test itself opens, so
+// os.ReadFile("go.mod") makes a changed go.mod re-run these tests. Shelling out
+// to `go mod edit -json` reads the same file more accurately and hides the read
+// from that cache — measured: after one green run, adding a toolchain directive
+// and re-running returns a cached pass. A guard that goes stale on the one edit
+// it exists to catch is worse than no guard, so the hand parser stays.
 
 func TestGoModDeclaresAtMostTwoDirectDependencies(t *testing.T) {
 	t.Parallel()

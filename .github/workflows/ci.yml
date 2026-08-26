@@ -13,9 +13,13 @@ on:
 permissions:
   contents: read
 
+# Superseded PR runs are cancelled; a run on main never is. main's verdict
+# belongs to the commit sitting on it, and cancelling one leaves a commit
+# nothing ever checked — which is the state this workflow exists to make
+# impossible.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:

@@ -23,7 +23,9 @@ ARG GIT_FLOOR_VERSION=2.38.5
 # measurements were taken on. In CI this point is *derived* from the base image
 # (`git --version` inside it) rather than declared, so it follows the digest
 # bump automatically; here it has to be a number, so keep it in step with
-#   docker run --rm alpine:3.23 git --version
+#   docker run --rm alpine:3.23 sh -c 'apk add --no-cache git >/dev/null && git --version'
+# The bare `git --version` form does not work: the base image carries no git,
+# which is why the shipped image installs it.
 ARG GIT_CURRENT_VERSION=2.52.0
 
 # Pinned so a lint failure is a code change, never a silent tool bump.
