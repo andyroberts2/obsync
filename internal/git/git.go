@@ -23,7 +23,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -54,12 +53,18 @@ type Repo struct {
 	// git says it should rather than as obsync assumed.
 	vault string
 
-	// configDir holds the private git configuration, and is removed by Close.
-	// It sits outside the vault deliberately: bootstrap has to configure git
-	// before there is a .git to write into (#26), and anything obsync wrote
-	// inside the vault would be an owned path it would then have to declare.
-	configDir  string
-	configPath string
+	// isolation is the credential isolation every git here runs inside: the
+	// private git configuration, obsync's own credential helper, and the
+	// forced askpass. It is transcribed from kubernetes/git-sync and
+	// quarantined in isolation.go (§12).
+	isolation *isolation
+
+	// credentialEnvironment is the resolved credential file and username, put
+	// in the environment of every git so that the credential helper git starts
+	// answers with what this obsync is running on (§8). It is never the
+	// credential itself: obsync does not read that file, the helper does, when
+	// git asks.
+	credentialEnvironment []string
 
 	log   *slog.Logger
 	clock clock.Clock
@@ -72,28 +77,28 @@ type Repo struct {
 // that, per run, and they are #32. What it does is fail early and by name when
 // the vault path is not a directory obsync can see at all, because every other
 // failure below it would otherwise present as a chdir error from git.
-func Attach(vaultPath string, identity config.CommitIdentity, log *slog.Logger, clk clock.Clock) (*Repo, error) {
-	info, err := os.Stat(vaultPath)
+func Attach(cfg config.Config, log *slog.Logger, clk clock.Clock) (*Repo, error) {
+	info, err := os.Stat(cfg.VaultPath)
 	if err != nil {
-		return nil, fmt.Errorf("the vault at %q cannot be read: %w", vaultPath, err)
+		return nil, fmt.Errorf("the vault at %q cannot be read: %w", cfg.VaultPath, err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("the vault at %q is not a directory", vaultPath)
+		return nil, fmt.Errorf("the vault at %q is not a directory", cfg.VaultPath)
 	}
 
-	dir, err := os.MkdirTemp("", "obsync-git-config")
+	credentialIsolation, err := newIsolation()
 	if err != nil {
-		return nil, fmt.Errorf("creating obsync's private git configuration: %w", err)
+		return nil, err
 	}
 
 	repo := &Repo{
-		vault:      vaultPath,
-		configDir:  dir,
-		configPath: filepath.Join(dir, "config"),
-		log:        log,
-		clock:      clk,
+		vault:                 cfg.VaultPath,
+		isolation:             credentialIsolation,
+		credentialEnvironment: cfg.CredentialEnvironment(),
+		log:                   log,
+		clock:                 clk,
 	}
-	if err := repo.writeConfig(identity); err != nil {
+	if err := repo.writeConfig(cfg.CommitIdentity); err != nil {
 		_ = repo.Close()
 		return nil, err
 	}
@@ -102,7 +107,7 @@ func Attach(vaultPath string, identity config.CommitIdentity, log *slog.Logger, 
 
 // Close removes the private git configuration. A Repo is unusable afterwards.
 func (r *Repo) Close() error {
-	return os.RemoveAll(r.configDir)
+	return r.isolation.close()
 }
 
 // writeConfig writes the per-process GIT_CONFIG_GLOBAL of §1.
@@ -115,28 +120,27 @@ func (r *Repo) Close() error {
 // decision as what is not:
 //
 //   - the commit identity, which is where provenance lives (§2);
-//   - core.askPass, forced, so an interactive prompt can never hang the loop —
-//     git runs it through a shell and true produces an empty credential, which
-//     fails fast instead of waiting on a terminal that is not there;
 //   - fetch.fsckObjects, the one integrity check proportional to what arrived
 //     rather than to the size of the repo (§7);
-//   - gc.autoDetach off, which forbids a detached background repack (§7).
+//   - gc.autoDetach off, which forbids a detached background repack (§7);
+//   - the credential isolation's own two settings — obsync as its own
+//     credential helper, and a forced core.askPass — which are transcribed and
+//     therefore quarantined in isolation.go (§12).
 //
 // Deliberately absent: any merge strategy, so a real conflict is a real
-// conflict resolved by §4's rule rather than a silent -X ours; gc.auto, which
-// keeps its default; and credential.helper, which is the credential path's own
-// slice (#36).
+// conflict resolved by §4's rule rather than a silent -X ours; and gc.auto,
+// which keeps its default.
 func (r *Repo) writeConfig(identity config.CommitIdentity) error {
-	for _, setting := range [][2]string{
+	settings := [][2]string{
 		{"user.name", identity.Name},
 		{"user.email", identity.Email},
-		{"core.askPass", "true"},
 		{"fetch.fsckObjects", "true"},
 		{"gc.autoDetach", "false"},
-	} {
+	}
+	for _, setting := range append(settings, r.isolation.settings()...) {
 		if _, err := r.run(invocation{
-			dir:  r.configDir,
-			args: []string{"config", "--file", r.configPath, "--replace-all", setting[0], setting[1]},
+			dir:  r.isolation.dir,
+			args: []string{"config", "--file", r.isolation.configPath, "--replace-all", setting[0], setting[1]},
 		}); err != nil {
 			return fmt.Errorf("writing obsync's private git configuration: %w", err)
 		}
@@ -412,24 +416,28 @@ func (r *Repo) killGroup(cmd *exec.Cmd, waited <-chan error) {
 // Inherited GIT_* variables are dropped rather than passed through: git's
 // behaviour has to come from obsync's argv and obsync's configuration, and a
 // GIT_DIR or a GIT_ASKPASS the container happened to be started with would
-// quietly make a run mean something else. Everything else survives, because ssh
-// reaches a key through HOME and that is how a key arrives (§8).
+// quietly make a run mean something else. Inherited OBSYNC_* variables are
+// dropped for the same reason one level along: the credential helper git starts
+// is obsync reading its own config surface, and it must read the values this
+// obsync resolved rather than the block it resolved them from — which may hold
+// a name obsync warned about or a value it refused. Everything else survives,
+// because ssh reaches a key through HOME and that is how a key arrives (§8).
 func (r *Repo) env() []string {
 	inherited := os.Environ()
-	env := make([]string, 0, len(inherited)+5)
+	env := make([]string, 0, len(inherited)+8)
 	for _, entry := range inherited {
-		if strings.HasPrefix(entry, "GIT_") {
+		if strings.HasPrefix(entry, "GIT_") || strings.HasPrefix(entry, "OBSYNC_") {
 			continue
 		}
 		env = append(env, entry)
 	}
-	return append(env,
+	env = append(env,
 		"LC_ALL=C",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_OPTIONAL_LOCKS=0",
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL="+r.configPath,
 	)
+	env = append(env, r.isolation.environment()...)
+	return append(env, r.credentialEnvironment...)
 }
 
 // ErrNetworkDeadline is a network git that ran past obsync's 120s deadline and

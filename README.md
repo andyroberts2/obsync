@@ -20,9 +20,11 @@ decision tickets, resolved one at a time. What exists today is the project
 skeleton, the config surface — nine environment variables, one required, echoed
 in a startup line — and the walking skeleton of the sync loop: a wake-up makes
 obsync ask git what changed in the vault, commit it as one commit whose message
-says what changed, and push it to the tracked branch. The **declared surface** —
-everything a version number will make a promise about — is written down ahead of
-the code that implements it.
+says what changed, and push it to the tracked branch. That push authenticates:
+obsync is its own git credential helper, so the token file an operator mounts is
+re-read every time git asks for it and rotating it needs no restart. The
+**declared surface** — everything a version number will make a promise about —
+is written down ahead of the code that implements it.
 
 Not yet: the tick and the quiet window, the safety interlocks, the settle guard,
 conflicts, the attention note, the status file and the container image. obsync

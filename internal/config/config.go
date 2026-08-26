@@ -270,6 +270,31 @@ func (c Config) attrs() []slog.Attr {
 	}
 }
 
+// CredentialEnvironment is the two variables a credential-helper invocation
+// reads, resolved: the credential file's path and the username that goes
+// beside it (§8).
+//
+// It is what obsync puts in the environment of every git it runs, because the
+// helper git starts is obsync reading its own config surface in a process it
+// did not resolve one for. Passing the resolved pair rather than letting the
+// container's own block through means the helper answers with what this obsync
+// is running on, and never with a value obsync itself refused.
+func (c Config) CredentialEnvironment() []string {
+	return []string{
+		tokenFileVar + "=" + c.CredentialFile,
+		usernameVar + "=" + c.Username,
+	}
+}
+
+// CredentialFrom reads back what CredentialEnvironment wrote. The username
+// keeps its default here as it does everywhere else on the config surface, so
+// that a credential-helper invocation resolves the same value whoever started
+// it.
+func CredentialFrom(environ []string) (credentialFile, username string) {
+	set := block(environ)
+	return set[tokenFileVar], valueOr(set, usernameVar, defaultUsername)
+}
+
 // block reads the OBSYNC_* half of an environment block.
 //
 // An empty value is dropped rather than kept, so `OBSYNC_USERNAME=` in a
