@@ -168,6 +168,16 @@ blob a merge can invent. Never applied to bytes the remote already holds, which
 is why a conflict copy is exempt at any size.
 _Avoid_: file size limit, max blob
 
+**Owned path**:
+A path obsync declared it owns and rewrites wholesale rather than edits — the
+repo's exclude file, obsync's own directory and refs under `.git/`, and the
+attention note. Its counterpart is a file the *human* owns, which obsync reads
+and never writes: the repo's config, holding their identity and their remote,
+and the vault's `.gitignore`. The distinction is what makes removing obsync a
+deletion rather than an untangling, and it is the honest form of "leaves no
+trace" — obsync leaves plenty, all of it in namespaces it announced.
+_Avoid_: internal file, private file, obsync file
+
 **Committable set**:
 The paths a sync run would actually stage, once the ignore floor, refused paths,
 and unsettled paths are taken out. What "dirty" means to the loop: a tree
@@ -396,3 +406,21 @@ because being wrong about it is more expensive than the duplication. Quarantined
 to a file of its own under its original licence and copyright, which is what
 keeps it auditable as well as compliant.
 _Avoid_: vendored code, copied code, fork
+
+### Documentation
+
+**Load-bearing documentation**:
+A documented line that is the only thing standing where the design deliberately
+declined to put code. The test is *the code chose not to do this*, never *this
+is important* — which is why it names the decision that put it there, is never
+cut for brevity, and is a defect rather than a gap when missing. Marked visibly
+and in place: a class only the maintainer can see does half its work, and the
+operator has a right to know which lines are the ones left to them.
+_Avoid_: important note, warning, caveat, gotcha
+
+**Reference compose**:
+The compose file obsync publishes — normative rather than exemplary, because it
+is the one document whose correctness an operator inherits by *copying* instead
+of by reading. That is also why it is exercised in CI rather than reviewed:
+load-bearing prose can only be read, a load-bearing file can be run.
+_Avoid_: example compose, sample, template, quickstart
