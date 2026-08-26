@@ -1,0 +1,61 @@
+# The PR and main half of the pipeline (§12): vet, lint and the test suite.
+# The tag half — buildx across amd64+arm64, attestation and the release — is a
+# separate workflow, and lands with the release slice.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# The workflow reads the source and nothing else. Write scopes live in the
+# release job when there is one, never at workflow level (§12).
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Vet, lint and test
+    runs-on: ubuntu-latest
+    steps:
+      # Third-party actions are SHA-pinned: a tag is a mutable pointer, and this
+      # workflow builds a container that will hold a write-scoped credential.
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # go-version-file rather than a version literal, so the Go the workflow
+      # runs is the Go go.mod asks for and there is one number, not two.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # Pinned to the version the sandbox image carries, so a lint failure in
+      # CI is one a contributor can reproduce rather than discover.
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.1
+
+      # obsync is one serialized loop and a watcher feeding a channel, so -race
+      # should never have anything to say; the day it does, it is right.
+      - name: Test
+        run: go test -race ./...

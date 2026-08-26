@@ -1,0 +1,19 @@
+# golangci-lint's configuration. CI and the AFK sandbox run the same version, so
+# a lint failure here is the same failure a contributor sees.
+#
+# Never weaken a rule to go green: a rule loosens only when the contract it
+# encoded genuinely changed, and the commit says so.
+version: "2"
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck and unused.
+  default: standard
+  enable:
+    # obsync classifies every failure into one of three tiers (§7) with typed
+    # sentinel errors and errors.Is/errors.As. Comparing wrapped errors with ==,
+    # or type-asserting past a wrap, silently drops a tier.
+    - errorlint
+
+formatters:
+  enable:
+    - gofmt
