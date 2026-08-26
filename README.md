@@ -19,7 +19,9 @@ written up as one spec, [#21](../../issues/21), which was worked as a
 decision tickets, resolved one at a time. What exists today is the project
 skeleton — a version-stamped binary and a green CI — plus the config surface:
 obsync reads its nine environment variables, says in one line what it thinks it
-was told, refuses nonsense it can judge from that block alone, and waits.
+was told, refuses nonsense it can judge from that block alone, and waits. The
+**declared surface** — everything a version number will make a promise about —
+is written down ahead of the code that implements it.
 
 ## Reference deployment
 
@@ -30,6 +32,13 @@ recommends for git sync ([ignis#14](https://github.com/Nystik-gh/ignis/issues/14
 
 obsync is not coupled to ignis, though — it assumes an Obsidian vault on a
 mounted volume, and ignis is the documented reference stack.
+
+## Documentation
+
+- [`docs/interface.md`](docs/interface.md) — the declared surface: the nine
+  environment variables, the four subcommands, the health contract, and what
+  obsync writes into your vault. It is what SemVer is measured over, and what
+  every release's "Surface changes" note is about.
 
 ## Research
 
