@@ -1,1 +1,77 @@
+# obsync — repository ignores.
+#
+# This governs obsync's own source repo. It has nothing to do with the ignore
+# floor, which obsync writes into a vault's exclude file at runtime (CONTEXT.md).
+#
+# .sandcastle/ carries its own .gitignore for its own artefacts; nothing here
+# duplicates it.
+
+# --- Build output ---------------------------------------------------------
+# The binary is `obsync`, built at the repo root by `go build`. Root-anchored
+# so a package or directory of that name is never caught.
+/obsync
+/obsync.exe
+/bin/
+/dist/
+
+# Go compiler leftovers. CGO is off for the static binary, but a stray cgo
+# build still drops these.
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+
+# --- Tests, coverage, profiles -------------------------------------------
+# `go test -c` binaries, and the working repos a seam-1 test leaves behind if
+# it dies before t.TempDir cleanup.
+*.test
+coverage.out
+coverage.html
+*.cover
+*.prof
+cpu.out
+mem.out
+block.out
+mutex.out
+trace.out
+__debug_bin*
+
+# --- Go module tooling ----------------------------------------------------
+# Single-module repo: a go.work is always someone's local override.
+go.work
+go.work.sum
+vendor/
+
+# --- Release artefacts ----------------------------------------------------
+# Produced by the tag pipeline, attached to the GitHub Release, never committed.
+*.sbom.json
+sbom.spdx.json
+*.intoto.jsonl
+
+# --- Credentials ----------------------------------------------------------
+# obsync is handed a write-scoped token, and local runs of the seam-2 image
+# test make real credential files. None of them belong in a commit.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!testdata/**/*.key
+.netrc
+.git-credentials
+id_rsa
+id_ed25519
+
+# --- Local scratch --------------------------------------------------------
 .scratch/
+.claude/worktrees/
+
+# --- Editors and OS -------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
