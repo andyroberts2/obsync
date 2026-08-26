@@ -1,0 +1,7 @@
+.env
+logs/
+worktrees/
+
+# Environment-specific CA certs (e.g. proxy root CA) baked into the image —
+# infra-specific, not committed. The certs/ dir + .gitkeep are committed.
+certs/*.crt

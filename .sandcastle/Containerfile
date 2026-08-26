@@ -1,0 +1,179 @@
+# obsync's AFK sandbox. obsync is a single static Go binary that drives `git`
+# as a subprocess and ships as a container image, so this image carries exactly
+# three things an agent cannot work without: a Go toolchain, *two* real gits,
+# and a working Docker socket for the image seam.
+#
+# Deliberately absent: node, uv, pre-commit, Playwright, Postgres, Redis. This
+# repo has no JavaScript, no Python project and no database. An agent that
+# reaches for them is off the map.
+FROM golang:1.25-bookworm
+
+# CI runs a two-point git matrix, and **both points have to be reachable from
+# the sandbox** or the matrix is something an agent only finds out about in CI.
+# Debian bookworm's own git is 2.39.5 — one release above the floor and thirteen
+# below what ships — so neither point comes from apt. Both are source-built.
+#
+# The **floor** is the oldest git obsync promises to work on, fixed at 2.38 by
+# `git merge-tree --write-tree`, which landed there and which §4's whole
+# out-of-tree merge stands on. It tests the *promise*. Bump it only alongside
+# the repo's single-source git-floor file — see CODING_STANDARDS.md.
+ARG GIT_FLOOR_VERSION=2.38.5
+# The **current** point is the git the shipped image actually has — whatever
+# `alpine:3.23` carries. It tests the *product*, and it is the one the spec's
+# measurements were taken on. In CI this point is *derived* from the base image
+# (`git --version` inside it) rather than declared, so it follows the digest
+# bump automatically; here it has to be a number, so keep it in step with
+#   docker run --rm alpine:3.23 git --version
+ARG GIT_CURRENT_VERSION=2.52.0
+
+# Pinned so a lint failure is a code change, never a silent tool bump.
+ARG GOLANGCI_LINT_VERSION=v2.13.1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  # A git to bootstrap with. It is shadowed on PATH by the source-built
+  # `/opt/git/current` below — bookworm's 2.39.5 is not a point on the matrix
+  # and must never be what a test happens to run against.
+  git \
+  curl \
+  jq \
+  ca-certificates \
+  gnupg \
+  ripgrep \
+  less \
+  # Build toolchain for the source-built git floor below.
+  build-essential \
+  gettext \
+  libcurl4-openssl-dev \
+  libexpat1-dev \
+  libssl-dev \
+  libz-dev \
+  # `inotifywait` and `ps`. §1's watcher is inotify-per-directory with an
+  # ENOSPC degrade path, and §1's subprocess rule kills a *process group*.
+  # Both are things an agent should be able to observe directly rather than
+  # reason about — `/proc/sys/fs/inotify/max_user_watches` and `ps -o pgid`
+  # are facts, and without these the answer comes back as a missing command.
+  inotify-tools \
+  procps \
+  && rm -rf /var/lib/apt/lists/*
+
+# Trust extra CA certificates before any further HTTPS. This environment may run
+# behind an intercepting (MITM) proxy whose self-signed root CA isn't in the base
+# image's trust store — without it, HTTPS to intercepted domains (the Claude Code
+# installer at claude.ai, and api.anthropic.com at runtime) fails verification.
+# Drop any *.crt into .sandcastle/certs/ (git-ignored, infra-specific); in a
+# non-proxied environment the dir is empty and this is a harmless no-op.
+COPY certs/ /tmp/extra-ca/
+RUN cp -f /tmp/extra-ca/*.crt /usr/local/share/ca-certificates/ 2>/dev/null || true; \
+    update-ca-certificates || true; \
+    rm -rf /tmp/extra-ca
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+
+# Build both matrix points into their own prefixes. A prefix install carries its
+# own libexec, so putting `<prefix>/bin` at the front of PATH swaps the *whole*
+# git — plumbing, remote helpers and all — which is the only way a matrix point
+# tests anything. NO_TCLTK because gitk is not a thing obsync drives.
+#
+# `/opt/git/current` goes on PATH below and becomes the sandbox's plain `git`,
+# so the default already matches the product. The floor is reached explicitly:
+#   PATH="$GIT_FLOOR:$PATH" go test ./...
+RUN set -eux; \
+    for v in "${GIT_CURRENT_VERSION}" "${GIT_FLOOR_VERSION}"; do \
+      curl -fsSL "https://mirrors.edge.kernel.org/pub/software/scm/git/git-${v}.tar.gz" -o /tmp/git.tar.gz; \
+      mkdir -p /tmp/git-src; tar -xzf /tmp/git.tar.gz -C /tmp/git-src --strip-components=1; \
+      make -C /tmp/git-src -j"$(nproc)" prefix="/opt/git/${v}" NO_TCLTK=YES all; \
+      make -C /tmp/git-src prefix="/opt/git/${v}" NO_TCLTK=YES install; \
+      rm -rf /tmp/git-src /tmp/git.tar.gz; \
+    done; \
+    ln -s "/opt/git/${GIT_FLOOR_VERSION}" /opt/git/floor; \
+    ln -s "/opt/git/${GIT_CURRENT_VERSION}" /opt/git/current; \
+    /opt/git/floor/bin/git --version; \
+    /opt/git/current/bin/git --version
+
+# Install Docker CLI + Compose / Buildx plugins (not the daemon — main.mts mounts
+# the host's rootless Podman socket at /var/run/docker.sock, and Podman serves a
+# Docker-compatible API). All three are load-bearing here: seam 2 builds the
+# image and runs it at an arbitrary UID, the reference `compose.yaml` is
+# exercised rather than merely read (§12), and the release build is buildx
+# multi-arch.
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian bookworm stable" \
+  | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+  && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin docker-buildx-plugin \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+  | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+  | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+  && apt-get update && apt-get install -y --no-install-recommends gh \
+  && rm -rf /var/lib/apt/lists/*
+
+# The linter, into a root-owned prefix so every user gets it without a rc file.
+RUN curl -fsSL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+  | sh -s -- -b /usr/local/bin "${GOLANGCI_LINT_VERSION}" \
+  && golangci-lint --version
+
+# Build-args for UID/GID alignment
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+
+# The golang base has no non-root user; make one. Everything below runs as it,
+# and the Go caches live in its home so a reused worktree keeps a warm build.
+RUN groupadd -g $AGENT_GID agent \
+  && useradd -m -u $AGENT_UID -g $AGENT_GID -s /bin/bash -d /home/agent agent
+
+# A login shell (`bash -l`) sources /etc/profile and rebuilds PATH from scratch,
+# which would drop ~/.local/bin (claude) and Go's bin dir. Put them back the
+# same way so the toolchain is on PATH whichever kind of shell a tool spawns.
+RUN printf 'export PATH="/opt/git/current/bin:/home/agent/.local/bin:/usr/local/go/bin:/home/agent/go/bin:$PATH"\n' \
+  > /etc/profile.d/10-sandcastle-path.sh
+
+USER ${AGENT_UID}:${AGENT_GID}
+
+ENV PATH="/opt/git/current/bin:/home/agent/.local/bin:/home/agent/go/bin:/usr/local/go/bin:$PATH" \
+    GOPATH=/home/agent/go \
+    GOCACHE=/home/agent/.cache/go-build \
+    GOMODCACHE=/home/agent/go/pkg/mod \
+    # §12: no toolchain directive in `go.mod`, because it triggers a download
+    # that makes a pinned builder not pinned. `local` makes that rule enforce
+    # itself — a stray toolchain line fails here loudly instead of passing in
+    # the sandbox and breaking the release build.
+    GOTOOLCHAIN=local \
+    # Both matrix points are right here. `git` is already the current one;
+    # `$GIT_FLOOR` makes the floor one word to reach.
+    GIT_FLOOR=/opt/git/floor/bin \
+    GIT_CURRENT=/opt/git/current/bin
+
+# Install Claude Code CLI. `curl | bash` hides a failed download (bash just gets
+# empty stdin and exits 0), so assert the binary actually landed — a missing CA
+# / proxy issue then fails the build loudly instead of shipping a broken image.
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+  && test -x "$HOME/.local/bin/claude" \
+  || (echo "ERROR: Claude Code did not install — check HTTPS/proxy CA (see certs/)." >&2 && exit 1)
+
+# The skills the sandbox prompts actually name: implement-prompt.md requires
+# `/mattpocock-skills:implement`, review-prompt.md `/mattpocock-skills:code-review`
+# and merge-prompt.md `/mattpocock-skills:resolving-merge-conflicts`. Absent, every
+# agent improvises its own substitute and says so in its notes — so the review
+# axis this repo documents is not the one that runs. Installed at user scope so it
+# resolves from any working directory. The marketplace is added by HTTPS URL
+# rather than `owner/repo` shorthand, which resolves to SSH and has no key here.
+RUN claude plugin marketplace add https://github.com/anthropics/claude-plugins-official.git \
+  && claude plugin install mattpocock-skills@claude-plugins-official \
+  && claude plugin list | grep -q mattpocock-skills
+
+# obsync's tests drive real git against real repos and its bare remote is a
+# `file://` bare repo — which means the sandbox's own git needs an identity and
+# needs to not refuse a repo it does not own. Neither belongs in obsync's code
+# (§8: obsync never writes the vault's `.git/config`); both are facts about a
+# throwaway container.
+RUN git config --global user.name "sandcastle agent" \
+  && git config --global user.email "agent@obsync.invalid" \
+  && git config --global init.defaultBranch main \
+  && git config --global --add safe.directory '*'
+
+WORKDIR /home/agent
+
+ENTRYPOINT ["sleep", "infinity"]

@@ -67,6 +67,12 @@ id_ed25519
 .scratch/
 .claude/worktrees/
 
+# --- AFK loop tooling -----------------------------------------------------
+# The root package.json exists only to pin the sandcastle runner (see its
+# description). Its install tree is not part of obsync; the lockfile is
+# committed so an unattended run resolves the same tool every time.
+node_modules/
+
 # --- Editors and OS -------------------------------------------------------
 .idea/
 .vscode/
