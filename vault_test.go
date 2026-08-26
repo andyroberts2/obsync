@@ -119,36 +119,63 @@ func newVault(t *testing.T) *vaultEnv {
 	return env
 }
 
+// The timing constants a test may not read from obsync, restated here on
+// purpose: a test that asserts 120s by importing the constant that sets it
+// asserts nothing. These are §1's and §2's numbers, and each is written out at
+// the assertion that uses it.
+const (
+	networkDeadline  = 120 * time.Second
+	shutdownDeadline = 30 * time.Second
+	quietWindow      = 10 * time.Second
+	maxWaitCap       = 5 * time.Minute
+	tick             = 60 * time.Second
+	tickJitter       = 6 * time.Second
+)
+
 // wake is one wake-up, and the loop's unit of work: obsync performs exactly one
 // sync run for it and this returns when that run is over.
 //
-// It is one whole turn of the loop, driven with its context already done —
-// which is what a SIGTERM arriving during startup is, and what §1 says obsync
-// does with one: refuse to start a new run, finish the current one, return.
-// Startup runs the loop immediately (§2), so that current run is the sync run
-// this wake-up is asking for.
+// It is the startup run — obsync runs the loop immediately and then falls into
+// its cadence (§2) — driven and then stopped, so a test that does not care when
+// obsync acts does not have to say. A test that does care turns the loop
+// instead and drives the clock.
 //
-// Driving it synchronously is what makes every test below deterministic: the
-// vault a run looks at is the vault the test finished building, never one it is
-// still writing.
+// Driving it this way is what makes every test below deterministic: the vault a
+// run looks at is the vault the test finished building, never one it is still
+// writing.
 func (e *vaultEnv) wake() {
 	e.t.Helper()
 
 	if e.stopped {
 		e.t.Fatal("this test woke obsync after stopping it; a stopped loop performs no more runs")
 	}
+	if e.turning {
+		e.t.Fatal("this loop is already turning; a turning loop is woken with watcherWake")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		e.syncLoop.Run(ctx)
+	}()
+
+	e.awaitIdle()
 	cancel()
-	e.syncLoop.Run(ctx)
+	select {
+	case <-finished:
+	case <-time.After(60 * time.Second):
+		e.t.Fatalf("obsync did not finish its run within 60s of a stop; it said:\n%s", e.log.String())
+	}
 }
 
 // turn leaves the loop running in the background, woken by the watcher's
-// channel, which is how obsync actually runs: a wake-up arrives, a run happens,
-// and nothing looks at the channel again until that run is over.
+// channel and by its own tick, which is how obsync actually runs: a wake-up
+// arrives or a deadline falls due, a run happens, and nothing is looked at
+// again until that run is over.
 //
-// It is what a test uses when it has to do something while a run is in flight —
-// advance the clock past a deadline, say — and it is stopped by the ordinary
-// stop, which is the SIGTERM path.
+// It returns while the startup run is still in flight, because that is what a
+// test driving a run that never finishes needs. A test that wants the vault
+// settled first says so with awaitIdle.
 func (e *vaultEnv) turn() {
 	e.t.Helper()
 
@@ -164,9 +191,52 @@ func (e *vaultEnv) turn() {
 	}()
 }
 
-// watcherWake hands the turning loop one wake-up. The channel is unbuffered, so
-// the send completes only when the loop comes back for it — which it does only
-// between runs, because only one sync run is ever in flight (§2).
+// awaitIdle blocks until obsync has finished whatever it was doing and is
+// waiting on the clock again. It is the handshake every timing assertion is
+// built on: time moves only when a test says so, and a test only says so once
+// obsync is waiting for it.
+//
+// The deadline it steps over is a git being timed out, taken out in the middle
+// of a run rather than between two. Told apart by length rather than by asking:
+// the tick is always in the running for the next thing due, so the loop never
+// waits longer than one, and the only deadline longer than a tick is the 120s a
+// network git gets.
+func (e *vaultEnv) awaitIdle() {
+	e.t.Helper()
+
+	limit := time.After(60 * time.Second)
+	for {
+		select {
+		case waited := <-e.clock.waits:
+			if waited > tick+tickJitter {
+				continue
+			}
+			return
+		case <-limit:
+			e.t.Fatalf("obsync did not come back to waiting on the clock within 60s; it said:\n%s", e.log.String())
+		}
+	}
+}
+
+// advance moves the fake clock forward by d and returns once obsync has
+// finished reacting to it. Moving past nothing returns immediately, which is
+// the whole of how a test asserts that obsync did not act early.
+func (e *vaultEnv) advance(d time.Duration) {
+	e.t.Helper()
+
+	if e.clock.advance(d) {
+		e.awaitIdle()
+	}
+}
+
+// turn starts the loop; watcherWake hands the turning loop one wake-up. The
+// channel is unbuffered, so the send completes only when the loop comes back
+// for it — which it does only between runs, because only one sync run is ever
+// in flight (§2).
+//
+// A wake-up does not start a run. It says something happened, never what, and
+// what it moves is the moment a run is due: ten seconds of quiet from here, or
+// the max-wait cap if the vault never gets there (§2).
 func (e *vaultEnv) watcherWake() {
 	e.t.Helper()
 
@@ -175,6 +245,22 @@ func (e *vaultEnv) watcherWake() {
 	case <-time.After(30 * time.Second):
 		e.t.Fatalf("obsync did not take a wake-up within 30s; it said:\n%s", e.log.String())
 	}
+	// The loop takes its next deadline out fresh after every wake-up, so
+	// waiting for that one is what makes the wake and the clock ordered rather
+	// than merely likely to be.
+	e.awaitIdle()
+}
+
+// sigterm is the signal without the wait: obsync refuses to start a new run and
+// finishes the one in flight, and the test stays free to drive the clock while
+// it does.
+func (e *vaultEnv) sigterm() {
+	e.t.Helper()
+
+	if !e.turning {
+		e.t.Fatal("nothing is turning to be stopped")
+	}
+	e.cancel()
 }
 
 // stop is SIGTERM: obsync refuses to start a new run, finishes the one in
@@ -232,6 +318,34 @@ func (e *vaultEnv) remoteFile(path string) string {
 		e.t.Fatalf("the remote holds no %q at its tip. obsync said:\n%s", path, e.log.String())
 	}
 	return out
+}
+
+// remoteHoldsYet and commitsSoFar look at the world without stopping obsync, so
+// that a test can go on driving the clock afterwards. They are safe for the
+// same reason every timing assertion in this suite is: advance and watcherWake
+// return only once obsync is waiting on the clock again, so nothing is in
+// flight while they read.
+func (e *vaultEnv) remoteHoldsYet(path string) bool {
+	e.t.Helper()
+
+	_, code := e.git(e.remote, "cat-file", "-e", "refs/heads/main:"+path)
+	return code == 0
+}
+
+func (e *vaultEnv) commitsSoFar(dir string) string {
+	e.t.Helper()
+
+	return strings.TrimSpace(e.mustGit(dir, "rev-list", "--count", "refs/heads/main"))
+}
+
+// runAlreadyStopped drives the loop with its context already done, which is a
+// SIGTERM that arrived before obsync performed a single run.
+func (e *vaultEnv) runAlreadyStopped() {
+	e.t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	e.syncLoop.Run(ctx)
 }
 
 // remoteHolds reports whether the remote's tip holds anything at a path, which
@@ -381,11 +495,19 @@ type fakeClock struct {
 	start   time.Time
 	now     time.Time
 	waiting []*sleeper
-	taken   int
+	taken   []time.Duration
 
-	// registered carries one value per deadline taken out, so a test can wait
-	// for obsync to be waiting rather than sleeping until it probably is.
-	registered chan struct{}
+	// live is the deadline obsync is currently waiting on, which is the last
+	// one it took out: the sync loop takes out exactly one at a time, and when
+	// a wake-up shortens it the shorter one is the one it now listens to. The
+	// one it stopped listening to is left in waiting, where firing it is
+	// harmless — nobody reads it — and the distinction is what lets a test know
+	// whether moving the clock woke obsync or moved past nothing.
+	live *sleeper
+
+	// waits carries one value per deadline taken out, in order, so a test can
+	// wait for obsync to be waiting rather than sleeping until it probably is.
+	waits chan time.Duration
 }
 
 type sleeper struct {
@@ -396,7 +518,7 @@ type sleeper struct {
 func newFakeClock() *fakeClock {
 	// A fixed instant, so nothing in a test depends on the day it runs.
 	start := time.Date(2026, 8, 24, 14, 3, 0, 0, time.UTC)
-	return &fakeClock{start: start, now: start, registered: make(chan struct{}, 64)}
+	return &fakeClock{start: start, now: start, waits: make(chan time.Duration, 1024)}
 }
 
 func (c *fakeClock) Now() time.Time {
@@ -409,11 +531,12 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	c.mu.Lock()
 	waiter := &sleeper{due: c.now.Add(d), ch: make(chan time.Time, 1)}
 	c.waiting = append(c.waiting, waiter)
-	c.taken++
+	c.taken = append(c.taken, d)
+	c.live = waiter
 	c.mu.Unlock()
 
 	select {
-	case c.registered <- struct{}{}:
+	case c.waits <- d:
 	default:
 	}
 	return waiter.ch
@@ -425,7 +548,7 @@ func (c *fakeClock) awaitDeadline(t *testing.T) {
 	t.Helper()
 
 	select {
-	case <-c.registered:
+	case <-c.waits:
 	case <-time.After(30 * time.Second):
 		t.Fatal("obsync took out no deadline within 30s")
 	}
@@ -451,12 +574,33 @@ func (c *fakeClock) advanceToNextDeadline(t *testing.T) {
 		}
 	}
 	c.now = next
+	c.fire()
+}
 
+// advance moves time forward by d, fires every deadline that falls due, and
+// reports whether the one obsync is actually waiting on was among them — which
+// is how a test knows whether to expect obsync to do anything at all.
+func (c *fakeClock) advance(d time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.now = c.now.Add(d)
+	live := c.live
+	c.fire()
+	return live != nil && c.live == nil
+}
+
+// fire delivers to every waiter that is due and drops it. It is called with the
+// lock held.
+func (c *fakeClock) fire() {
 	var still []*sleeper
 	for _, waiter := range c.waiting {
 		if waiter.due.After(c.now) {
 			still = append(still, waiter)
 			continue
+		}
+		if waiter == c.live {
+			c.live = nil
 		}
 		waiter.ch <- c.now
 	}
@@ -470,11 +614,29 @@ func (c *fakeClock) elapsed() time.Duration {
 	return c.now.Sub(c.start)
 }
 
-// deadlinesTaken is how many times obsync asked to be timed out. It is the
-// whole of §1's asymmetry expressed as a number: a run full of local git
-// commands and one network git takes exactly one.
-func (c *fakeClock) deadlinesTaken() int {
+// networkDeadlinesTaken is how many times obsync asked for a git to be timed
+// out. It is the whole of §1's asymmetry expressed as a number: a run full of
+// local git commands and one network git takes exactly one.
+//
+// Counted by duration, because obsync waits on the same clock for its cadence
+// as it times a git out with, and the two are different acts: the network
+// deadline is the only one that kills anything.
+func (c *fakeClock) networkDeadlinesTaken() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.taken
+
+	count := 0
+	for _, d := range c.taken {
+		if d == networkDeadline {
+			count++
+		}
+	}
+	return count
+}
+
+// waitsTaken is every duration obsync has waited on, in order.
+func (c *fakeClock) waitsTaken() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]time.Duration{}, c.taken...)
 }

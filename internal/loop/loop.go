@@ -11,11 +11,16 @@
 // between those steps — the gates (#32), the ignore floor and refused paths
 // (#28), the settle guard (#29), classification and the merge (#27, #30) — is a
 // rule added to a loop that already turns.
+//
+// When it turns is cadence.go: the quiet window, the max-wait cap, the jittered
+// tick and the network backoff, none of which is a knob (#25).
 package loop
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/andyroberts2/obsync/internal/clock"
 	"github.com/andyroberts2/obsync/internal/config"
@@ -31,9 +36,21 @@ type Loop struct {
 
 	// wakes is the watcher's channel, and the watcher's whole contribution: it
 	// says that something happened, never what (§2). A nil channel is a loop
-	// nothing wakes, which is what obsync is until the watcher (#39) and the
-	// tick (#25) exist to fill it.
+	// no watcher wakes, which is what obsync is until #39 — and, since the tick
+	// exists, that is tick-only mode rather than a loop nothing wakes at all.
 	wakes <-chan struct{}
+
+	// cadence is when this loop wakes and whether the run it wakes for may
+	// commit. It is state rather than timers: the loop asks it what is due and
+	// waits for that on the injected clock.
+	cadence cadence
+
+	// The network half's own state, and none of it gates the local half.
+	// backoff is the current wait, retryNetworkAt the moment it expires, and
+	// lastPush what the push floor is measured from.
+	backoff        time.Duration
+	retryNetworkAt time.Time
+	lastPush       time.Time
 
 	// repo and branch are resolved on the first run that can reach the vault
 	// and are then fixed for the process lifetime, which is what §3 requires
@@ -52,31 +69,64 @@ func New(cfg config.Config, log *slog.Logger, clk clock.Clock, wakes <-chan stru
 //
 // Startup runs the loop immediately and then falls into the ordinary cadence
 // (§2): the reason the tree is dirty at startup is that obsync was not
-// watching, so there is nothing an init phase would do differently.
+// watching, so there is nothing an init phase would do differently and there
+// are no init-phase knobs.
 //
 // A context that is done means SIGTERM, and SIGTERM means refuse to start a new
-// run and finish the current one (§1). It cannot interrupt a run: nothing below
-// this point takes a cancellable context, so a shutdown can never kill a git
-// halfway and manufacture a state no run would have produced.
+// run and finish the current one (§1) — including the startup run, which is a
+// new run like any other, so a container stopped seconds after it started
+// commits nothing. A run already under way is not interrupted: nothing below
+// this point can be cancelled except the one thing that can be waiting on the
+// outside world, which is a network git, and that is cut short at the shutdown
+// deadline rather than left to its own 120s.
 func (l *Loop) Run(ctx context.Context) {
-	l.syncRun()
+	for ctx.Err() == nil {
+		l.syncRun(ctx)
+
+		if !l.waitForNextRun(ctx) {
+			return
+		}
+	}
+}
+
+// waitForNextRun blocks until the next sync run is due, and reports false when
+// obsync is stopping instead.
+//
+// One timer, not two: the tick, the quiet window and the max-wait cap are three
+// deadlines and one wait, because every wake-up runs the whole loop (§2). A
+// wake-up from the watcher does not start a run — it moves the moment one is
+// due, which is what the quiet window is.
+//
+// A wake-up and a SIGTERM arriving together leave two cases of the select ready
+// and select picks between them at random, which is why the refusal is asked at
+// the top of Run rather than here: whichever case wins, the next run does not
+// start.
+func (l *Loop) waitForNextRun(ctx context.Context) bool {
 	for {
+		now := l.clock.Now()
+		due := l.cadence.nextRun()
+		if !now.Before(due) {
+			return true
+		}
+
+		// One deadline per turn of this wait, taken out fresh, because a
+		// wake-up moves what is due: the first wake-up of a burst brings the
+		// next run forward to the quiet window, and every wake-up after it
+		// pushes that window later. The deadline obsync is waiting on is
+		// therefore always the one it just computed, with nothing to keep in
+		// step with anything else.
+		expiry := l.clock.After(due.Sub(now))
+
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case _, open := <-l.wakes:
 			if !open {
-				return
+				return false
 			}
-			// A wake-up and a SIGTERM arriving together leaves both cases
-			// ready, and select picks between them at random — so "refuse to
-			// start a new run" (§1) has to be asked again here rather than
-			// left to the select that already answered it.
-			if ctx.Err() != nil {
-				return
-			}
+			l.cadence.woke(l.clock.Now())
+		case <-expiry:
 		}
-		l.syncRun()
 	}
 }
 
@@ -95,16 +145,31 @@ func (l *Loop) Close() error {
 // not fix a bad token, discards backoff state, and turns a diagnosable stuck
 // state into a crash loop (§2). So a failed run is logged and the loop keeps
 // turning, and the next wake-up starts fresh.
-func (l *Loop) syncRun() {
+func (l *Loop) syncRun(ctx context.Context) {
+	// The quiet window decides whether this run may commit, not whether it
+	// happens. Asked once, before the run, so that a run which takes a while
+	// is judged on the vault it started against.
+	committing := l.cadence.mayCommit(l.clock.Now())
+	defer func() { l.cadence.ran(l.clock.Now(), committing) }()
+
 	if err := l.attach(); err != nil {
-		// Reported every attempt, which is right while a wake-up is the only
-		// thing that drives one. The hourly repeat that keeps a broken obsync
-		// from filling a log belongs with the rest of §9's cadence (#37).
+		// Reported on every run, which now means once a tick for as long as
+		// the vault is unreachable. The hourly repeat that turns that into one
+		// line an hour is §9's, and #37's: unlike the network half below,
+		// which the backoff already quiets, a local failure has no wait of its
+		// own to hide behind.
 		l.log.Error("obsync cannot reach the vault it was pointed at", "problem", err,
 			"vault_path", l.config.VaultPath)
 		return
 	}
-	if err := l.perform(); err != nil {
+	if err := l.perform(ctx, committing); err != nil {
+		if errors.Is(err, git.ErrShutdownDeadline) {
+			// Not a failure a human is needed for: obsync was told to stop and
+			// the push had not finished. The next start picks the commit up,
+			// because the commit is already in the vault.
+			l.log.Debug("the sync run was cut short by the shutdown deadline", "problem", err)
+			return
+		}
 		// One line, and no tier: the three tiers are #32's, and until they
 		// exist every failure is reported the same way rather than being
 		// silently sorted into a category obsync cannot yet act on.
@@ -144,7 +209,23 @@ func (l *Loop) attach() error {
 }
 
 // perform is the body of a sync run: what changed, one commit, one push.
-func (l *Loop) perform() error {
+//
+// The two halves fail independently. The local half cannot fail for network
+// reasons, so a remote that is unreachable, rejecting or backing off leaves
+// obsync a local autocommitter that catches up; only the network half waits
+// (§2).
+func (l *Loop) perform(ctx context.Context, committing bool) error {
+	if committing {
+		if err := l.localHalf(); err != nil {
+			return err
+		}
+	}
+	return l.networkHalf(ctx)
+}
+
+// localHalf is status and commit: the part of a run that touches only the vault
+// and its .git.
+func (l *Loop) localHalf() error {
 	changed, err := l.repo.Changed()
 	if err != nil {
 		return err
@@ -154,33 +235,47 @@ func (l *Loop) perform() error {
 	// subtracted from it yet — the ignore floor and refused paths are #28, and
 	// unsettled paths #29 — so in this build it is everything git reports.
 	committable := changed
-
-	if len(committable) > 0 {
-		if err := l.repo.Stage(committable); err != nil {
-			return err
-		}
-		// What the index holds is what the commit will carry, and it is not
-		// always what status reported: an edit that puts a file back the way
-		// HEAD has it is a change to the tree and no change to the commit.
-		// Committing anyway would put an empty commit in a human's history.
-		staged, err := l.repo.Staged()
-		if err != nil {
-			return err
-		}
-		if len(staged) > 0 {
-			// One commit per run, covering everything git reported. Per-file
-			// commits isolate the wrong unit — a rename is a delete plus an
-			// add, and a note and its pasted image are one act (§2).
-			if err := l.repo.Commit(commitMessage(staged)); err != nil {
-				return err
-			}
-			l.log.Info("committed", "paths", len(staged), "subject", subject(staged))
-		}
+	if len(committable) == 0 {
+		return nil
 	}
 
-	// The local half is over, and it cannot fail for network reasons. What
-	// follows is the network half, which fails and backs off on its own (§2) —
-	// so a dead remote leaves obsync a local autocommitter that catches up.
+	if err := l.repo.Stage(committable); err != nil {
+		return err
+	}
+	// What the index holds is what the commit will carry, and it is not always
+	// what status reported: an edit that puts a file back the way HEAD has it
+	// is a change to the tree and no change to the commit. Committing anyway
+	// would put an empty commit in a human's history.
+	staged, err := l.repo.Staged()
+	if err != nil {
+		return err
+	}
+	if len(staged) == 0 {
+		return nil
+	}
+	// One commit per run, covering everything git reported. Per-file commits
+	// isolate the wrong unit — a rename is a delete plus an add, and a note and
+	// its pasted image are one act (§2). On a bulk import that means each
+	// capped commit is an honest partial snapshot converging on the right tree,
+	// which is why there is no burst mode to write.
+	if err := l.repo.Commit(commitMessage(staged)); err != nil {
+		return err
+	}
+	l.log.Info("committed", "paths", len(staged), "subject", subject(staged))
+	return nil
+}
+
+// networkHalf is the part of a run that talks to the remote.
+//
+// It is the only half that waits: a failure here backs off from 60s to 15m and
+// is retried by the ordinary tick, so the backoff is a rate limit on the
+// existing loop rather than a schedule of its own. Any success resets it.
+func (l *Loop) networkHalf(ctx context.Context) error {
+	now := l.clock.Now()
+	if now.Before(l.retryNetworkAt) {
+		return nil
+	}
+
 	unpushed, err := l.repo.HasUnpushedCommits(l.branch)
 	if err != nil {
 		return err
@@ -190,9 +285,35 @@ func (l *Loop) perform() error {
 		// being empty is a designed signal, not an accident (§9).
 		return nil
 	}
-	if err := l.repo.Push(l.branch); err != nil {
+	// The push floor, off by default: a lower bound between pushes, checked
+	// here on the loop obsync already turns rather than kept by a second timer.
+	if !l.lastPush.IsZero() && now.Sub(l.lastPush) < pushFloor {
+		return nil
+	}
+
+	if err := l.repo.Push(ctx, l.branch); err != nil {
+		l.backOff(now)
 		return err
 	}
+	l.lastPush = now
+	l.networkSucceeded()
 	l.log.Info("pushed", "branch", l.branch)
 	return nil
+}
+
+// backOff doubles the network half's wait, from 60s and never past 15m.
+func (l *Loop) backOff(now time.Time) {
+	if l.backoff == 0 {
+		l.backoff = backoffFloor
+	} else {
+		l.backoff = min(2*l.backoff, backoffLongest)
+	}
+	l.retryNetworkAt = now.Add(l.backoff)
+}
+
+// networkSucceeded resets the backoff to its floor. Any success does it: the
+// remote came back, and the next failure is a fresh one rather than the
+// continuation of an old one.
+func (l *Loop) networkSucceeded() {
+	l.backoff, l.retryNetworkAt = 0, time.Time{}
 }

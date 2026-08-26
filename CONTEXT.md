@@ -80,6 +80,21 @@ An optional lower bound on time between pushes. A rate limit on the network
 half, not a second schedule.
 _Avoid_: push interval, push period
 
+**Network backoff**:
+How long the network half waits after a failure before the next wake-up is
+allowed to try again — doubling from a floor, never past a longest wait, and
+reset by any network success. A rate limit on the loop obsync already turns,
+never a schedule of its own, and never a gate on the local half. Distinct from
+the **backoff ceiling**, which is a health verdict rather than a wait.
+_Avoid_: retry delay, cooldown, retry schedule
+
+**Shutdown deadline**:
+How long obsync has to exit after a SIGTERM. It refuses to start a new run and
+finishes the one in flight, and the deadline cuts short the one thing in that
+run which can be waiting on the outside world — a network git. A local git is
+never timed out, at shutdown or at any other moment.
+_Avoid_: grace period, drain timeout, stop timeout
+
 ### Torn writes
 
 **Settle guard**:

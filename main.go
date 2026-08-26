@@ -117,9 +117,12 @@ func syncLoop(environ []string, stderr io.Writer) int {
 	}
 
 	// The watcher is the loop's other injected dependency and it does not
-	// exist yet (#39), so obsync has no wake-up but the startup run: the tick
-	// that will drive the rest is #25's. A nil channel is exactly that — a
-	// loop with nothing to wake it — rather than a placeholder to remove.
+	// exist yet (#39), so a nil channel is what obsync runs on: nothing but
+	// the tick wakes it. That is tick-only mode, which is a mode obsync has
+	// anyway — the mode a vault with no watch budget left runs in — rather
+	// than a placeholder to remove. Latency is the tick until #39 lands; what
+	// obsync commits is the same either way, because every run asks git what
+	// changed and the watcher never says.
 	l := loop.New(cfg, log, clock.System{}, nil)
 	defer func() { _ = l.Close() }()
 

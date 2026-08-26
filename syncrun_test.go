@@ -443,6 +443,11 @@ func TestAPushTheRemoteDeclinesStillLeavesTheCommitInTheVault(t *testing.T) {
 // obsync never exits on a sync failure, so the run after a failed one is an
 // ordinary run: the commit is still there, still unpushed, and goes as soon as
 // the remote takes it (§2).
+//
+// The run that takes it is the next tick past the 60s the failed push bought
+// itself, because only the network half backs off and the tick is what retries
+// it — a rate limit on the loop obsync already turns rather than a schedule of
+// its own.
 func TestTheNextRunPushesWhatTheLastOneCouldNot(t *testing.T) {
 	t.Parallel()
 
@@ -450,9 +455,10 @@ func TestTheNextRunPushesWhatTheLastOneCouldNot(t *testing.T) {
 	env.installHook("pre-receive", "#!/bin/sh\nexit 1\n")
 	env.writeNote("Daily/2026-08-24.md", "eventually\n")
 
-	env.wake()
+	env.turn()
+	env.awaitIdle()
 	env.removeHook("pre-receive")
-	env.wake()
+	env.advance(70 * time.Second)
 
 	if got := env.remoteFile("Daily/2026-08-24.md"); got != "eventually\n" {
 		t.Errorf("the remote holds %q, want the note the earlier run could not push", got)
@@ -465,7 +471,13 @@ func TestTheNextRunPushesWhatTheLastOneCouldNot(t *testing.T) {
 // it cannot recover from (§1).
 //
 // Measured: a run that commits and pushes drives thirteen git commands — five
-// of them writing the private git config — and takes out exactly one deadline.
+// of them writing the private git config — and takes out exactly one deadline
+// to time one of them out with.
+//
+// The loop waits on the same clock for its own cadence, and those waits are not
+// timeouts: nothing is killed when one expires. So the assertion is both halves
+// — one git was timed out, and every other wait obsync took out was it waiting
+// for its next run.
 func TestOnlyTheNetworkGitIsEverTimedOut(t *testing.T) {
 	t.Parallel()
 
@@ -475,9 +487,18 @@ func TestOnlyTheNetworkGitIsEverTimedOut(t *testing.T) {
 	env.wake()
 	env.stop()
 
-	if got, want := env.clock.deadlinesTaken(), 1; got != want {
-		t.Errorf("obsync took out %d deadlines in a run that committed and pushed, want %d — the "+
-			"push's, and no local command's (§1)", got, want)
+	if got, want := env.clock.networkDeadlinesTaken(), 1; got != want {
+		t.Errorf("obsync timed out %d gits in a run that committed and pushed, want %d — the "+
+			"push, and no local command (§1)", got, want)
+	}
+	for _, waited := range env.clock.waitsTaken() {
+		if waited == networkDeadline {
+			continue
+		}
+		if waited < tick-tickJitter || waited > tick+tickJitter {
+			t.Errorf("obsync waited %s, which is neither the network deadline nor a tick; the only "+
+				"git obsync times out is the network one (§1)", waited)
+		}
 	}
 }
 
@@ -563,15 +584,18 @@ func assertProcessGone(t *testing.T, pid int) {
 // The watcher's only role is to wake the loop sooner than the next tick would;
 // it never says what changed, and every run asks git that instead (§2). This is
 // the loop turning as it does in production: a wake-up arrives on the channel,
-// one run happens, and the channel is not looked at again until it is over.
+// the vault goes quiet, one run happens, and the channel is not looked at again
+// until it is over.
 func TestAWatcherWakeUpDrivesASyncRun(t *testing.T) {
 	t.Parallel()
 
 	env := newVault(t)
 	env.turn()
+	env.awaitIdle()
 	env.writeNote("Daily/2026-08-24.md", "woken by the watcher\n")
 
 	env.watcherWake()
+	env.advance(quietWindow)
 
 	if got := env.remoteFile("Daily/2026-08-24.md"); got != "woken by the watcher\n" {
 		t.Errorf("the remote holds %q, want the note the wake-up was about", got)

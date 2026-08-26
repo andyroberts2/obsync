@@ -20,11 +20,15 @@ decision tickets, resolved one at a time. What exists today is the project
 skeleton, the config surface — nine environment variables, one required, echoed
 in a startup line — and the walking skeleton of the sync loop: a wake-up makes
 obsync ask git what changed in the vault, commit it as one commit whose message
-says what changed, and push it to the tracked branch. The **declared surface** —
-everything a version number will make a promise about — is written down ahead of
-the code that implements it.
+says what changed, and push it to the tracked branch. That loop now keeps its
+own time: it commits ten seconds after the vault goes quiet, commits anyway
+every five minutes while someone is still typing, ticks every 60s so a change
+nothing reported still arrives, waits out an unreachable remote from 60s to 15
+minutes while carrying on committing locally, and finishes the run in flight
+before it exits. The **declared surface** — everything a version number will
+make a promise about — is written down ahead of the code that implements it.
 
-Not yet: the tick and the quiet window, the safety interlocks, the settle guard,
+Not yet: the filesystem watcher, the safety interlocks, the settle guard,
 conflicts, the attention note, the status file and the container image. obsync
 is not something to point at a vault yet.
 

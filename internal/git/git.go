@@ -18,6 +18,7 @@ package git
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -38,6 +39,15 @@ import (
 // hung local command means the disk or the kernel is in trouble and killing a
 // reset --keep halfway manufactures the one unrecoverable state in this design.
 const networkDeadline = 120 * time.Second
+
+// shutdownDeadline is how long obsync has to exit after a SIGTERM (§1). The
+// run in flight finishes rather than being interrupted, and the one thing in it
+// that can be waiting on the outside world is a network git, so that is what
+// this cuts short — a local git is never timed out, at shutdown or at any other
+// moment, because killing a reset --keep halfway manufactures the one
+// unrecoverable state in this design. The reference compose therefore documents
+// a stop_grace_period longer than Docker's 10s default.
+const shutdownDeadline = 30 * time.Second
 
 // killGrace is how long a signalled git has to finish dying before the process
 // group is SIGKILLed. Long enough for git to unwind and drop its lock files —
@@ -290,12 +300,13 @@ func (r *Repo) HasUnpushedCommits(branch string) (bool, error) {
 // --porcelain is passed for the enum in its output, which is how a rejection is
 // eventually told from a lost race (§7) — that reading is #35's, and until it
 // exists a non-zero exit is simply a failed run.
-func (r *Repo) Push(branch string) error {
+func (r *Repo) Push(ctx context.Context, branch string) error {
 	ref := "refs/heads/" + branch
 	_, err := r.run(invocation{
 		dir:      r.vault,
 		args:     []string{"push", "--porcelain", config.RemoteName, ref + ":" + ref},
 		deadline: networkDeadline,
+		shutdown: ctx.Done(),
 	})
 	return err
 }
@@ -312,6 +323,10 @@ type invocation struct {
 	// command leaves it zero and is never timed out, which is §1's asymmetry
 	// expressed as the absence of a timer rather than as a rule to remember.
 	deadline time.Duration
+	// shutdown is closed when obsync has been told to stop, and is set on the
+	// same commands the deadline is and for the same reason: it is the network
+	// that can hang, and a local command is left alone.
+	shutdown <-chan struct{}
 }
 
 // run runs one git to completion and returns its stdout.
@@ -349,19 +364,37 @@ func (r *Repo) run(inv invocation) ([]byte, error) {
 
 	// A zero deadline is a nil channel, and a receive on a nil channel blocks
 	// forever — so a local command is not timed out by construction rather
-	// than by a branch someone could add an exception to.
-	var expiry <-chan time.Time
+	// than by a branch someone could add an exception to. The shutdown channel
+	// is nil on the same commands for the same reason.
+	var expiry, shutdownExpiry <-chan time.Time
+	var stopping <-chan struct{}
 	if inv.deadline > 0 {
 		expiry = r.clock.After(inv.deadline)
+		stopping = inv.shutdown
 	}
 
 	var err error
-	timedOut := false
-	select {
-	case err = <-waited:
-	case <-expiry:
-		timedOut = true
-		r.killGroup(cmd, waited)
+	var timedOut error
+waiting:
+	for {
+		select {
+		case err = <-waited:
+			break waiting
+		case <-expiry:
+			timedOut = ErrNetworkDeadline
+			r.killGroup(cmd, waited)
+			break waiting
+		case <-stopping:
+			// SIGTERM. The run finishes rather than being interrupted, but
+			// obsync has ~30s to exit, so the clock on this git starts again
+			// and shorter (§1).
+			stopping = nil
+			shutdownExpiry = r.clock.After(shutdownDeadline)
+		case <-shutdownExpiry:
+			timedOut = ErrShutdownDeadline
+			r.killGroup(cmd, waited)
+			break waiting
+		}
 	}
 
 	// DEBUG carries the full argv deliberately: beliefs about git plumbing are
@@ -375,8 +408,8 @@ func (r *Repo) run(inv invocation) ([]byte, error) {
 		"duration", r.clock.Now().Sub(started),
 	)
 
-	if timedOut {
-		return nil, fmt.Errorf("git %s: %w", strings.Join(inv.args, " "), ErrNetworkDeadline)
+	if timedOut != nil {
+		return nil, fmt.Errorf("git %s: %w", strings.Join(inv.args, " "), timedOut)
 	}
 	if err != nil {
 		var exit *exec.ExitError
@@ -436,6 +469,12 @@ func (r *Repo) env() []string {
 // was killed. It is a countable failure rather than a verdict about the remote:
 // nothing was returned, so nothing was decided.
 var ErrNetworkDeadline = errors.New("the network git ran past obsync's 120s deadline and was killed")
+
+// ErrShutdownDeadline is a network git that was still running when the ~30s
+// obsync has to exit in ran out. It is not a verdict about the remote and not a
+// failure a human is needed for: obsync was told to stop, and what it had
+// already committed is in the vault waiting for the next start.
+var ErrShutdownDeadline = errors.New("obsync was stopping and the network git had not finished within its 30s")
 
 // CommandError is a git that ran and failed, carrying what obsync needs to tell
 // a human: the argv it ran, the status it exited with, and git's own words.
