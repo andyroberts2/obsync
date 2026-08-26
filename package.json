@@ -4,7 +4,7 @@
   "description": "Tooling only. obsync itself is a Go module with no JavaScript in it \u2014 this manifest exists so the AFK coding loop in .sandcastle/ resolves its runner at a pinned version instead of whatever npx fetches that day. Nothing here is shipped, and nothing in the container image depends on it.",
   "scripts": {
     "sandcastle": "tsx .sandcastle/main.mts",
-    "sandcastle:build-image": "sandcastle podman build-image --containerfile .sandcastle/Containerfile"
+    "sandcastle:build-image": "sandcastle podman build-image"
   },
   "devDependencies": {
     "@ai-hero/sandcastle": "0.12.0",
