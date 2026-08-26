@@ -38,6 +38,8 @@ type Loop struct {
 	// says that something happened, never what (§2). A nil channel is a loop
 	// no watcher wakes, which is what obsync is until #39 — and, since the tick
 	// exists, that is tick-only mode rather than a loop nothing wakes at all.
+	// It is also what this field becomes when a watcher that did exist goes
+	// away, so the two arrivals at tick-only mode are the same state.
 	wakes <-chan struct{}
 
 	// cadence is when this loop wakes and whether the run it wakes for may
@@ -101,6 +103,11 @@ func (l *Loop) Run(ctx context.Context) {
 // and select picks between them at random, which is why the refusal is asked at
 // the top of Run rather than here: whichever case wins, the next run does not
 // start.
+//
+// Only a SIGTERM ends this wait. A burst of wake-ups cannot starve the run they
+// are deferring, because what is due is recomputed at the top of every turn: as
+// soon as the max-wait cap is in the past this returns, whichever case the
+// select would have picked.
 func (l *Loop) waitForNextRun(ctx context.Context) bool {
 	for {
 		now := l.clock.Now()
@@ -122,7 +129,22 @@ func (l *Loop) waitForNextRun(ctx context.Context) bool {
 			return false
 		case _, open := <-l.wakes:
 			if !open {
-				return false
+				// The watcher has gone: it tore its watches down on ENOSPC
+				// (§1), or it stopped for a reason of its own. That is
+				// tick-only mode, not a reason to stop syncing — the tick is
+				// what obsync already runs on when no watcher exists at all,
+				// and every run asks git what changed, so what obsync commits
+				// is the same and only the latency degrades.
+				//
+				// A nil channel is how that mode is expressed, here as in
+				// main: a receive on one blocks forever, so this case is gone
+				// rather than permanently ready. Returning instead would exit
+				// the process on a signal that is not a sync failure, which is
+				// silent non-backup announced by nothing (§2, §7). The WARN
+				// naming the sysctl is the watcher's to log (#39).
+				l.wakes = nil
+				l.log.Debug("the watcher has gone; obsync is in tick-only mode")
+				continue
 			}
 			l.cadence.woke(l.clock.Now())
 		case <-expiry:

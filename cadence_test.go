@@ -393,6 +393,33 @@ func TestAnUnreachableRemoteIsNotReportedOnEveryWakeUp(t *testing.T) {
 	}
 }
 
+// A watcher that goes away leaves obsync ticking, not stopped. Tearing every
+// watch down is what §1 says obsync does on inotify ENOSPC, and the mode it
+// then runs in is the one the shipped binary already runs in with no watcher at
+// all: latency degrades to the tick and what obsync commits does not change,
+// because every run asks git what changed and the watcher never says.
+//
+// Stopping instead would be the failure this design fears most. obsync never
+// exits on a sync failure (§2), and a watcher standing down is not even that —
+// the process would go quietly, the container with it, and the vault would stop
+// being backed up with nothing anywhere saying so.
+func TestAWatcherThatGoesAwayLeavesObsyncInTickOnlyMode(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.turn()
+	env.awaitIdle()
+
+	env.watcherGone()
+	env.writeNote("Daily/2026-08-24.md", "written after the watcher stood down\n")
+	env.advance(70 * time.Second)
+
+	if got := env.remoteFile("Daily/2026-08-24.md"); got != "written after the watcher stood down\n" {
+		t.Errorf("the remote holds %q one tick after the watcher went away, want the note — a "+
+			"vault with no watcher is tick-only mode, not a vault obsync has stopped syncing (§1, §2)", got)
+	}
+}
+
 // A SIGTERM arriving before obsync has run at all refuses the startup run like
 // any other: "refuse to start a new run" is about every run, and a container
 // stopped seconds after it started has committed nothing (§1).

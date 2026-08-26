@@ -201,6 +201,12 @@ func (e *vaultEnv) turn() {
 // the tick is always in the running for the next thing due, so the loop never
 // waits longer than one, and the only deadline longer than a tick is the 120s a
 // network git gets.
+//
+// That discriminator is one-sided, and the boundary is worth knowing before a
+// test walks into it: the grace a killed process group gets is shorter than a
+// tick, so it reads as an idle wait. Nothing here advances the clock after a
+// kill — the two tests that kill a git assert and stop — and a test that wants
+// to would need a handshake that asks which deadline rather than how long.
 func (e *vaultEnv) awaitIdle() {
 	e.t.Helper()
 
@@ -249,6 +255,40 @@ func (e *vaultEnv) watcherWake() {
 	// waiting for that one is what makes the wake and the clock ordered rather
 	// than merely likely to be.
 	e.awaitIdle()
+}
+
+// watcherGone closes the watcher's channel, which is what a watcher that has
+// torn its watches down looks like from inside the loop (§1's ENOSPC path), and
+// what any watcher that stops for a reason of its own looks like too.
+//
+// It waits for the same handshake watcherWake does, because obsync should react
+// to this by taking its next deadline out and carrying on ticking. If it has
+// stopped instead, that is what this says, rather than waiting out a bound on a
+// loop that is never coming back.
+func (e *vaultEnv) watcherGone() {
+	e.t.Helper()
+
+	if !e.turning {
+		e.t.Fatal("nothing is turning to lose its watcher")
+	}
+	close(e.wakes)
+
+	limit := time.After(60 * time.Second)
+	for {
+		select {
+		case <-e.finished:
+			e.t.Fatal("obsync's sync loop returned when its watcher went away, want it left in " +
+				"tick-only mode: a watcher tearing its watches down is not a sync failure, and " +
+				"exiting on one is silent non-backup with nothing to announce it (§1, §2)")
+		case waited := <-e.clock.waits:
+			if waited > tick+tickJitter {
+				continue
+			}
+			return
+		case <-limit:
+			e.t.Fatalf("obsync did not come back to waiting on the clock within 60s; it said:\n%s", e.log.String())
+		}
+	}
 }
 
 // sigterm is the signal without the wait: obsync refuses to start a new run and

@@ -73,6 +73,22 @@ type Repo struct {
 
 	log   *slog.Logger
 	clock clock.Clock
+
+	// stoppingSince is when obsync first saw that it had been told to stop.
+	//
+	// The ~30s is how long obsync has to exit (§1) — a fact about the process,
+	// not an allowance each network git draws afresh — so it is anchored once
+	// here and spent down by whatever runs after it. Read afresh per git, that
+	// same number would mean "30s from whenever this command happened to
+	// notice": a slow local half before the push, or a second network git in
+	// one run, would each put the exit past what the reference compose's
+	// stop_grace_period is set against, and the backstop for overrunning it is
+	// Docker's SIGKILL.
+	//
+	// One serialized sync loop with one run in flight means one goroutine ever
+	// reads or writes this, so it needs no lock — the same reason the loop
+	// itself has none.
+	stoppingSince time.Time
 }
 
 // Attach opens the vault's repository and writes obsync's private git
@@ -386,10 +402,15 @@ waiting:
 			break waiting
 		case <-stopping:
 			// SIGTERM. The run finishes rather than being interrupted, but
-			// obsync has ~30s to exit, so the clock on this git starts again
-			// and shorter (§1).
+			// obsync has ~30s to exit, so what is left of that replaces this
+			// git's own 120s (§1). Left, not a fresh 30s: the deadline is
+			// obsync's to spend once, and it is anchored the first time any
+			// git sees the stop.
 			stopping = nil
-			shutdownExpiry = r.clock.After(shutdownDeadline)
+			if r.stoppingSince.IsZero() {
+				r.stoppingSince = r.clock.Now()
+			}
+			shutdownExpiry = r.clock.After(max(shutdownDeadline-r.clock.Now().Sub(r.stoppingSince), 0))
 		case <-shutdownExpiry:
 			timedOut = ErrShutdownDeadline
 			r.killGroup(cmd, waited)
