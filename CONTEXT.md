@@ -181,10 +181,12 @@ _Avoid_: sidecar, conflicted copy, duplicate
 
 **Attention note**:
 The vault-root note obsync writes when it needs a human to look at something —
-outstanding conflict copies, refused paths, and paths that have stayed unsettled
-long enough to stop looking transient, in sections. Derived from what is in the
-vault, never authoritative over it, deleted when every section is empty,
-and never itself tracked.
+live freezes first, then outstanding conflict copies, refused paths, and paths
+that have stayed unsettled long enough to stop looking transient, in sections.
+Every section is derived — from the vault for the rest, from live gate state for
+the freezes — so the note is never authoritative over what it describes, and is
+deleted when every section is empty. Never itself tracked. Writing it touches
+the vault, not the repo, which is why a full freeze can still write one.
 _Avoid_: marker file, conflict log, conflict note
 
 ### Configuration
@@ -258,6 +260,14 @@ The last interlock before a result becomes a pushed result, and the only one
 whose failure means obsync can no longer trust its own view of the vault.
 _Avoid_: validation, assertion, sanity check
 
+**Failed-apply anchor**:
+The ref holding the tree obsync computed but could not verify, written before
+the freeze so nothing can prune the one artifact that explains it. Its existence
+is itself a gate, which is what keeps the freeze from being a property of the
+running process: a restart cannot clear it, and a human clears it deliberately
+by deleting it once the tree is recovered.
+_Avoid_: latch, quarantine, marker
+
 ### Freezes
 
 **Full freeze**:
@@ -271,3 +281,20 @@ being captured; nothing leaves or enters. The degraded mode an unreachable
 remote already produces, reused wherever the vault is sound but its
 relationship to the remote is not.
 _Avoid_: offline mode, paused
+
+### Signal
+
+**Health**:
+obsync's answer to exactly one question — *does this need a human?* Deliberately
+not "is everything working": a remote that is down and backing off is behaving
+as designed and is healthy, while a freeze, or a push that has never once
+succeeded, is not.
+_Avoid_: status, liveness, uptime
+
+**Status file**:
+The private record of the loop's own state, rewritten at the end of every
+wake-up — whatever the outcome, because it exists to prove the loop is still
+turning, and a run that gave up still turned. Where liveness lives, so the log
+never has to carry it. Private on purpose: the subcommands that read it are the
+interface, not its layout.
+_Avoid_: state file, heartbeat file, pid file
