@@ -234,6 +234,17 @@ func (e *vaultEnv) remoteFile(path string) string {
 	return out
 }
 
+// remoteHolds reports whether the remote's tip holds anything at a path, which
+// is how the absence of one is asserted — a deletion that arrived is a path
+// that is not there rather than bytes that changed.
+func (e *vaultEnv) remoteHolds(path string) bool {
+	e.t.Helper()
+	e.stop()
+
+	_, code := e.git(e.remote, "cat-file", "-e", "refs/heads/main:"+path)
+	return code == 0
+}
+
 // remoteSubject is the subject line of the remote tip's commit; remoteMessage
 // is the whole of it.
 func (e *vaultEnv) remoteSubject() string {

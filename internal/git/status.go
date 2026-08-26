@@ -45,8 +45,16 @@ func parseStatus(out []byte) ([]string, error) {
 			paths = append(paths, path)
 		case '2':
 			// 2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>\0<origPath>
-			// Both names are staged: a rename is a delete plus an add, and the
-			// delete is at a path this record does not otherwise mention.
+			//
+			// Only the destination is a path to stage, and the original is
+			// read solely so it is not mistaken for the next record. Measured
+			// on a `git mv` a human ran in their own vault: the index already
+			// holds the rename, so the original is in neither the index nor
+			// the working tree, and a pathspec naming it matches no file —
+			// `git add` exits 128, and because the record persists until
+			// something commits it, that is every run from then on rather
+			// than one. Staging the destination alone commits the delete and
+			// the add both, which is what the index was already holding.
 			path, err := fieldAfter(record, 9)
 			if err != nil {
 				return nil, err
@@ -55,7 +63,7 @@ func parseStatus(out []byte) ([]string, error) {
 			if i >= len(records) {
 				return nil, fmt.Errorf("git status reported a rename of %q with no original path", path)
 			}
-			paths = append(paths, path, records[i])
+			paths = append(paths, path)
 		case 'u':
 			// u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
 			path, err := fieldAfter(record, 10)
@@ -64,7 +72,15 @@ func parseStatus(out []byte) ([]string, error) {
 			}
 			paths = append(paths, path)
 		case '?':
-			paths = append(paths, record[len("? "):])
+			// ? <path>. Read with the same helper as every other record
+			// rather than by slicing a fixed prefix off: a record too short to
+			// hold one is a parse error, and slicing it would be a panic on
+			// the sync-loop path.
+			path, err := fieldAfter(record, 1)
+			if err != nil {
+				return nil, err
+			}
+			paths = append(paths, path)
 		case '!':
 			// Only ever present with --ignored, which obsync does not pass.
 			continue

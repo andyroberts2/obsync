@@ -68,6 +68,13 @@ func (l *Loop) Run(ctx context.Context) {
 			if !open {
 				return
 			}
+			// A wake-up and a SIGTERM arriving together leaves both cases
+			// ready, and select picks between them at random — so "refuse to
+			// start a new run" (§1) has to be asked again here rather than
+			// left to the select that already answered it.
+			if ctx.Err() != nil {
+				return
+			}
 		}
 		l.syncRun()
 	}

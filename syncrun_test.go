@@ -44,6 +44,12 @@ func TestPathsAVaultReallyHoldsCommitAndPush(t *testing.T) {
 		":colon note.md",
 		"Notes/#tag index.md",
 		"Notes/two\nlines.md",
+		// A leading dash is the one that would survive every parsing rule
+		// above and still break: it is a path only because it arrives on
+		// stdin, and an argv-shaped pathspec would read it as an option.
+		"-dash note.md",
+		"Notes/*star.md",
+		"Notes/trailing space .md",
 	}
 
 	env := newVault(t)
@@ -183,6 +189,92 @@ func TestABulkImportIsCountedAndItsBodyIsCapped(t *testing.T) {
 // bodyLines is the cap §2 puts on a commit body, restated here rather than
 // imported: a test that reads the constant it is checking asserts nothing.
 const bodyLines = 50
+
+// The cap is a boundary, and a boundary is where a cap is wrong: a body of
+// exactly fifty paths is complete and says nothing about a remainder, and the
+// fifty-first path is the first one counted rather than listed (§2).
+func TestTheBodyCapListsFiftyPathsAndCountsTheFiftyFirst(t *testing.T) {
+	t.Parallel()
+
+	for _, boundary := range []struct {
+		name  string
+		notes int
+		// lines is how long the body is: fifty listed paths, plus the count
+		// of the rest when there is a rest.
+		lines int
+		// lastLine is the body's final line, which is the last path listed
+		// when nothing was left over and the count when something was.
+		lastLine string
+	}{
+		{
+			name:     "exactly fifty paths are all listed",
+			notes:    bodyLines,
+			lines:    bodyLines,
+			lastLine: fmt.Sprintf("+ Import/note %04d.md", bodyLines-1),
+		},
+		{
+			name:     "the fifty-first path is counted, not listed",
+			notes:    bodyLines + 1,
+			lines:    bodyLines + 1,
+			lastLine: "… and 1 more",
+		},
+	} {
+		t.Run(boundary.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := newVault(t)
+			for i := range boundary.notes {
+				env.writeNote(fmt.Sprintf("Import/note %04d.md", i), "imported\n")
+			}
+
+			env.wake()
+
+			body := strings.Split(env.remoteMessage(), "\n")[2:]
+			if got, want := len(body), boundary.lines; got != want {
+				t.Errorf("a commit body over %d paths is %d lines, want %d (§2)", boundary.notes, got, want)
+			}
+			if got := body[len(body)-1]; got != boundary.lastLine {
+				t.Errorf("the commit body ends %q, want %q (§2)", got, boundary.lastLine)
+			}
+		})
+	}
+}
+
+// A human who renames a note with git rather than in their editor leaves the
+// rename sitting in the index, and git then reports it as a single status
+// record carrying two paths — a shape nothing else in a vault produces, and
+// the only one where the path is not the ninth field.
+//
+// Measured: a miscounted field there does not read a wrong path, it reads
+// "R100 Notes/New name.md", which is a pathspec matching no file, so `git add`
+// exits 128 and every run fails for as long as the rename sits there. Renaming
+// a note is not a rare thing to do to a vault.
+func TestAHumanStagedRenameCommitsAsADeleteAndAnAdd(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.writeNote("Notes/Old name.md", "the same bytes\n")
+	env.wake()
+
+	env.mustGit(env.vault, "mv", "Notes/Old name.md", "Notes/New name.md")
+
+	env.wake()
+
+	if got := env.remoteFile("Notes/New name.md"); got != "the same bytes\n" {
+		t.Errorf("the remote holds %q at the renamed path, want the bytes the vault holds", got)
+	}
+	if env.remoteHolds("Notes/Old name.md") {
+		t.Error("the remote still holds the note at its old path, want the rename's delete carried too")
+	}
+	if got, want := env.remoteSubject(), "Update 2 notes"; got != want {
+		t.Errorf("the commit subject is %q, want %q — a rename is a delete plus an add (§2)", got, want)
+	}
+	for _, line := range []string{"+ Notes/New name.md", "- Notes/Old name.md"} {
+		if body := env.remoteMessage(); !strings.Contains(body, line) {
+			t.Errorf("the commit message is %q, want it to carry %q (§2)", body, line)
+		}
+	}
+}
 
 // Provenance lives in the commit identity, which is why the name rather than
 // the address is the part that carries meaning — it is what filtering history
@@ -372,8 +464,8 @@ func TestTheNextRunPushesWhatTheLastOneCouldNot(t *testing.T) {
 // killing a local command halfway is how this design manufactures the one state
 // it cannot recover from (§1).
 //
-// A run that commits and pushes drives seven git commands and takes out exactly
-// one deadline.
+// Measured: a run that commits and pushes drives thirteen git commands — five
+// of them writing the private git config — and takes out exactly one deadline.
 func TestOnlyTheNetworkGitIsEverTimedOut(t *testing.T) {
 	t.Parallel()
 
