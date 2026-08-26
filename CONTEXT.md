@@ -361,3 +361,38 @@ turning, and a run that gave up still turned. Where liveness lives, so the log
 never has to carry it. Private on purpose: the subcommands that read it are the
 interface, not its layout.
 _Avoid_: state file, heartbeat file, pid file
+
+### Release
+
+**Declared surface**:
+Everything obsync's version number makes a promise about: the config surface,
+plus the subcommands, the health contract, and what obsync writes into the
+vault. Strictly larger than the config surface, and named separately because
+versioning is the only thing that needs the larger set — a daemon with no
+library API still has a public interface, just not one a compiler can see.
+_Avoid_: public API, contract, ABI
+
+**Surface change**:
+A release that moves the declared surface. The unit release notes are obliged
+to name, stated even when there is none, because "nothing you set or pinned has
+changed" is the assurance an unattended sidecar exists to give.
+_Avoid_: breaking change, migration note
+
+**Supported artifact**:
+The container image — the one thing obsync is shipped as and tested as. A bare
+binary is a non-goal rather than a prohibition: nothing may be built in a way
+that makes one impossible, and nothing is promised about one that is.
+_Avoid_: build, release, distribution
+
+**Git floor**:
+The oldest git obsync runs on. Defined as the oldest git its tests run against
+and never read off a release note, so the number cannot become an aspiration —
+the same baseline-obsync-owns sense as the push floor and the ignore floor.
+_Avoid_: minimum version, required version, supported version
+
+**Transcription**:
+Code obsync carries over from prior art verbatim rather than reimplementing,
+because being wrong about it is more expensive than the duplication. Quarantined
+to a file of its own under its original licence and copyright, which is what
+keeps it auditable as well as compliant.
+_Avoid_: vendored code, copied code, fork
