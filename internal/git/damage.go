@@ -186,8 +186,9 @@ func LooksLike(err error) string {
 //   - a truncated or corrupt index — `fatal: .git/index: index file smaller
 //     than expected`.
 //
-// The last three are the network half's, and they are the precedent the rule
-// above generalises rather than a second kind of thing: a wrong or expired
+// Three more are the network half's — the last three rows of the list below —
+// and they are the precedent the rule above generalises rather than a second
+// kind of thing: a wrong or expired
 // credential is a labelled network-half failure on the ordinary backoff and
 // never a freeze (§7, §8), because PATs expire and get rotated and a latched
 // auth freeze would take away self-recovery for nothing. Measured at both

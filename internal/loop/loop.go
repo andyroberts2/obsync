@@ -75,9 +75,9 @@ type Loop struct {
 	// commit, and a remote rejection (#35), which is the only one of them that
 	// is a verdict rather than an inconclusive check and therefore the only one
 	// entered on a first occurrence. Write-verify failing (#33) adds no cause
-	// of its own: it is gate
-	// 9's freeze, reached from the run that wrote the ref rather than from the
-	// ref, which is what makes the two one state rather than two (§9).
+	// of its own: it is gate 9's freeze, reached from the run that wrote the
+	// ref rather than from the ref, which is what makes the two one state
+	// rather than two (§9).
 	//
 	// Twelve of the thirteen self-clear by re-checking a fact. The thirteenth
 	// is the honest exception §7 names rather than papers over: a streak is a
@@ -853,15 +853,9 @@ func (l *Loop) damageFact(err error, said string) string {
 	return fact
 }
 
-// whatItLooksLike is everything obsync adds to a local failure's own words: git
-// naming the failure, and how much room is left where the repository lives.
-//
-// Both are labels. git's words may name a failure and only persistence may
-// escalate one (§7), and statfs labels and never gates — there is no free-space
-// gate anywhere in obsync, and no threshold to configure.
-// labelled is git's own words added to a failure obsync is about to report,
-// and it is the whole of what "git's words may name a failure" amounts to in
-// code: the sentence a human reads changes, and nothing else does (§7).
+// labelled is git's own words added to a failure obsync is about to report, and
+// it is the whole of what "git's words may name a failure" amounts to in code:
+// the sentence a human reads changes, and nothing else does (§7).
 //
 // One spelling in one place, because the two halves both do it — the local
 // failure streak labels a damaged object, and a failed push labels a credential
@@ -874,6 +868,12 @@ func labelled(err error, said string) error {
 	return fmt.Errorf("%w — %s", err, said)
 }
 
+// whatItLooksLike is everything obsync adds to a local failure's own words: git
+// naming the failure, and how much room is left where the repository lives.
+//
+// Both are labels. git's words may name a failure and only persistence may
+// escalate one (§7), and statfs labels and never gates — there is no free-space
+// gate anywhere in obsync, and no threshold to configure.
 func (l *Loop) whatItLooksLike(err error) string {
 	said := git.LooksLike(err)
 	free := l.repo.FreeSpaceIfLow()
@@ -1378,9 +1378,9 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 		return err
 	case err != nil:
 		// Labelled here as well as at the push, because §7's bad credential is
-		// a *network-half* failure rather than a failure of the push alone: a token the
-		// remote will not take fails the fetch first, and the run never
-		// reaches the push to be labelled there.
+		// a *network-half* failure rather than a failure of the push alone: a
+		// token the remote will not take fails the fetch first, and the run
+		// never reaches the push to be labelled there.
 		l.backOff(now)
 		return labelled(err, git.LooksLike(err))
 	}

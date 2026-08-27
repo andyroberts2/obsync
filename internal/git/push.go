@@ -34,9 +34,15 @@ import (
 //	receive.maxInputSize exceeded exit 1    `!` `[remote rejected] (unpacker error)` network freeze
 //	remote failed to report       exit 1    `!` `[remote failure] (…)`               network backoff
 //	host unreachable / auth       exit 128   stdout empty                            network backoff
+//	git refused it on this side   exit 1     stdout empty                            failed run
 //
-// The last row is the whole of what exit 128 means here: **no verdict was ever
-// returned**, so obsync has been told nothing and waiting is what repairs it.
+// The second-to-last row is the whole of what exit 128 means here: **no verdict
+// was ever returned**, so obsync has been told nothing and waiting is what
+// repairs it. The last row is §7's table read exactly rather than nearly: a push
+// can produce no ref line without ever having asked the remote anything — the
+// human's own `pre-push` hook declining — and that is not a fact about the
+// remote and not one waiting repairs, so it is a run that failed rather than an
+// aborted one. neverReachedTheRemote is where the two are separated.
 
 // Push sends the tracked branch to the remote, and is the one network command
 // in this build that writes.
@@ -144,12 +150,20 @@ func quoted(s string) string { return `"` + s + `"` }
 func dispositionOf(command *CommandError) error {
 	summary, reason, answered := refStatus(command.Stdout)
 	if !answered {
-		// Exit 128 with no ref line at all: the connection, the host or the
-		// credential failed before the remote ever evaluated anything, so no
-		// verdict was returned. That is the same fact a failed fetch carries
-		// and it takes the same tier — obsync has been told nothing, which is
-		// precisely the state waiting repairs.
-		return unanswered(command)
+		if command.ExitCode == neverReachedTheRemote {
+			// The table's last row: the connection, the host or the credential
+			// failed before the remote ever evaluated anything, so no verdict
+			// was returned. That is the same fact a failed fetch carries and it
+			// takes the same tier — obsync has been told nothing, which is
+			// precisely the state waiting repairs.
+			return unanswered(command)
+		}
+		// A push git refused on this side, before any of it went anywhere. It
+		// is not the row above and must not be sorted into it: that row is the
+		// abort tier, which says nothing above debug, and this is a refusal no
+		// amount of waiting repairs. obsync has no rule for it and says so by
+		// having none.
+		return command
 	}
 	switch summary {
 	case "[rejected]":
@@ -167,6 +181,20 @@ func dispositionOf(command *CommandError) error {
 	// into whichever tier is nearest.
 	return command
 }
+
+// neverReachedTheRemote is git's everything-code, and for a push with no ref
+// line on stdout it is what separates the two ways one can produce none.
+//
+// §7's last row is exit **128** with empty stdout — the host, the connection or
+// the credential failing before the remote evaluated anything, so no verdict was
+// ever returned. A push git refuses on this side produces no ref line either and
+// exits **1**: measured at both matrix points, 2.38.5 and 2.52.0, and the two
+// agree — a `pre-push` hook in the human's own repository declining, and a src
+// refspec matching nothing locally, each exit 1 with stdout empty. Neither is a
+// fact about the remote, and neither is repaired by waiting, so reading them as
+// the row above would put a vault that has permanently stopped being backed up
+// on the tier that says nothing above debug.
+const neverReachedTheRemote = 128
 
 // refStatus is the ref line git wrote for the push, split into the two fields
 // git-push(1) documents: `<flag> \t <from>:<to> \t <summary> (<reason>)`.

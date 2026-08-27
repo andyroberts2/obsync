@@ -286,3 +286,95 @@ func TestObsyncRelaysWhatTheRemoteSaidAndAddsNoReadingOfIt(t *testing.T) {
 			"offending path — it has only prose to get one from (§7)")
 	}
 }
+
+// A hook in the human's own repository refuses a push before the remote is ever
+// contacted, and git reports it in the shape §7's last row is *not*: exit 1
+// with empty stdout, measured at both matrix points, where that row is exit
+// **128** with no ref line.
+//
+// The difference is the whole of what the row means. Exit 128 with nothing on
+// stdout is a remote that never answered, which is the state waiting repairs;
+// this is a local refusal that waiting does not touch. Reading them as one
+// would put a permanently unpushable vault on the abort tier, which says
+// nothing above debug — so a vault that had stopped being backed up would look
+// exactly like a healthy one, in the log and in `docker logs --since 1h`, for
+// as long as the hook stood.
+func TestAPushTheVaultsOwnHookRefusedIsNotAnUnreachableRemote(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.installVaultHook("pre-push", "#!/bin/sh\nexit 1\n")
+	env.writeNote("Daily/2026-08-24.md", "eventually\n")
+
+	env.turn()
+	env.awaitIdle()
+
+	said := env.saidSoFar()
+	if !strings.Contains(said, "level=ERROR") {
+		t.Errorf("obsync said %q about a push its own repository refused, want it said above "+
+			"debug: the abort tier is for a remote that never answered, and silence here is a "+
+			"vault that has stopped being backed up looking exactly like a healthy one (§7, §9)",
+			said)
+	}
+	if strings.Contains(said, "freeze=") {
+		t.Errorf("obsync said %q, want no freeze of any kind — the remote never saw this push, so "+
+			"there is no verdict to be permanent about (§7)", said)
+	}
+	if env.remoteHoldsYet("Daily/2026-08-24.md") {
+		t.Error("the remote holds the vault's note although the vault's own hook refused the " +
+			"push, want a push that did not land")
+	}
+
+	// The human takes their hook away, and obsync is back on the next tick past
+	// the ordinary backoff — no freeze to clear and no restart (§7).
+	env.removeVaultHook("pre-push")
+	env.advance(70 * time.Second)
+
+	if got := env.remoteFile("Daily/2026-08-24.md"); got != "eventually\n" {
+		t.Errorf("the remote holds %q at the vault's note, want the commit the hook had been "+
+			"refusing, published once the hook was gone", got)
+	}
+	if got, want := env.commitsOn(env.vault), "2"; got != want {
+		t.Errorf("the vault holds %s commits, want %s — a push that could not go out never stops "+
+			"the local half committing (§7)", got, want)
+	}
+}
+
+// The second way a human repairs a rejection, and the one a freeze keyed on a
+// successful push could never see: they take the offending commit out of the
+// vault rather than changing anything on the remote. obsync then has nothing
+// left to push, so a freeze only a push could clear would stand for ever over a
+// vault that is once again in step with its remote (§7).
+func TestARejectionClearsWhenTheVaultIsBackInStepWithNothingLeftToPush(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.installHook("pre-receive", "#!/bin/sh\nexit 1\n")
+	env.writeNote("Daily/2026-08-24.md", "the commit the remote refused\n")
+
+	env.turn()
+	env.awaitIdle()
+
+	if said := env.saidSoFar(); !strings.Contains(said, `freeze="remote rejection"`) {
+		t.Fatalf("obsync said %q, want the rejection freeze before anything else (§7)", said)
+	}
+
+	// The human puts the vault back where the remote is, which is one of the
+	// two repairs obsync's remedy leaves to them. The hook stands throughout:
+	// nothing about the remote changed, and nothing needs to.
+	tip := strings.TrimSpace(env.mustGit(env.remote, "rev-parse", "refs/heads/main"))
+	env.mustGit(env.vault, "reset", "--hard", tip)
+	env.advance(61 * time.Minute)
+
+	if said := env.saidSoFar(); !strings.Contains(said,
+		`msg="the freeze cleared and obsync is syncing with the remote again" freeze="remote rejection"`) {
+		t.Errorf("obsync said %q, want the rejection freeze cleared once the vault and the remote "+
+			"held the same tip — there is nothing left to push, so waiting for a push to clear it "+
+			"would be waiting for ever (§7, §9)", said)
+	}
+	if got, want := env.commitsOn(env.remote), "1"; got != want {
+		t.Errorf("the remote holds %s commits, want %s — obsync never pushed past the rule that "+
+			"refused it, and clearing the freeze is not obsync deciding the remote changed its "+
+			"mind", got, want)
+	}
+}
