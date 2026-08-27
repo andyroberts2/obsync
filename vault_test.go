@@ -982,6 +982,18 @@ func (e *vaultEnv) remoteRewritesItsHistory() {
 	e.mustGit(laptop, "push", "--quiet", "--force", "file://"+e.remote, "refs/heads/main:refs/heads/main")
 }
 
+// The other repair obsync's own remedy names: the human decides the vault's
+// history is the one they meant and puts it back on the remote, rather than
+// taking the remote's. It is a force-push, in their own clone of their own
+// repo — obsync has no such flag — and afterwards the remote holds exactly what
+// obsync's branch holds, so there is nothing left for a merge to resurrect.
+func (e *vaultEnv) vaultsHistoryIsForcedBackOntoTheRemote() {
+	e.t.Helper()
+
+	e.mustGit(e.vault, "push", "--quiet", "--force", "file://"+e.remote,
+		"refs/heads/main:refs/heads/main")
+}
+
 // laptopUpToDate is that second clone, made on first use and brought up to the
 // remote's tip on every use — someone whose laptop is behind pulls before they
 // push, and a test is not about that.

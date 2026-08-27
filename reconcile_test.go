@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -241,6 +242,84 @@ func TestTheRewriteFreezeClearsWhenTheHumanTakesTheRemotesHistory(t *testing.T) 
 	}
 }
 
+// The second repair obsync's own remedy names, and the one no local ref can
+// see: the operator decides the vault's history was the one they meant and puts
+// it back on the remote. §7 admits no exception — every freeze self-clears when
+// its cause is repaired, with no restart — so a freeze whose remedy an operator
+// followed to the letter and which then held anyway would be worse than one
+// that never named the remedy at all.
+//
+// The remote holds what obsync's branch holds again, so there is nothing left
+// for a merge to resurrect and nothing for a push to restore. obsync resumes.
+func TestTheRewriteFreezeClearsWhenTheHumanPutsTheirHistoryBackOnTheRemote(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.turn()
+	env.awaitIdle()
+
+	env.writeNote("Notes/secret.md", "the token I pasted by mistake\n")
+	env.advance(70 * time.Second)
+	env.remotePurgesItsTip()
+	env.advance(70 * time.Second)
+
+	env.vaultsHistoryIsForcedBackOntoTheRemote()
+	env.writeNote("Daily/2026-08-26.md", "written after the history was settled\n")
+	env.advance(70 * time.Second)
+
+	if got := env.remoteFile("Daily/2026-08-26.md"); got != "written after the history was settled\n" {
+		t.Errorf("the remote holds %q once the human put their history back on it, want the note "+
+			"obsync deferred: every freeze clears when its cause is repaired, with no restart and "+
+			"without exception (§7)", got)
+	}
+	if !strings.Contains(env.said(), "level=INFO msg=\"the freeze cleared") {
+		t.Errorf("obsync said %q, want one line saying the freeze cleared: an operator who did what "+
+			"the remedy told them to do gets obsync back (§9)", env.said())
+	}
+}
+
+// And the reason that re-check may never be an ordinary fetch: the rewritten
+// remote carrying on being written to is exactly when a merge would resurrect
+// everything the rewrite removed.
+//
+// What obsync last saw the remote hold is the remote-tracking ref's own reflog.
+// A fetch that moved that ref would overwrite the record, the tip obsync froze
+// on would become the tip it "last saw", and the freeze would clear on the
+// remote's next commit — putting the purged note straight back. So the freeze
+// holds here however far the rewritten history runs on.
+func TestTheRewriteFreezeHoldsWhileTheRewrittenRemoteKeepsMoving(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.turn()
+	env.awaitIdle()
+
+	env.writeNote("Notes/secret.md", "the token I pasted by mistake\n")
+	env.advance(70 * time.Second)
+	env.remotePurgesItsTip()
+	env.advance(70 * time.Second)
+
+	for run := range 3 {
+		env.remoteCommit("Notes/from the laptop.md",
+			fmt.Sprintf("the rewritten history carrying on, commit %d\n", run))
+		env.advance(70 * time.Second)
+	}
+
+	if env.remoteHoldsYet("Notes/secret.md") {
+		t.Error("the purged note is back on the remote, want it gone: a rewritten remote gaining " +
+			"commits is when a merge would resurrect what the rewrite removed, not when the " +
+			"freeze clears (§3)")
+	}
+	if env.vaultHoldsYet("Notes/from the laptop.md") {
+		t.Error("obsync fast-forwarded the vault onto a remote it is frozen against, want the " +
+			"network half stopped in both directions (§7)")
+	}
+	if strings.Contains(env.said(), "the freeze cleared") {
+		t.Errorf("obsync said %q, want the freeze still held: nothing about the remote being "+
+			"written to again undoes the rewrite (§3)", env.said())
+	}
+}
+
 // §3's dirty tree, and the shape it really arrives in: someone is typing into
 // the very note an incoming change overwrites. The run is abandoned — not an
 // error, not a freeze — and the next wake-up starts fresh. There is no second
@@ -311,6 +390,80 @@ func TestAnIncomingChangeArrivesWhileAnotherNoteIsBeingWritten(t *testing.T) {
 	}
 	if got := env.vaultFile("Daily/2026-08-24.md"); got != "what I am typing right now\n" {
 		t.Errorf("the vault holds %q where the human was typing, want their bytes untouched", got)
+	}
+}
+
+// The dirty-tree rule read against a path a vault may legally hold: a note
+// title carries spaces and unicode and, on the filesystem obsync runs against,
+// may contain a newline. Both sides of the comparison that decides an abort are
+// git output — the incoming diff and `git status` — so a newline read as a
+// record separator on either side splits one path into two names that match
+// nothing, and the abort silently stops happening.
+//
+// What that costs is in this test's own failure: git refuses the merge anyway,
+// so nothing is overwritten, and obsync reports the refusal as an ERROR every
+// tick — the noise the abort tier exists to prevent (§7).
+func TestTheDirtyTreeRuleHoldsForAPathWithASpaceAUnicodeQuoteAndANewline(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.turn()
+	env.awaitIdle()
+
+	path := "Notes/[draft] plan\nfür \u201ctea\u201d.md"
+	env.writeNote(path, "the version both sides start from\n")
+	env.advance(70 * time.Second)
+
+	env.remoteCommit(path, "their version of the note\n")
+	env.writeNote(path, "what I am typing right now\n")
+	settled := env.vaultTip()
+
+	for range 30 {
+		env.watcherWake()
+		env.advance(5 * time.Second)
+	}
+
+	if got := env.vaultFile(path); got != "what I am typing right now\n" {
+		t.Errorf("the vault holds %q, want the bytes the human was typing: a note title is not a "+
+			"line, and neither side of the comparison that decides this may read it as one (§3)", got)
+	}
+	if got := env.vaultTip(); got != settled {
+		t.Errorf("the vault's branch moved to %s, want it still at %s — the run is abandoned "+
+			"whole rather than half applied (§3)", got, settled)
+	}
+	if said := env.saidSoFar(); strings.Contains(said, "level=ERROR") {
+		t.Errorf("obsync said %q about abandoning the run, want nothing above debug: git refuses "+
+			"this merge either way, and an ERROR a tick is what the abort tier exists to prevent "+
+			"(§7)", said)
+	}
+}
+
+// The same rule against the third writer's own shape: a file the vault has
+// never seen before, sitting exactly where an incoming change lands. It is not
+// a modification git can compare, it is bytes that exist nowhere else — so
+// applying over it would be the one loss this design has no history to undo.
+func TestAnIncomingChangeIsNeverAppliedOverAnUntrackedFileAtItsPath(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.turn()
+	env.awaitIdle()
+
+	env.remoteCommit("Notes/from the laptop.md", "written on the other device\n")
+	env.writeNote("Notes/from the laptop.md", "the note I had just started, never committed\n")
+
+	for range 30 {
+		env.watcherWake()
+		env.advance(5 * time.Second)
+	}
+
+	if got := env.vaultFile("Notes/from the laptop.md"); got != "the note I had just started, never committed\n" {
+		t.Errorf("the vault holds %q, want the human's own untracked bytes: a path git has never "+
+			"seen is the one place the vault holds the only copy there is (§3, §6)", got)
+	}
+	if said := env.saidSoFar(); strings.Contains(said, "level=ERROR") {
+		t.Errorf("obsync said %q, want nothing above debug: this is an aborted run, and the next "+
+			"wake-up commits the new note and reconciles against it (§7)", said)
 	}
 }
 

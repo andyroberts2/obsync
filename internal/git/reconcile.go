@@ -101,21 +101,35 @@ func (r *Repo) Reconcile(ctx context.Context) (SyncState, error) {
 }
 
 // UpstreamRewritten re-asks the question a network freeze on an upstream
-// rewrite was entered on, and asks it without touching the network: the fact
-// lives in the vault's own refs.
+// rewrite was entered on, so that repairing it releases obsync with no restart
+// (§7, without exception).
 //
-// It is deliberately not a fetch. A fetch that moved the remote-tracking ref
-// would overwrite the record of what obsync last saw — the ref's reflog is that
-// record — and the freeze would then clear on a remote that had merely gained a
-// commit since the rewrite, which is the moment the merge would resurrect
-// everything the rewrite removed.
-func (r *Repo) UpstreamRewritten() (bool, error) {
-	tip, err := r.remoteTip()
-	if err != nil || tip == "" {
-		return false, err
-	}
+// It asks the remote, and it has to: the freeze has two repairs and only one of
+// them is visible in the vault. A human who takes the remote's history moves
+// obsync's branch, which the ancestry below sees locally. A human who does the
+// other thing obsync's own remedy names — puts the history they meant back on
+// the remote — changes nothing obsync's refs can see, and a freeze that reads
+// only local refs would hold for ever against the operator doing exactly what
+// it asked.
+//
+// It asks with --refmap=, and that is the whole of why asking is safe. What
+// obsync last saw the remote hold is the remote-tracking ref's own reflog, so
+// an ordinary fetch would overwrite the record and the freeze would clear the
+// moment the rewritten remote gained one more commit — which is precisely when
+// a merge would resurrect everything the rewrite removed. --refmap= discards
+// the vault's configured refspecs and uses only the one named here, which has
+// no destination, so the answer arrives in FETCH_HEAD and the ref and its
+// reflog are left exactly where they were.
+func (r *Repo) UpstreamRewritten(ctx context.Context) (bool, error) {
 	lastSeen, err := r.previousRemoteTip()
 	if err != nil {
+		return false, err
+	}
+	if lastSeen == "" {
+		return false, nil
+	}
+	tip, err := r.remoteTipUnrecorded(ctx)
+	if err != nil || tip == "" {
 		return false, err
 	}
 	return r.upstreamRewritten(lastSeen, tip)
@@ -305,6 +319,40 @@ func (r *Repo) previousRemoteTip() (string, error) {
 	if errors.As(err, &command) {
 		return "", nil
 	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// remoteTipUnrecorded is what the remote holds at the tracked branch now, asked
+// without disturbing obsync's record of what it last held.
+//
+// The refspec names no destination and --refmap= discards the vault's
+// configured ones, so nothing writes a remote-tracking ref and the answer is
+// FETCH_HEAD. Without --refmap= git updates that ref opportunistically whenever
+// the command-line refspec matches a configured one, which is exactly the
+// overwrite this must not do — measured on both matrix points, along with the
+// objects arriving with it, which is what makes the ancestry answerable
+// locally afterwards.
+//
+// --no-tags and --no-recurse-submodules for the same reasons fetch passes them:
+// one branch in each direction, and a submodule's remote is one obsync was
+// never pointed at.
+func (r *Repo) remoteTipUnrecorded(ctx context.Context) (string, error) {
+	if _, err := r.run(invocation{
+		dir: r.vault,
+		args: []string{"fetch", "--refmap=", "--quiet", "--no-tags", "--no-recurse-submodules",
+			config.RemoteName, "refs/heads/" + r.branch},
+		deadline: networkDeadline,
+		shutdown: ctx.Done(),
+	}); err != nil {
+		return "", err
+	}
+	out, err := r.run(invocation{
+		dir:  r.vault,
+		args: []string{"rev-parse", "--verify", "--quiet", "FETCH_HEAD"},
+	})
 	if err != nil {
 		return "", err
 	}

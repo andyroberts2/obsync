@@ -28,27 +28,28 @@ import (
 var forbidden = []struct {
 	literal string
 	only    string
+	named   string
 	promise string
 }{
-	{literal: `"checkout"`, promise: "obsync never runs git checkout after bootstrap: checking a " +
+	{literal: `"checkout"`, named: "**runs `git checkout` after bootstrap**", promise: "obsync never runs git checkout after bootstrap: checking a " +
 		"branch out rewrites the working tree under a live Obsidian with files open (§3)"},
-	{literal: `"rebase"`, promise: "obsync never rebases: a rebase walks the vault through one " +
+	{literal: `"rebase"`, named: "**rebases**", promise: "obsync never rebases: a rebase walks the vault through one " +
 		"checkout per replayed commit while ignis is still writing into it (§3)"},
-	{literal: `"--force"`, promise: "obsync never force-pushes, unconditionally and with no flag " +
+	{literal: `"--force"`, named: "not `--force`", promise: "obsync never force-pushes, unconditionally and with no flag " +
 		"to turn it off (§3)"},
-	{literal: `"--force-with-lease"`, promise: "obsync never force-pushes, and --force-with-lease " +
+	{literal: `"--force-with-lease"`, named: "not `--force-with-lease`", promise: "obsync never force-pushes, and --force-with-lease " +
 		"is named separately because it is the one someone reaches for when --force is refused (§3)"},
-	{literal: `"-f"`, promise: "obsync never force-pushes, in any spelling (§3)"},
-	{literal: `"--hard"`, promise: "obsync never discards history: following a rewritten remote by " +
+	{literal: `"-f"`, named: "**force-pushes**", promise: "obsync never force-pushes, in any spelling (§3)"},
+	{literal: `"--hard"`, named: "**hard-resetting**", promise: "obsync never discards history: following a rewritten remote by " +
 		"hard-resetting onto it is the mirror image of force-pushing (§3)"},
-	{literal: `"stash"`, promise: "obsync never stashes: a stash reverts the working tree to HEAD, " +
+	{literal: `"stash"`, named: "**stashes**", promise: "obsync never stashes: a stash reverts the working tree to HEAD, " +
 		"so the human's most recent edits would vanish out of their open vault for the duration " +
 		"of a merge (§3)"},
-	{literal: `"set-url"`, promise: "obsync never re-points a remote, and never writes the vault's " +
+	{literal: `"set-url"`, named: "never runs `git remote set-url`", promise: "obsync never re-points a remote, and never writes the vault's " +
 		".git/config at all (§8)"},
-	{literal: `"fsck"`, promise: "obsync never runs git fsck, at startup or at any cadence: damage " +
+	{literal: `"fsck"`, named: "**runs `git fsck`**", promise: "obsync never runs git fsck, at startup or at any cadence: damage " +
 		"is found by working, never by scanning (§7)"},
-	{literal: `"clone"`, only: "internal/git/bootstrap.go", promise: "obsync clones once, at " +
+	{literal: `"clone"`, only: "internal/git/bootstrap.go", named: "**re-clones or self-repairs a damaged repo**", promise: "obsync clones once, at " +
 		"bootstrap, into a directory that holds no repo; it never re-clones, because a re-clone " +
 		"discards exactly the commits obsync exists to have made (§7)"},
 }
@@ -82,6 +83,48 @@ func TestTheOneCloneIsTheOneBootstrapMakes(t *testing.T) {
 		t.Errorf("obsync's source names the clone subcommand %d times, want exactly one — the "+
 			"bootstrap case that makes an empty directory a copy of the remote (§3, §7)", clones)
 	}
+}
+
+// The list is a promise to an operator before it is a check on a maintainer, so
+// the page they read it on and the check that enforces it may not drift apart.
+// §10 puts the promise at the front door (user story 63) and docs/interface.md
+// points at it by name; this pins that pointer to something, the same direction
+// interface_test.go pins the ignore floor in.
+//
+// One direction only, deliberately: the README's never-list is broader than a
+// grep can decide — it also promises not to overwrite a conflict copy or exit on
+// a sync failure — so what is checkable is that every rule this file enforces is
+// stated there, not that nothing else is.
+func TestEveryArgvTheNeverListEnforcesIsOnThePageAnOperatorReads(t *testing.T) {
+	t.Parallel()
+
+	list := neverListOnThePage(t)
+	for _, rule := range forbidden {
+		if !strings.Contains(list, rule.named) {
+			t.Errorf("the README's never-list does not say %q, which %s is the enforcement of. %s",
+				rule.named, rule.literal, rule.promise)
+		}
+	}
+}
+
+// neverListOnThePage is the README's never-list section and nothing else, so
+// that "it is on the list" is what is asserted rather than "the word appears
+// somewhere in the README".
+func neverListOnThePage(t *testing.T) string {
+	t.Helper()
+
+	const heading = "## What obsync will never do"
+	source, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("reading the README the never-list is promised on: %v", err)
+	}
+	_, after, found := strings.Cut(string(source), heading)
+	if !found {
+		t.Fatalf("the README carries no %q section, and docs/interface.md points an operator at "+
+			"it by name: the list is the front door this project asks to be trusted at (§10)", heading)
+	}
+	list, _, _ := strings.Cut(after, "\n## ")
+	return list
 }
 
 // obsyncSource is every Go file obsync ships, by path relative to the module

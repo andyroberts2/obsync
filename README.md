@@ -45,6 +45,44 @@ Not yet: the filesystem watcher, the rest of the safety interlocks, the settle
 guard, conflicts, the attention note, the status file and the container image.
 obsync is not something to point at a vault yet.
 
+## What obsync will never do
+
+The list is at the front door on purpose: it is what decides whether obsync is
+something to hand a vault to, and every entry is a line the design declined to
+cross rather than a default it happens to ship. **obsync never:**
+
+- **force-pushes** — not `--force`, not `--force-with-lease`, and there is no
+  flag to turn it on. Every write to the remote is a fast-forward or it does not
+  happen.
+- **rebases** — a rebase walks a live vault through one checkout per replayed
+  commit while Obsidian has your notes open.
+- **runs `git checkout` after bootstrap** — checking a branch out rewrites the
+  working tree under someone who is typing into it.
+- **writes your repo's `.git/config`**, and never runs `git remote set-url`.
+  Your identity and your remote stay yours; obsync only ever reads them.
+- **re-clones or self-repairs a damaged repo** — a re-clone discards exactly the
+  commits obsync exists to have made. A written recovery recipe replaces it.
+- **discards history.** It may delete derived state such as `.git/index`; it
+  never touches a commit, a blob or a file you own. Following a rewritten remote
+  by **hard-resetting** onto it is the mirror image of force-pushing, and is
+  refused for the same reason.
+- **stashes** — a stash reverts your working tree to HEAD, so your most recent
+  edits would vanish out of your open vault for the duration.
+- **runs `git fsck`**, at startup or at any cadence — damage is found by
+  working, never by scanning.
+- **rewinds a commit the remote refused**, and imposes no cap on how far the
+  local branch runs ahead of the remote.
+- **diagnoses a remote rejection** — it relays the remote's own words verbatim,
+  labelled as the remote's, and never guesses at a cause.
+- **overwrites a conflict copy** — that is the one way this design could
+  actually lose bytes.
+- **exits on a sync failure.** It parks alive and keeps saying why, because a
+  crash-looping container buries the one message that matters.
+
+The entries a grep can decide are decided by one: `neverlist_test.go` reads
+obsync's own source and fails the build if a forbidden argv appears in it, which
+is what makes softening one of these a visible amendment rather than an edit.
+
 ## Reference deployment
 
 The primary target is [ignis](https://github.com/Nystik-gh/ignis), which runs

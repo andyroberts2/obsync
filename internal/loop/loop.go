@@ -261,21 +261,27 @@ func (l *Loop) stillWithheld(ctx context.Context) bool {
 // one obsync stopped syncing with, and clears the network freeze when it is
 // not.
 //
-// The re-check costs no network at all: what obsync last saw the remote hold is
-// in the vault's own refs. That is not a saving, it is the point — a fetch
-// would move the remote-tracking ref and overwrite the record, and the freeze
-// would then clear on a remote that had merely gained a commit since the
-// rewrite, which is exactly when a merge would resurrect what the rewrite
-// removed.
-func (l *Loop) stillRewritten() (bool, error) {
+// The re-check asks the remote, because one of the freeze's two repairs is a
+// fact only the remote holds — the human putting the history they meant back on
+// it, which is the second thing obsync's own remedy tells them to do. It asks
+// in the one way that cannot overwrite obsync's record of what it last saw the
+// remote hold; git.UpstreamRewritten is where that is argued.
+//
+// A remote obsync cannot reach answers nothing, and obsync stays frozen: the
+// freeze clears on a fact, never on a failure to establish one. The probe is a
+// network command like any other, so a failure backs the network half off and
+// the ordinary tick retries it.
+func (l *Loop) stillRewritten(ctx context.Context, now time.Time) (bool, error) {
 	if l.networkFrozen == "" {
 		return false, nil
 	}
 
-	rewritten, err := l.repo.UpstreamRewritten()
+	rewritten, err := l.repo.UpstreamRewritten(ctx)
 	if err != nil {
+		l.backOff(now)
 		return true, err
 	}
+	l.networkSucceeded()
 	if rewritten {
 		return true, nil
 	}
@@ -436,7 +442,7 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 	if now.Before(l.retryNetworkAt) {
 		return nil
 	}
-	frozen, err := l.stillRewritten()
+	frozen, err := l.stillRewritten(ctx, now)
 	if err != nil || frozen {
 		return err
 	}
