@@ -186,6 +186,28 @@ func LooksLike(err error) string {
 //   - a truncated or corrupt index — `fatal: .git/index: index file smaller
 //     than expected`.
 //
+// The last three are the network half's, and they are the precedent the rule
+// above generalises rather than a second kind of thing: a wrong or expired
+// credential is a labelled network-half failure on the ordinary backoff and
+// never a freeze (§7, §8), because PATs expire and get rotated and a latched
+// auth freeze would take away self-recovery for nothing. Measured at both
+// matrix points against the failure that produces each:
+//
+//   - a credential the remote refused — `fatal: Authentication failed for
+//     '<url>'`, over https with a PAT the remote would not take;
+//   - no credential at all — `fatal: could not read Username for '<host>':
+//     terminal prompts disabled`, which is what GIT_TERMINAL_PROMPT=0 turns an
+//     interactive prompt into (§1);
+//   - an ssh key the remote refused — `git@host: Permission denied
+//     (publickey).`
+//
+// They share this list rather than having one of their own, because this being
+// the one place obsync reads prose is worth more than the tidiness of two
+// lists. Each is matched in the spelling that cannot collide with a local
+// failure: `permission denied` alone would label an ordinary EACCES on the
+// vault as a credential the remote refused, and `(publickey` is what makes it
+// ssh's and only ssh's.
+//
 // The index phrase goes first because it is the one damage the rebuild repairs,
 // so a human reading it is being told something they need do nothing about. The
 // list is deliberately short: an unrecognised failure says nothing extra, which
@@ -198,6 +220,9 @@ var namedByGit = []struct{ said, looksLike string }{
 	{"object file", "this looks like an empty or corrupt object file"},
 	{"bad object", "this looks like an object git cannot read"},
 	{"bad tree object", "this looks like an object git cannot read"},
+	{"authentication failed", "this looks like a credential the remote would not accept"},
+	{"could not read username", "this looks like a missing credential"},
+	{"permission denied (publickey", "this looks like an ssh key the remote would not accept"},
 }
 
 // FreeSpaceIfLow is how much room is left where the repository lives, said only

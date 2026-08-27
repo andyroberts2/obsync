@@ -271,9 +271,9 @@ func TestReplacingTheCredentialFileHealsAFailedPushWithNoRestart(t *testing.T) {
 	env.writeNote("Daily/2026-08-24.md", "written while the token was expired\n")
 
 	// Turning rather than woken twice, because the run that heals is a later
-	// run and not an immediate retry: the refused push backs the network half
-	// off for 60s, and the tick past that wait is what carries the rotated
-	// token to the remote (§2).
+	// run and not an immediate retry: a credential the remote would not take
+	// backs the network half off for 60s, and the tick past that wait is what
+	// carries the rotated token to the remote (§2).
 	env.turn()
 	env.awaitIdle()
 

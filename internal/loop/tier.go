@@ -42,13 +42,18 @@ const (
 // --keep` refusing a dirty path and a dirty tree mid-run (`git.
 // ErrVaultWrittenMidRun`, which is obsync's own conclusive question asked ahead
 // of the apply); the remote unreachable or timed out (`git.
-// ErrRemoteUnreachable`, `git.ErrNetworkDeadline`). The one member not yet
-// here is a push `rejected` for losing a race, which needs the porcelain enum
-// to be told from a rejection (#35).
+// ErrRemoteUnreachable`, `git.ErrNetworkDeadline`, which a push with no verdict
+// at all also carries); and a push `rejected` for losing a race
+// (`git.ErrLostTheRace`), told from a rejection by the documented porcelain
+// enum rather than by an exit status that cannot separate them. `git.
+// ErrRemoteFailure` is here for the same reason the unreachable remote is: the
+// remote never reported what it did, so nothing was decided.
 //
 // **Network freeze.** An upstream rewrite; a conflict type outside the closed
 // table; a merge over the storm ceiling; a merged-tree blob over the size
-// ceiling. The remaining member is a remote rejection (#35).
+// ceiling; and a **remote rejection**, which is the one member that is a
+// verdict rather than an inconclusive check — it arrives as `errNetworkFrozen`
+// like the others, entered where the verdict was read.
 //
 // **Full freeze.** Any of the nine gates and the vault sentinel, which arrive
 // as a `*git.InterlockFailure` and are matched by type rather than by row —
@@ -72,6 +77,8 @@ var tiers = []struct {
 	{git.ErrVaultWrittenMidRun, abortedRun},
 	{git.ErrRemoteUnreachable, abortedRun},
 	{git.ErrNetworkDeadline, abortedRun},
+	{git.ErrLostTheRace, abortedRun},
+	{git.ErrRemoteFailure, abortedRun},
 	{errNetworkFrozen, networkFreeze},
 	{errFullFrozen, fullFreeze},
 }
@@ -88,9 +95,10 @@ var tiers = []struct {
 // stated reason (§7), which is a fact about where the failure happened rather
 // than about whether this table has a row for it: an `index.lock` somebody else
 // holds for five runs running has a row and is still five runs of obsync not
-// being able to work in the vault, and a push that failed has no row and is not
-// the local half at all. So the streak is counted at the sites in perform that
-// are the local half, and this table goes on saying only what a failure means.
+// being able to work in the vault, and a push the remote rejected has a row of
+// its own and is not the local half at all. So the streak is counted at the
+// sites in perform that are the local half, and this table goes on saying only
+// what a failure means.
 func tierOf(err error) (tier, bool) {
 	var failing *git.InterlockFailure
 	if errors.As(err, &failing) {

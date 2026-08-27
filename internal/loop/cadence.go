@@ -73,6 +73,23 @@ const (
 	backoffLongest = 15 * time.Minute
 )
 
+// hourly is the one cadence a broken obsync runs on: the remote-rejection
+// retry (§7) and the hourly repeat of anything a human is needed for (§9).
+//
+// One constant for both, deliberately, and §2's table states them as one row —
+// "the retry and the report are one tick". Two of them would be two schedules
+// for one idea, and a rejection whose retry and whose repeat fell on different
+// ticks would tell an operator about a state obsync had just re-tested and say
+// nothing about what it found.
+//
+// An hour rather than the backoff's 15m ceiling, and the difference is what the
+// two waits are for: fifteen minutes is for a remote that might come back, an
+// hour for one that has already answered. Nothing about the wait repairs a
+// rejection — a human changes something on the remote — so the retry exists to
+// notice that they have, and hourly is often enough for that and rare enough
+// that the pack a rejection keeps re-uploading is not sent every minute.
+const hourly = time.Hour
+
 // persistenceThreshold is how many times in a row something has to happen
 // before obsync stops believing in bad luck: five.
 //

@@ -269,11 +269,11 @@ func (r *Repo) fetch(ctx context.Context) error {
 // already correctly announced — which is exactly the noise the abort tier
 // exists to prevent.
 //
-// A *push* that fails is deliberately not this. A push carries a verdict from
-// the party whose opinion is the whole question, and telling a lost race from a
-// rejection is what §7's push disposition table is for (#35, unbuilt) — so
-// until that lands a failed push stays a reported failure rather than being
-// quietly sorted into the tier that says nothing.
+// A *push* is sorted by §7's disposition table rather than by this, because a
+// push carries a verdict from the party whose opinion is the whole question
+// (push.go). One row of that table lands here and it is the row where there was
+// no verdict at all: exit 128 with no ref line, which is the same fact a failed
+// fetch carries and takes the same tier.
 var ErrRemoteUnreachable = errors.New("the remote did not answer")
 
 // unanswered labels a failed read-only network git as the remote not having

@@ -195,6 +195,22 @@ nothing new. obsync *refuses*, the remote *rejects* — two verbs, two actors,
 never interchangeable.
 _Avoid_: push failure, rejected push, refused push
 
+**Push disposition**:
+What the remote did with a push, read from the closed enum git documents as the
+`--porcelain` `<summary>` — pushed, a lost race, a remote rejection, a remote
+failure, or no verdict at all. It is the one place obsync is handed a verdict
+rather than an answer, and the enum is what obsync branches on; the
+`(<reason>)` beside it is git's "human-readable explanation" and is relayed
+verbatim, never read.
+_Avoid_: push result, push status, push outcome
+
+**Lost race**:
+A push refused as a non-fast-forward because somebody landed a commit on the
+remote between this run's fetch and this run's push. An aborted run, and the
+one disposition that is not a fact about anything being wrong: the next run
+fetches, merges and publishes both sides.
+_Avoid_: conflict, race condition, stale push
+
 ### What obsync tracks
 
 **Ignore floor**:

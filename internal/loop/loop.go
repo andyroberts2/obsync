@@ -11,8 +11,8 @@
 // commit the rest as one commit, fetch, classify, fast-forward what is only
 // behind, merge what has genuinely diverged out of tree so that both sides
 // survive unless a ceiling says a human should look first, check that the vault
-// holds the tree it just applied, and push (#24, #27, #28, #29, #30, #31, #32,
-// #33, #34).
+// holds the tree it just applied, and push what the remote will take (#24, #27,
+// #28, #29, #30, #31, #32, #33, #34, #35).
 //
 // The interlocks come first and everything after them is a thing obsync does to
 // a vault they said it may (§7). What a failure then *means* is tier.go: three
@@ -70,9 +70,12 @@ type Loop struct {
 	// network freeze. The first has thirteen causes — the nine gates and the
 	// vault sentinel (§7), a remote holding refs but not the tracked branch,
 	// HEAD moving off the tracked branch (§3), and the local failure streak
-	// reaching five (#34) — and the second four: an upstream rewrite, and each
-	// of §4's three ways a merge stops rather than being improvised into a
-	// commit. Write-verify failing (#33) adds no cause of its own: it is gate
+	// reaching five (#34) — and the second five: an upstream rewrite, each of
+	// §4's three ways a merge stops rather than being improvised into a
+	// commit, and a remote rejection (#35), which is the only one of them that
+	// is a verdict rather than an inconclusive check and therefore the only one
+	// entered on a first occurrence. Write-verify failing (#33) adds no cause
+	// of its own: it is gate
 	// 9's freeze, reached from the run that wrote the ref rather than from the
 	// ref, which is what makes the two one state rather than two (§9).
 	//
@@ -491,11 +494,26 @@ func (l *Loop) thawed(name string) {
 // settles the conflict, shrinks the file, or resolves the storm on either side
 // gets obsync back on the next tick, with no restart (§7).
 //
+// It is asked with the freezes the evidence in hand actually disproves, the
+// same way interlocksHold is, because the two shapes of network freeze are
+// disproved by two different things: a reconcile that got through is evidence
+// about a merge and about nothing else, and only a push that landed is evidence
+// against a remote rejection. Clearing every network freeze on a reconcile
+// would announce that obsync was syncing with the remote again, once an hour,
+// on a vault whose every push the remote was still refusing.
+//
 // The upstream-rewrite freeze never reaches here: it is re-checked before a
 // reconcile happens at all, by a probe that cannot overwrite obsync's record of
 // what the remote last held, and it stops the run when it holds.
-func (l *Loop) networkThawed() {
+func (l *Loop) networkThawed(disproved ...string) {
 	if l.networkFrozen == "" {
+		return
+	}
+	found := false
+	for _, name := range disproved {
+		found = found || name == l.networkFrozen
+	}
+	if !found {
 		return
 	}
 	cleared := l.networkFrozen
@@ -555,7 +573,52 @@ const (
 	// repository is damaged, and the fact obsync writes beside it is the count,
 	// the argv and git's own words.
 	freezeDamagedRepo = "the vault's repository is damaged"
+
+	// freezeRemoteRejection is the remote having received obsync's push,
+	// evaluated it and declined it (§7, #35). It is a verdict rather than a
+	// failure, which is why it is entered on the first occurrence rather than
+	// on a streak: the party whose opinion is the whole question has already
+	// answered, and a second identical answer carries nothing new.
+	//
+	// It is the one network freeze that never self-clears by *waiting* — it
+	// clears when a human changes something on the remote — which is why its
+	// remedy says where to look. An operator who goes looking in the vault
+	// will find nothing wrong there.
+	freezeRemoteRejection = "remote rejection"
 )
+
+// mergeFreezes are the network freezes a computed merge establishes, and the
+// ones a later computed merge is evidence against (§4).
+//
+// They are named as a set because they are cleared as one: their cause is not a
+// fact obsync can look up but what the next merge of the two histories comes
+// out as, so a reconcile that got through disproves all three at once. The two
+// network freezes that are *not* here are the two whose evidence is something
+// else — an upstream rewrite, re-checked before a reconcile by a probe that
+// cannot overwrite obsync's record of what the remote last held, and a remote
+// rejection, which only a push can disprove.
+var mergeFreezes = []string{
+	freezeConflictOutsideTheTable,
+	freezeConflictStorm,
+	freezeMergedTreeOverTheCeiling,
+}
+
+// remoteRejectionRemedy is what a human does about a push the remote refused,
+// and the first thing it does is send them somewhere other than here.
+//
+// It is one const in one place for the same reason failedApplyRemedy is: two
+// spellings of one freeze's remedy read to an operator as two freezes. It is
+// also the one remedy that is the same sentence whatever the remote said, which
+// is what "relays, never diagnoses" amounts to in the place a human reads —
+// obsync hands over the remote's words and adds no advice of its own about what
+// they mean.
+const remoteRejectionRemedy = "look at the remote rather than at the vault: the remote received " +
+	"this push, evaluated it and declined it, so there is nothing wrong here to find. The words " +
+	"above are the remote's own, relayed exactly as they arrived — obsync never guesses at which " +
+	"file or which rule is the problem. Change whatever the remote objects to, on the remote, and " +
+	"obsync retries the whole network half once an hour. It will not rewind the commit the remote " +
+	"refused and there is no cap on how far the vault runs ahead meanwhile, so nothing you write " +
+	"is at risk while this stands; docs/operations.md has the recipe" + git.SelfClearing
 
 // perform is the body of a sync run: what changed, one commit, one push.
 //
@@ -692,16 +755,13 @@ func (l *Loop) perform(ctx context.Context, committing bool) error {
 func (l *Loop) localFailed(err error) error {
 	l.localFailureStreak++
 	said := l.whatItLooksLike(err)
-	labelled := err
-	if said != "" {
-		labelled = fmt.Errorf("%w — %s", err, said)
-	}
+	named := labelled(err, said)
 	switch {
 	case l.localFailureStreak < persistenceThreshold:
-		return labelled
+		return named
 	case l.localFailureStreak == persistenceThreshold:
-		l.rebuildTheIndex(labelled)
-		return labelled
+		l.rebuildTheIndex(named)
+		return named
 	}
 	return l.freeze(freezeDamagedRepo, l.damageFact(err, said), damagedRepoRemedy)
 }
@@ -799,6 +859,21 @@ func (l *Loop) damageFact(err error, said string) string {
 // Both are labels. git's words may name a failure and only persistence may
 // escalate one (§7), and statfs labels and never gates — there is no free-space
 // gate anywhere in obsync, and no threshold to configure.
+// labelled is git's own words added to a failure obsync is about to report,
+// and it is the whole of what "git's words may name a failure" amounts to in
+// code: the sentence a human reads changes, and nothing else does (§7).
+//
+// One spelling in one place, because the two halves both do it — the local
+// failure streak labels a damaged object, and a failed push labels a credential
+// the remote would not take — and two spellings of "obsync is telling you what
+// this looks like" would read as two different kinds of claim.
+func labelled(err error, said string) error {
+	if said == "" {
+		return err
+	}
+	return fmt.Errorf("%w — %s", err, said)
+}
+
 func (l *Loop) whatItLooksLike(err error) string {
 	said := git.LooksLike(err)
 	free := l.repo.FreeSpaceIfLow()
@@ -1302,21 +1377,34 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 		// left where it is and the next tick tries again.
 		return err
 	case err != nil:
+		// Labelled here as well as at the push, because §7's bad credential is
+		// a *network-half* failure rather than a failure of the push alone: a token the
+		// remote will not take fails the fetch first, and the run never
+		// reaches the push to be labelled there.
 		l.backOff(now)
-		return err
+		return labelled(err, git.LooksLike(err))
 	}
 	l.networkSucceeded()
-	l.networkThawed()
+	l.networkThawed(mergeFreezes...)
 
 	switch reconciled.State {
 	case git.Ahead:
 		return l.push(ctx, now)
 	case git.Equal:
 		l.remoteInStep = true
+		// The vault and the remote hold the same tip, so a rejection freeze
+		// standing over a commit obsync could not publish is over a commit the
+		// remote now has. That is the second way a human repairs one — putting
+		// obsync's work on the remote themselves, or taking the offending
+		// commit out of the vault — and a freeze that only a successful push
+		// could clear would stand for ever on a vault with nothing left to
+		// push (§7).
+		l.networkThawed(freezeRemoteRejection)
 	case git.Behind:
 		// The fast-forward already happened, so the vault now holds the
 		// remote's tip.
 		l.remoteInStep = true
+		l.networkThawed(freezeRemoteRejection)
 		// A run that changed something says so, and this changed the vault
 		// (§9): someone else's edit is now in front of the human.
 		l.log.Info("the vault caught up with the remote", "branch", l.repo.TrackedBranch())
@@ -1337,6 +1425,12 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 
 // push sends the tracked branch, and is the only thing in a sync run that
 // writes to the remote.
+//
+// It is also the only place obsync is ever handed a *verdict* rather than an
+// answer, which is what §7's disposition table sorts: git.Push branches on the
+// documented porcelain enum, and what arrives here is a verdict the remote
+// returned, a race this run lost, or a failure that returned no verdict at all
+// — three different tiers, and the whole reason the table exists.
 func (l *Loop) push(ctx context.Context, now time.Time) error {
 	// The push floor, off by default: a lower bound between pushes, checked
 	// here on the loop obsync already turns rather than kept by a second timer.
@@ -1344,15 +1438,66 @@ func (l *Loop) push(ctx context.Context, now time.Time) error {
 		return nil
 	}
 
-	if err := l.repo.Push(ctx); err != nil {
-		l.backOff(now)
+	err := l.repo.Push(ctx)
+	var rejected *git.RemoteRejection
+	switch {
+	case err == nil:
+	case errors.As(err, &rejected):
+		// A verdict, so it escalates now rather than after a streak: waiting
+		// is what repairs having been told nothing, and obsync has been told
+		// something. Waiting is measurably expensive here too — a rejection is
+		// discoverable only by uploading, because `push --porcelain
+		// --dry-run` was measured blind to a hook rejection and
+		// receive.maxInputSize is enforced incrementally inside index-pack, so
+		// five retries before telling anyone would be an hour of silence
+		// bought with five full uploads of bytes that will never land.
+		//
+		// The wait is set before the freeze rather than inside it, because the
+		// freeze says nothing on the runs after the first and the retry has to
+		// go on being pushed out an hour on every one of them.
+		l.retryHourly(now)
+		return l.networkFreeze(freezeRemoteRejection, rejected.Error(), remoteRejectionRemedy)
+	case errors.Is(err, git.ErrLostTheRace):
+		// The remote answered, and what it answered is that obsync is behind:
+		// somebody else pushed between this run's fetch and this run's push.
+		// An aborted run, and deliberately no backoff — nothing about the
+		// remote is wrong, and the next run fetches, classifies as diverged,
+		// merges and pushes, which is the designed-for case rather than an
+		// anomaly (§3).
 		return err
+	default:
+		l.backOff(now)
+		return labelled(err, git.LooksLike(err))
 	}
 	l.lastPush = now
 	l.remoteInStep = true
 	l.networkSucceeded()
+	// The one thing that is evidence against a rejection: the remote taking
+	// the push it had refused.
+	l.networkThawed(freezeRemoteRejection)
 	l.log.Info("pushed", "branch", l.repo.TrackedBranch())
 	return nil
+}
+
+// retryHourly is what a remote rejection waits, and it is deliberately not the
+// backoff.
+//
+// The backoff is for a remote that might come back and doubles to fifteen
+// minutes; this is for one that has already answered, and it is flat. They
+// share the one moment the network half is gated on, because there is one
+// network-half wait rather than two — which is what keeps "the retry and the
+// report are one tick" a property of the loop rather than a promise, and what
+// makes the retry a *whole* network half, so upstream changes still arrive,
+// just hourly.
+//
+// The backoff's own step is left alone rather than set to an hour. An hour is
+// not a step on a curve that doubles to fifteen minutes, and writing it there
+// would make the *next* ordinary failure shorten the wait instead of
+// lengthening it. A network failure during the frozen hour is an ordinary one
+// and starts its own backoff from the floor; the hour is re-armed by the next
+// run that reaches the push and is rejected again.
+func (l *Loop) retryHourly(now time.Time) {
+	l.retryNetworkAt = now.Add(hourly)
 }
 
 // backOff doubles the network half's wait, from 60s and never past 15m.

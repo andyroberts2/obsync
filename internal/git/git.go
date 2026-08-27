@@ -18,7 +18,6 @@ package git
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -332,34 +331,6 @@ func (r *Repo) Commit(message string) error {
 		dir:   r.vault,
 		stdin: []byte(message),
 		args:  []string{"commit", "--quiet", "--cleanup=whitespace", "-F", "-"},
-	})
-	return err
-}
-
-// Push sends the tracked branch to the remote, and is the one network command
-// in this build.
-//
-// The refspec is written out in full and both sides are named: obsync pushes
-// one branch in each direction (§3) and never sets an upstream, because -u
-// writes the vault's .git/config, which belongs to the human. There is no
-// --force here and there is none anywhere, not even --force-with-lease: every
-// write to the remote is a fast-forward or it does not happen.
-//
-// --no-follow-tags is what keeps "one branch in each direction" true against
-// the vault's own config: push.followTags there — the human's file, which
-// outranks obsync's private one — otherwise sends every annotated tag reachable
-// from the pushed commit along with it. Measured on both matrix points.
-//
-// --porcelain is passed for the enum in its output, which is how a rejection is
-// eventually told from a lost race (§7) — that reading is #35's, and until it
-// exists a non-zero exit is simply a failed run.
-func (r *Repo) Push(ctx context.Context) error {
-	ref := "refs/heads/" + r.branch
-	_, err := r.run(invocation{
-		dir:      r.vault,
-		args:     []string{"push", "--porcelain", "--no-follow-tags", config.RemoteName, ref + ":" + ref},
-		deadline: networkDeadline,
-		shutdown: ctx.Done(),
 	})
 	return err
 }
