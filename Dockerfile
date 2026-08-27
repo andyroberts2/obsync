@@ -14,7 +14,7 @@
 # The builder runs on the machine that does the build and emits a binary for
 # the target platform. An arm64 image needs no emulation, and a clean checkout
 # rebuilds the image without CI copying a binary in.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS builder
 
 # CGO off makes the binary static. A static binary is the only thing the final
 # stage needs beside git.
