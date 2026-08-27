@@ -26,7 +26,8 @@ thousand notes, 12.4ms at ten thousand, 42.7ms at fifty thousand, and the two po
 within 4%. The tick is 60 seconds, so even at fifty thousand notes — past what this audience has — a vault
 syncing at one run per tick spends **0.07% of one core** on the one command every run pays.
 
-**2. A divergence costs about 68ms at a thousand notes and 224ms at fifty thousand.** **[measured]** The out-of-tree
+**2. A divergence costs about 68ms of work at a thousand notes and 224ms at fifty thousand**, on top of the
+settle interval every apply spends on purpose. **[measured]** The out-of-tree
 merge is computed on every divergence by design (§4), and a divergence is the designed-for case rather than an
 anomaly, so this is a cost a vault pays routinely. At fifty thousand notes it is under a quarter of a second, of
 which about 43ms is the `git status` the write-side settle guard already runs (§6). **[inference]**
@@ -151,6 +152,24 @@ The benchmark drives one real divergence per iteration with **one conflicted pat
 same daily note, which is user story 10 and the shape that reaches every expensive part of §4, including
 writing a conflict copy. Building the divergence is outside the timer.
 
+**What the timed region is not, and it differs from §1's in both directions.** §1 measures `Changed` precisely
+so that no fetch is inside the timer; here the fetch is inside it, because a divergence is not a divergence
+until obsync has been told about one. So this figure is a CPU cost and not an elapsed one, and two things
+separate it from what a vault actually spends on a divergence:
+
+- **The fetch is over `file://`, on the same disk.** Measured separately, one such fetch of one new commit into
+  a thousand-note repo is **~14ms** — about a fifth of that row. **[measured]** A deployment pays a real
+  network round trip there instead, which is unbounded by anything in this report and is why the network half
+  is the half that backs off (§2) and carries the only timeout in the design (§1).
+- **The settle interval is not in it.** §4's apply runs the write-side settle guard, which spends the settle
+  interval — one second, §6, deliberately — and the benchmark drives obsync's injected clock, which services
+  that instantly. Every merge a real vault performs costs this figure **plus that second**, and the second is
+  the larger number at every vault size measured here.
+
+Neither moves the verdict, because the verdict is about growth against a 60s tick rather than about an
+absolute. Both are stated because a reader planning around "a divergence costs 224ms" would otherwise be
+planning around the wrong quantity.
+
 ### Numbers
 
 Minimum of two runs of ten iterations each, at both points. **[measured]**
@@ -166,8 +185,9 @@ landed in 2.38, and this is what it costs there.
 
 ### What that means for a deployment
 
-Under a quarter of a second, on a fifty-thousand-note vault, for a merge that keeps both sides of a conflicted
-note. Three things follow, none of them a change:
+Under a quarter of a second of work, on a fifty-thousand-note vault, for a merge that keeps both sides of a
+conflicted note — plus the settle second and the network round trip named above. Three things follow, none of
+them a change:
 
 - **The out-of-tree merge is affordable on every divergence**, which is what §4 assumed when it rejected
   fast-forward-only-and-freeze on frequency. **[inference]**

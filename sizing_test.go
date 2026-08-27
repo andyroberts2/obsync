@@ -85,6 +85,17 @@ func BenchmarkStatusCostPerRun(b *testing.B) {
 // copy, commit-tree, and reset --keep applying it to the working tree. Building
 // that divergence is outside the timer; what is timed is Reconcile, which is
 // the fetch, the classification and the merge.
+//
+// So this is a CPU cost rather than an elapsed one, and it differs from
+// BenchmarkStatusCostPerRun's in both directions. The fetch is inside the timer
+// here — a divergence is not one until obsync has been told about it — and it
+// crosses a file:// remote on the same disk, where a deployment pays a network
+// round trip. And the settle interval is not inside it at all: §4's apply runs
+// the write-side settle guard, which spends that second on purpose, and the
+// injected clock services it instantly. Every merge a real vault performs costs
+// what this measures plus that second. docs/research/sizing.md §2 says so where
+// it quotes the numbers, because a reader planning around them is the one who
+// needs to know which quantity they are.
 func BenchmarkMergeCostPerDivergence(b *testing.B) {
 	for _, notes := range vaultSizes {
 		b.Run(fmt.Sprintf("%d-notes", notes), func(b *testing.B) {
@@ -233,10 +244,17 @@ func TestKeepingBothSidesOfAnAttachmentDoublesItInTheVaultAndNotInTheObjectStore
 	// where the vault previously carried one. Read off the volume rather than
 	// asserted from the two reads above, because the bytes on disk are what a
 	// volume is sized for.
-	if got, want := workingTreeBytes(t, env.vault), int64(2*attachmentSize); got < want {
-		t.Errorf("the vault's working tree carries %d bytes, want at least %d — keeping both sides "+
-			"of a conflicted attachment writes the file twice, which is the deployment fact "+
-			"docs/research/sizing.md is written from", got, want)
+	//
+	// A band rather than a floor, because the claim the README and
+	// docs/research/sizing.md are written from is *twice* and not *at least
+	// twice* — an operator sizing a volume for a 90MB video is planning against
+	// the multiplier. A floor alone stays green on a merge that wrote the
+	// attachment a third time, which is the direction that costs them.
+	twice, thrice := int64(2*attachmentSize), int64(3*attachmentSize)
+	if got := workingTreeBytes(t, env.vault); got < twice || got >= thrice {
+		t.Errorf("the vault's working tree carries %d bytes, want at least %d and under %d — keeping "+
+			"both sides of a conflicted attachment writes the file exactly twice, which is the "+
+			"deployment fact docs/research/sizing.md is written from", got, twice, thrice)
 	}
 
 	// And the whole of the reason it costs the remote nothing: the copy is not
