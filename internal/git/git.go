@@ -76,6 +76,12 @@ type Repo struct {
 	// git asks.
 	credentialEnvironment []string
 
+	// branch is the tracked branch: resolved once by Bootstrap and fixed for
+	// the process lifetime (§3), which is why it is set at construction and
+	// never written again. The branch obsync syncs cannot become a thing a
+	// human changes by accident.
+	branch string
+
 	log   *slog.Logger
 	clock clock.Clock
 
@@ -94,41 +100,6 @@ type Repo struct {
 	// reads or writes this, so it needs no lock — the same reason the loop
 	// itself has none.
 	stoppingSince time.Time
-}
-
-// Attach opens the vault's repository and writes obsync's private git
-// configuration, returning a Repo that runs every git under it.
-//
-// It does not decide whether the vault is one obsync may sync — the gates do
-// that, per run, and they are #32. What it does is fail early and by name when
-// the vault path is not a directory obsync can see at all, because every other
-// failure below it would otherwise present as a chdir error from git.
-func Attach(cfg config.Config, log *slog.Logger, clk clock.Clock) (*Repo, error) {
-	info, err := os.Stat(cfg.VaultPath)
-	if err != nil {
-		return nil, fmt.Errorf("the vault at %q cannot be read: %w", cfg.VaultPath, err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("the vault at %q is not a directory", cfg.VaultPath)
-	}
-
-	credentialIsolation, err := newIsolation()
-	if err != nil {
-		return nil, err
-	}
-
-	repo := &Repo{
-		vault:                 cfg.VaultPath,
-		isolation:             credentialIsolation,
-		credentialEnvironment: cfg.CredentialEnvironment(),
-		log:                   log,
-		clock:                 clk,
-	}
-	if err := repo.writeConfig(cfg.CommitIdentity); err != nil {
-		_ = repo.Close()
-		return nil, err
-	}
-	return repo, nil
 }
 
 // Close removes the private git configuration. A Repo is unusable afterwards.
@@ -175,12 +146,16 @@ func (r *Repo) writeConfig(identity config.CommitIdentity) error {
 	return nil
 }
 
-// HeadBranch is the branch HEAD is on. It is what the tracked branch resolves
+// TrackedBranch is the single branch obsync syncs, resolved at bootstrap and
+// fixed for the process lifetime (§3).
+func (r *Repo) TrackedBranch() string { return r.branch }
+
+// headBranch is the branch HEAD is on. It is what the tracked branch resolves
 // to when obsync attaches to a vault that is already a repo — the branch the
 // human is already on, never the remote's idea of a default (§3).
 //
 // A detached HEAD has no answer here; it is gate 3, and a full freeze (#32).
-func (r *Repo) HeadBranch() (string, error) {
+func (r *Repo) headBranch() (string, error) {
 	out, err := r.run(invocation{dir: r.vault, args: []string{"symbolic-ref", "--quiet", "--short", "HEAD"}})
 	if err != nil {
 		return "", fmt.Errorf("the vault's HEAD is not on a branch: %w", err)
@@ -273,13 +248,18 @@ func (r *Repo) Commit(message string) error {
 	return err
 }
 
-// HasUnpushedCommits reports whether the branch holds commits the remote is not
-// known to have. It is answered from the remote-tracking ref, so it costs no
-// network and is only as fresh as the last fetch or push — which is exactly
-// enough to decide whether there is anything to push, and no substitute for
-// classification, which fetches first and is #27's.
-func (r *Repo) HasUnpushedCommits(branch string) (bool, error) {
-	remoteRef := "refs/remotes/" + config.RemoteName + "/" + branch
+// UnpushedCommits reports whether the tracked branch holds commits the remote
+// is not known to have, and whether obsync knows an upstream counterpart for it
+// at all.
+//
+// Both answers come from the vault's own refs, so this costs no network and is
+// only as fresh as the last fetch or push — which is exactly enough to decide
+// whether there is anything to push, and no substitute for classification,
+// which fetches first and is #27's. The absence of a counterpart is what makes
+// a push a first push, and the only thing that sends obsync to ask the remote
+// itself what it holds (§3).
+func (r *Repo) UnpushedCommits() (unpushed, knowsCounterpart bool, err error) {
+	remoteRef := "refs/remotes/" + config.RemoteName + "/" + r.branch
 
 	// for-each-ref rather than rev-parse: a ref that does not exist is not a
 	// failure here, it is a branch obsync has never pushed, and for-each-ref
@@ -289,24 +269,24 @@ func (r *Repo) HasUnpushedCommits(branch string) (bool, error) {
 		args: []string{"for-each-ref", "--format=%(objectname)", remoteRef},
 	})
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if strings.TrimSpace(string(out)) == "" {
-		return true, nil
+		return true, false, nil
 	}
 
 	out, err = r.run(invocation{
 		dir:  r.vault,
-		args: []string{"rev-list", "--count", remoteRef + "..refs/heads/" + branch},
+		args: []string{"rev-list", "--count", remoteRef + "..refs/heads/" + r.branch},
 	})
 	if err != nil {
-		return false, err
+		return false, true, err
 	}
 	count, err := strconv.Atoi(strings.TrimSpace(string(out)))
 	if err != nil {
-		return false, fmt.Errorf("git rev-list --count answered %q, which is not a count: %w", out, err)
+		return false, true, fmt.Errorf("git rev-list --count answered %q, which is not a count: %w", out, err)
 	}
-	return count > 0, nil
+	return count > 0, true, nil
 }
 
 // Push sends the tracked branch to the remote, and is the one network command
@@ -318,14 +298,19 @@ func (r *Repo) HasUnpushedCommits(branch string) (bool, error) {
 // --force here and there is none anywhere, not even --force-with-lease: every
 // write to the remote is a fast-forward or it does not happen.
 //
+// --no-follow-tags is what keeps "one branch in each direction" true against
+// the vault's own config: push.followTags there — the human's file, which
+// outranks obsync's private one — otherwise sends every annotated tag reachable
+// from the pushed commit along with it. Measured on both matrix points.
+//
 // --porcelain is passed for the enum in its output, which is how a rejection is
 // eventually told from a lost race (§7) — that reading is #35's, and until it
 // exists a non-zero exit is simply a failed run.
-func (r *Repo) Push(ctx context.Context, branch string) error {
-	ref := "refs/heads/" + branch
+func (r *Repo) Push(ctx context.Context) error {
+	ref := "refs/heads/" + r.branch
 	_, err := r.run(invocation{
 		dir:      r.vault,
-		args:     []string{"push", "--porcelain", config.RemoteName, ref + ":" + ref},
+		args:     []string{"push", "--porcelain", "--no-follow-tags", config.RemoteName, ref + ":" + ref},
 		deadline: networkDeadline,
 		shutdown: ctx.Done(),
 	})

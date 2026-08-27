@@ -39,9 +39,10 @@ type vaultEnv struct {
 
 	// vault is the working tree obsync syncs; remote is the bare repo its
 	// origin points at, reached over file:// like every other remote obsync
-	// supports.
-	vault  string
-	remote string
+	// supports; repoURL is the route obsync was given to it.
+	vault   string
+	remote  string
+	repoURL string
 
 	clock *fakeClock
 	log   *lockedBuffer
@@ -86,6 +87,52 @@ func newVault(t *testing.T) *vaultEnv {
 func newVaultReachedBy(t *testing.T, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
 	t.Helper()
 
+	env := newVaultToBootstrap(t, reach)
+	env.makeVaultARepoOn("main")
+	env.pushVaultTo("main")
+	return env
+}
+
+// makeVaultARepoOn is the vault an operator already has: a directory that is a
+// git repo, on the branch they are sitting on, with an origin and a commit. It
+// is the bootstrap case obsync attaches to, and the branch it is on is what the
+// tracked branch resolves to (§3).
+func (e *vaultEnv) makeVaultARepoOn(branch string) {
+	e.t.Helper()
+
+	e.mustGit(e.vault, "init", "--quiet", "-b", branch)
+	e.mustGit(e.vault, "remote", "add", config.RemoteName, e.repoURL)
+
+	// An Obsidian vault always has .obsidian/, which is later the vault
+	// sentinel (#32). It is here from the start so that every test runs
+	// against a vault shaped like a real one.
+	e.writeNote(".obsidian/app.json", "{}\n")
+	e.mustGit(e.vault, "add", "-A")
+	e.mustGit(e.vault, append(append([]string{}, humanIdentity...), "commit", "--quiet", "-m", "the vault before obsync")...)
+}
+
+// pushVaultTo is what a human's own git left behind before obsync existed: the
+// bytes in the remote and a remote-tracking ref in the vault. The bytes go over
+// file:// and the ref is written by hand rather than pushed through origin, so
+// that building a vault stays credential-free whatever route obsync is given.
+func (e *vaultEnv) pushVaultTo(branch string) {
+	e.t.Helper()
+
+	e.mustGit(e.vault, "push", "--quiet", "file://"+e.remote, "refs/heads/"+branch+":refs/heads/"+branch)
+	e.mustGit(e.vault, "update-ref", "refs/remotes/"+config.RemoteName+"/"+branch, "refs/heads/"+branch)
+}
+
+// newVaultToBootstrap builds the two things bootstrap decides about — a bare
+// remote and the directory obsync is pointed at — and stops there. The
+// directory exists and is empty, the remote holds no refs, and what either of
+// them holds next is the test's to say, because that pair is the whole of what
+// bootstrap reads (§3, gate 2).
+//
+// Every environment in this suite comes through here; newVaultReachedBy is this
+// plus a vault that is already a repo, which is the case obsync attaches to.
+func newVaultToBootstrap(t *testing.T, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
+	t.Helper()
+
 	base := t.TempDir()
 	env := &vaultEnv{
 		t:        t,
@@ -98,32 +145,26 @@ func newVaultReachedBy(t *testing.T, reach func(*vaultEnv) (repoURL string, extr
 	}
 
 	env.mustGit(base, "init", "--bare", "--quiet", "-b", "main", env.remote)
+	// The same setting obsync's own private config carries, for the same
+	// reason and one the harness has of its own: measured on git 2.52, a push
+	// into this bare repo has its receive-pack detach a background maintenance
+	// process into a session of its own, which the pin in runGit's environment
+	// does not reach. Unreaped where nothing reaps — and a suite that builds a
+	// vault per test leaks one per test.
+	env.mustGit(env.remote, "config", "gc.autoDetach", "false")
 
 	repoURL, extra := "file://"+env.remote, []string(nil)
 	if reach != nil {
 		repoURL, extra = reach(env)
 	}
+	env.repoURL = repoURL
 
+	// The mount point, and nothing in it. Docker creates the directory a volume
+	// is mounted at whatever the volume holds, so an empty directory is what an
+	// operator's first deployment actually presents obsync with.
 	if err := os.MkdirAll(env.vault, 0o755); err != nil {
 		t.Fatalf("creating the vault: %v", err)
 	}
-	env.mustGit(env.vault, "init", "--quiet", "-b", "main")
-	env.mustGit(env.vault, "remote", "add", config.RemoteName, repoURL)
-
-	// An Obsidian vault always has .obsidian/, which is later the vault
-	// sentinel (#32). It is here from the start so that every test runs
-	// against a vault shaped like a real one.
-	env.writeNote(".obsidian/app.json", "{}\n")
-	env.mustGit(env.vault, "add", "-A")
-	env.mustGit(env.vault, append(append([]string{}, humanIdentity...), "commit", "--quiet", "-m", "the vault before obsync")...)
-
-	// The vault arrives already pushed, by the path a human's own git took
-	// before obsync existed: the bytes go over file:// and the remote-tracking
-	// ref is written by hand, which is exactly what a `git push origin` would
-	// have left behind. Doing it in two steps rather than through origin keeps
-	// building a vault credential-free whatever route obsync is given.
-	env.mustGit(env.vault, "push", "--quiet", "file://"+env.remote, "refs/heads/main:refs/heads/main")
-	env.mustGit(env.vault, "update-ref", "refs/remotes/"+config.RemoteName+"/main", "HEAD")
 
 	// The configuration comes through the same environment block an operator
 	// sets, resolved by the same code that resolves it in production. Its
@@ -146,6 +187,69 @@ func newVaultReachedBy(t *testing.T, reach func(*vaultEnv) (repoURL string, extr
 	t.Cleanup(env.stop)
 	return env
 }
+
+// newVaultToBootstrapWith is newVaultToBootstrap with further variables on the
+// config surface set — OBSYNC_BRANCH, which is the bootstrap override (§3).
+func newVaultToBootstrapWith(t *testing.T, extra ...string) *vaultEnv {
+	t.Helper()
+
+	return newVaultToBootstrap(t, func(e *vaultEnv) (string, []string) {
+		return "file://" + e.remote, extra
+	})
+}
+
+// newEmptyVault is the bootstrap case an operator meets on a first deployment:
+// an empty directory, and a remote holding a vault to clone into it. The
+// remote's default branch is named, because "the remote's default branch" is
+// what obsync resolves the tracked branch to here and taking `main` instead is
+// the mistake §3 exists to prevent.
+func newEmptyVault(t *testing.T, defaultBranch string, alsoBranches ...string) *vaultEnv {
+	t.Helper()
+
+	env := newVaultToBootstrap(t, nil)
+	env.seedRemote(defaultBranch, alsoBranches...)
+	return env
+}
+
+// seedRemote gives the bare remote a vault to be cloned: one commit on every
+// branch named, the first of them the remote's own HEAD, plus an annotated tag
+// — which is a ref obsync's one-branch-each-direction refspec may never carry
+// either way (§3).
+func (e *vaultEnv) seedRemote(defaultBranch string, alsoBranches ...string) {
+	e.t.Helper()
+
+	seed := filepath.Join(e.t.TempDir(), "seed")
+	if err := os.MkdirAll(seed, 0o755); err != nil {
+		e.t.Fatalf("creating the seed repo: %v", err)
+	}
+	e.mustGit(seed, "init", "--quiet", "-b", defaultBranch)
+	for path, content := range map[string]string{
+		".obsidian/app.json":       "{}\n",
+		"Notes/from the remote.md": remoteSeedNote,
+	} {
+		full := filepath.Join(seed, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			e.t.Fatalf("creating the folder for %q: %v", path, err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			e.t.Fatalf("writing %q: %v", path, err)
+		}
+	}
+	e.mustGit(seed, "add", "-A")
+	e.mustGit(seed, append(append([]string{}, humanIdentity...), "commit", "--quiet", "-m", "the vault someone else pushed")...)
+	e.mustGit(seed, append(append([]string{}, humanIdentity...), "tag", "-a", "v1", "-m", "a tag on the remote")...)
+
+	refspecs := []string{"refs/heads/" + defaultBranch + ":refs/heads/" + defaultBranch, "refs/tags/v1:refs/tags/v1"}
+	for _, branch := range alsoBranches {
+		refspecs = append(refspecs, "refs/heads/"+defaultBranch+":refs/heads/"+branch)
+	}
+	e.mustGit(seed, append([]string{"push", "--quiet", "file://" + e.remote}, refspecs...)...)
+	e.mustGit(e.remote, "symbolic-ref", "HEAD", "refs/heads/"+defaultBranch)
+}
+
+// remoteSeedNote is the note a seeded remote holds, and therefore the bytes a
+// vault obsync cloned must be holding afterwards.
+const remoteSeedNote = "the note someone else pushed\n"
 
 // The timing constants a test may not read from obsync, restated here on
 // purpose: a test that asserts 120s by importing the constant that sets it
@@ -388,6 +492,51 @@ func (e *vaultEnv) remoteFile(path string) string {
 	return out
 }
 
+// remoteFileOn, remoteHoldsBranch and commitsOnBranch are the whole-of-the-
+// remote assertions with the branch named rather than assumed. Every other
+// helper here reads `main`, which is the branch every vault in this suite is on
+// — but the branch obsync resolved is the thing bootstrap decides, so a test
+// about bootstrap has to be able to say which one it means.
+func (e *vaultEnv) remoteFileOn(branch, path string) string {
+	e.t.Helper()
+	e.stop()
+
+	out, code := e.git(e.remote, "cat-file", "blob", "refs/heads/"+branch+":"+path)
+	if code != 0 {
+		e.t.Fatalf("the remote holds no %q at the tip of %q. obsync said:\n%s", path, branch, e.log.String())
+	}
+	return out
+}
+
+// vaultFile is what the vault holds at a path, and vaultHolds whether it holds
+// anything there at all. A clone is only a clone if the bytes arrived.
+func (e *vaultEnv) vaultFile(path string) string {
+	e.t.Helper()
+	e.stop()
+
+	content, err := os.ReadFile(filepath.Join(e.vault, path))
+	if err != nil {
+		e.t.Fatalf("the vault holds no %q: %v. obsync said:\n%s", path, err, e.log.String())
+	}
+	return string(content)
+}
+
+// stillTurning reports that obsync is parked alive rather than stopped: a
+// refusal it cannot act on leaves it re-checking, never exiting (§7).
+func (e *vaultEnv) stillTurning() bool {
+	e.t.Helper()
+
+	if !e.turning {
+		e.t.Fatal("nothing is turning, so there is nothing to still be turning")
+	}
+	select {
+	case <-e.finished:
+		return false
+	default:
+		return true
+	}
+}
+
 // remoteHoldsYet and commitsSoFar look at the world without stopping obsync, so
 // that a test can go on driving the clock afterwards. They are safe for the
 // same reason every timing assertion in this suite is: advance and watcherWake
@@ -494,6 +643,18 @@ func runGit(t *testing.T, dir string, args ...string) (string, int) {
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0",
+		// gc.autoDetach=false is one of the settings obsync's own private
+		// config carries (§7 forbids a detached background repack), and the
+		// harness pins it for a reason of its own: measured on git 2.52, a
+		// commit or a push otherwise leaves behind one background maintenance
+		// process that has detached into a session of its own, and a suite
+		// that builds a vault per test leaks two of those per test. They are
+		// harmless where something reaps them and immortal where nothing
+		// does. Pinned through git's environment spelling rather than -c so
+		// that every call site here gets it without touching its argv.
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=gc.autoDetach",
+		"GIT_CONFIG_VALUE_0=false",
 	)
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -707,4 +868,35 @@ func (c *fakeClock) waitsTaken() []time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]time.Duration{}, c.taken...)
+}
+
+// vaultHoldsYet is vaultHolds without stopping obsync, so that a test can go on
+// driving the clock afterwards.
+func (e *vaultEnv) vaultHoldsYet(path string) bool {
+	e.t.Helper()
+
+	_, err := os.Lstat(filepath.Join(e.vault, path))
+	return err == nil
+}
+
+// saidSoFar is everything obsync has logged without stopping it, so that a test
+// can read a refusal and then go on driving the clock to see it clear.
+func (e *vaultEnv) saidSoFar() string {
+	e.t.Helper()
+	return e.log.String()
+}
+
+// remoteHoldsBranchYet is remoteHoldsBranch without stopping obsync.
+func (e *vaultEnv) remoteHoldsBranchYet(branch string) bool {
+	e.t.Helper()
+
+	_, code := e.git(e.remote, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	return code == 0
+}
+
+// commitsOnBranchYet is commitsOnBranch without stopping obsync.
+func (e *vaultEnv) commitsOnBranchYet(dir, branch string) string {
+	e.t.Helper()
+
+	return strings.TrimSpace(e.mustGit(dir, "rev-list", "--count", "refs/heads/"+branch))
 }

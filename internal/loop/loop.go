@@ -54,12 +54,18 @@ type Loop struct {
 	retryNetworkAt time.Time
 	lastPush       time.Time
 
-	// repo and branch are resolved on the first run that can reach the vault
-	// and are then fixed for the process lifetime, which is what §3 requires
-	// of the tracked branch: the branch obsync syncs cannot become a thing a
-	// human changes by accident.
-	repo   *git.Repo
-	branch string
+	// frozen is the full freeze obsync is in, or empty. This build has one
+	// cause for it — a remote holding refs but not the tracked branch (§3) —
+	// and the nine gates that will produce the rest are #32's. A full freeze
+	// stops obsync touching the repo at all, so it gates the local half as well
+	// as the network one, and it is re-evaluated at the top of every run so
+	// that repairing the cause releases obsync with no restart (§7).
+	frozen string
+
+	// repo is the vault's repository once obsync has bootstrapped into it, and
+	// it carries the tracked branch, resolved on the first run that reached the
+	// vault and fixed for the process lifetime (§3).
+	repo *git.Repo
 }
 
 func New(cfg config.Config, log *slog.Logger, clk clock.Clock, wakes <-chan struct{}) *Loop {
@@ -174,14 +180,17 @@ func (l *Loop) syncRun(ctx context.Context) {
 	committing := l.cadence.mayCommit(l.clock.Now())
 	defer func() { l.cadence.ran(l.clock.Now(), committing) }()
 
-	if err := l.attach(); err != nil {
-		// Reported on every run, which now means once a tick for as long as
-		// the vault is unreachable. The hourly repeat that turns that into one
-		// line an hour is §9's, and #37's: unlike the network half below,
-		// which the backoff already quiets, a local failure has no wait of its
-		// own to hide behind.
-		l.log.Error("obsync cannot reach the vault it was pointed at", "problem", err,
+	if err := l.bootstrap(ctx); err != nil {
+		// Reported on every run, which means once a tick for as long as the
+		// vault cannot be reached or is one obsync refuses. The hourly repeat
+		// that turns that into one line an hour is §9's, and #37's: unlike the
+		// network half below, which the backoff already quiets, this has no
+		// wait of its own to hide behind.
+		l.log.Error("obsync cannot sync the vault it was pointed at", "problem", err,
 			"vault_path", l.config.VaultPath)
+		return
+	}
+	if l.stillFrozen(ctx) {
 		return
 	}
 	if err := l.perform(ctx, committing); err != nil {
@@ -199,36 +208,74 @@ func (l *Loop) syncRun(ctx context.Context) {
 	}
 }
 
-// attach resolves what a run needs and what §3 fixes for the process lifetime.
+// bootstrap is the one decision obsync makes about the vault before it syncs
+// it: clone into an empty directory, attach to a repo, refuse anything else
+// (§3, gate 2). It also resolves the tracked branch, which is then fixed for
+// the process lifetime.
 //
-// It retries on every wake-up until it succeeds, which is the shape every
-// freeze in this design has: the cause is repaired and obsync recovers on its
-// own, with no restart (§7).
-func (l *Loop) attach() error {
+// It is retried on every wake-up until it succeeds, which is the shape every
+// refusal in this design has: the cause is repaired — the remote gains a vault
+// to clone, the stray folder is emptied, the human checks their branch out —
+// and obsync recovers on its own, with no restart (§7).
+func (l *Loop) bootstrap(ctx context.Context) error {
 	if l.repo != nil {
 		return nil
 	}
 
-	repo, err := git.Attach(l.config, l.log, l.clock)
+	repo, err := git.Bootstrap(ctx, l.config, l.log, l.clock)
 	if err != nil {
 		return err
 	}
-
-	// The operator's override wins, and otherwise the branch the vault is
-	// already on — the thing that has an opinion about a vault that is already
-	// a repo (§3). Resolving from the remote's default belongs to the
-	// bootstrap that clones into an empty directory (#26).
-	branch := l.config.Branch
-	if branch == "" {
-		if branch, err = repo.HeadBranch(); err != nil {
-			_ = repo.Close()
-			return err
-		}
-	}
-
-	l.repo, l.branch = repo, branch
+	l.repo = repo
 	return nil
 }
+
+// stillFrozen reports whether obsync is in a full freeze, having first
+// re-evaluated the fact that put it there.
+//
+// The fact this build freezes on is a fact about the remote, so re-checking it
+// is one read-only look at the remote per run — the same shape as the probe a
+// damage freeze self-clears by, and consistent with what a full freeze means,
+// because it touches nothing (§7). A remote obsync cannot reach answers
+// nothing, and obsync stays frozen: the freeze clears on a fact, never on a
+// failure to establish one.
+func (l *Loop) stillFrozen(ctx context.Context) bool {
+	if l.frozen == "" {
+		return false
+	}
+
+	standing, err := l.repo.StandingOfTrackedBranch(ctx)
+	if err != nil || standing == git.RemoteHoldsOtherRefs {
+		return true
+	}
+
+	cleared := l.frozen
+	l.frozen = ""
+	l.log.Info("the freeze cleared and obsync is syncing again", "freeze", cleared,
+		"branch", l.repo.TrackedBranch())
+	return false
+}
+
+// freeze enters a full freeze, and says so once. State entry and state exit
+// each log exactly one line (§9); the hourly repeat that keeps a broken obsync
+// from going quiet in between is #37's.
+//
+// One freeze is held at a time, which is all this build can produce. Where two
+// are live at once the full freeze wins over the network one, and that ordering
+// arrives with the tiers (#32).
+func (l *Loop) freeze(name, fact, remedy string) {
+	if l.frozen == name {
+		return
+	}
+	l.frozen = name
+	l.log.Error("obsync is frozen and is touching nothing until this is repaired", "freeze", name,
+		"fact", fact, "remedy", remedy)
+}
+
+// freezeNoUpstreamCounterpart is §3's classification row for a tracked branch
+// the remote does not hold: obsync creates it only on a remote with no refs at
+// all, and freezes on any other.
+const freezeNoUpstreamCounterpart = "no upstream counterpart"
 
 // perform is the body of a sync run: what changed, one commit, one push.
 //
@@ -298,7 +345,7 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 		return nil
 	}
 
-	unpushed, err := l.repo.HasUnpushedCommits(l.branch)
+	unpushed, knowsCounterpart, err := l.repo.UnpushedCommits()
 	if err != nil {
 		return err
 	}
@@ -307,19 +354,43 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 		// being empty is a designed signal, not an accident (§9).
 		return nil
 	}
+	// §3's sharpest rule, and the one place obsync may create a ref on the
+	// remote. A branch obsync has no remote-tracking ref for is a branch it has
+	// never pushed, so the remote is asked what it holds before any bytes go:
+	// a remote with no refs at all is a brand-new one and the push creates the
+	// tracked branch, and a remote holding anything else does not get a branch
+	// nobody agreed on — the name came from local HEAD, and the push would
+	// succeed. The cost to an operator who genuinely wants a dedicated branch
+	// is one deliberate manual `git push -u`.
+	if !knowsCounterpart {
+		standing, err := l.repo.StandingOfTrackedBranch(ctx)
+		if err != nil {
+			l.backOff(now)
+			return err
+		}
+		if standing == git.RemoteHoldsOtherRefs {
+			l.freeze(freezeNoUpstreamCounterpart,
+				"the remote holds refs but not "+l.repo.TrackedBranch(),
+				"create it on the remote yourself with one `git push -u origin "+l.repo.TrackedBranch()+
+					"`, or point obsync at the branch you meant; this clears on its own once fixed, "+
+					"no restart needed")
+			return nil
+		}
+	}
+
 	// The push floor, off by default: a lower bound between pushes, checked
 	// here on the loop obsync already turns rather than kept by a second timer.
 	if !l.lastPush.IsZero() && now.Sub(l.lastPush) < pushFloor {
 		return nil
 	}
 
-	if err := l.repo.Push(ctx, l.branch); err != nil {
+	if err := l.repo.Push(ctx); err != nil {
 		l.backOff(now)
 		return err
 	}
 	l.lastPush = now
 	l.networkSucceeded()
-	l.log.Info("pushed", "branch", l.branch)
+	l.log.Info("pushed", "branch", l.repo.TrackedBranch())
 	return nil
 }
 

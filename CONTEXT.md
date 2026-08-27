@@ -132,10 +132,29 @@ HEAD when attaching to an existing repo, the remote's default branch when
 cloning fresh — and fixed for the process lifetime.
 _Avoid_: sync branch, target branch, main
 
+**Bootstrap**:
+The one decision obsync makes about a directory before it syncs it, and the
+only moment it may create a repo or move the working tree wholesale: clone the
+remote into an empty directory, attach to a directory that is already a repo,
+refuse anything else. Each answer is given by the thing that has an opinion,
+which is why the tracked branch comes from the remote in the first case and from
+the vault in the second. Everything obsync promises never to do "after
+bootstrap" — checking a branch out, above all — is bounded by it.
+_Avoid_: init, setup, first run, adopt
+
 **Sync state**:
 How the tracked branch relates to its remote counterpart at classify time: one
 of *equal*, *ahead*, *behind*, or *diverged*.
 _Avoid_: drift, status, sync status
+
+**Upstream counterpart**:
+The tracked branch's own ref on the remote — the thing a sync state is measured
+against, and the one whose *absence* is not a sync state at all. Without it
+obsync has never pushed this branch anywhere, so it asks the remote what it
+holds before any bytes go: a remote with no refs at all is a brand-new one and
+the first push creates the branch, and a remote holding anything else does not
+get a branch nobody agreed on.
+_Avoid_: upstream, tracking branch, remote branch
 
 **Divergence**:
 The sync state where both sides hold commits the other lacks. The expected
