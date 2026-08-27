@@ -76,7 +76,9 @@ jobs:
   # `go test` has to run *against* that git and not merely know its number. A
   # prefix install carries its own libexec, so putting `<prefix>/bin` at the
   # front of PATH swaps the whole git — plumbing, remote helpers and all — which
-  # is the only way a matrix point tests anything.
+  # is the only way a matrix point tests anything. It is installed under $HOME
+  # rather than /opt so that the cache action, which runs as the runner user,
+  # can save and restore it without sudo.
   matrix-test:
     name: Test on git ${{ matrix.point }}
     runs-on: ubuntu-latest
@@ -115,7 +117,8 @@ jobs:
             fi
             # The base image carries no git until the shipped image installs
             # one, so the version is asked of the package it would install.
-            version="$(docker run --rm "$base" sh -c               'apk add --no-cache git >/dev/null 2>&1 && git --version' | awk '{print $3}')"
+            version="$(docker run --rm "$base" \
+              sh -c 'apk add --no-cache git >/dev/null 2>&1 && git --version' | awk '{print $3}')"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "This point is git $version"
@@ -124,25 +127,41 @@ jobs:
         id: cached
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: /opt/git/${{ steps.git.outputs.version }}
+          path: ~/git/${{ steps.git.outputs.version }}
           key: git-${{ runner.os }}-${{ steps.git.outputs.version }}
 
-      - name: Build git ${{ steps.git.outputs.version }}
+      # The release tarball rather than a GitHub tag archive: it carries the
+      # `version` file GIT-VERSION-GEN reads, so the git this builds reports the
+      # number it was built at rather than the previous release's DEF_VER.
+      # NO_TCLTK because gitk is not a thing obsync drives.
+      - name: Build git ${{ steps.git.outputs.version }} from source
         if: steps.cached.outputs.cache-hit != 'true'
+        env:
+          VERSION: ${{ steps.git.outputs.version }}
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends             build-essential gettext libcurl4-openssl-dev libexpat1-dev libssl-dev libz-dev
-          version="${{ steps.git.outputs.version }}"
-          curl -fsSL "https://github.com/git/git/archive/refs/tags/v$version.tar.gz"             | tar -xz -C "$RUNNER_TEMP"
-          make -C "$RUNNER_TEMP/git-$version" -j"$(nproc)"             prefix="/opt/git/$version" NO_TCLTK=1 all
-          sudo make -C "$RUNNER_TEMP/git-$version"             prefix="/opt/git/$version" NO_TCLTK=1 install
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gettext libcurl4-openssl-dev libexpat1-dev libssl-dev libz-dev
+          mkdir -p "$RUNNER_TEMP/git-src"
+          curl -fsSL "https://mirrors.edge.kernel.org/pub/software/scm/git/git-$VERSION.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/git-src" --strip-components=1
+          make -C "$RUNNER_TEMP/git-src" -j"$(nproc)" prefix="$HOME/git/$VERSION" NO_TCLTK=YES all
+          make -C "$RUNNER_TEMP/git-src" prefix="$HOME/git/$VERSION" NO_TCLTK=YES install
 
       # obsync is one serialized loop and a watcher feeding a channel, so -race
       # should never have anything to say; the day it does, it is right.
+      #
+      # A prefix install carries its own libexec, so putting `<prefix>/bin` at
+      # the front of PATH swaps the whole git — plumbing, remote helpers and all
+      # — which is the only way a matrix point tests anything. The version is
+      # echoed because a point that silently ran the runner's own git would pass
+      # and mean nothing.
       - name: Test
+        env:
+          VERSION: ${{ steps.git.outputs.version }}
         run: |
           set -euo pipefail
-          export PATH="/opt/git/${{ steps.git.outputs.version }}/bin:$PATH"
+          export PATH="$HOME/git/$VERSION/bin:$PATH"
           git --version
           go test -race ./...
