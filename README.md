@@ -40,9 +40,16 @@ committed ten seconds after the vault goes quiet rather than at the next tick �
 and every five minutes anyway while someone is still typing. The watch only ever
 wakes the loop and never says what changed, which is why a kernel with no
 watches left costs latency and nothing else: obsync says which sysctl to raise
-and falls back to its tick. The **declared surface** — everything a version
-number will make a promise about — is written down ahead of the code that
-implements it.
+and falls back to its tick. obsync also knows what belongs in the repo and what
+does not: an ignore floor it writes into the repo's own exclude file keeps
+workspace churn, the trash and OS cruft out of every commit while the rest of
+`.obsidian/` is tracked, so a fresh clone is the same vault; your own
+`.gitignore` outranks that floor, except for plugin settings, which are where
+API keys live and which obsync refuses on the `git add` itself. A short closed
+list of credential-shaped filenames, and any file over the size ceiling, are
+never committed — skipped, said once, and never a reason to stop syncing
+everything else. The **declared surface** — everything a version number will
+make a promise about — is written down ahead of the code that implements it.
 
 Not yet: the rest of the safety interlocks, the settle guard, conflicts, the
 attention note, the status file and the container image. obsync is not something
@@ -77,6 +84,16 @@ cross rather than a default it happens to ship. **obsync never:**
   local branch runs ahead of the remote.
 - **diagnoses a remote rejection** — it relays the remote's own words verbatim,
   labelled as the remote's, and never guesses at a cause.
+- **writes your vault's `.gitignore`** — that file is content, and it is yours.
+  It is also what outranks obsync's own ignore floor, so it is how you overrule
+  a default you disagree with; obsync's floor goes in the repo's exclude file,
+  which is never committed.
+- **deletes a file from your vault of its own accord** — the one time obsync
+  stops tracking files — the workspace churn and OS cruft its ignore floor
+  covers, in a vault whose history already carries them — it takes them out of
+  the index and leaves every byte on disk.
+- **configures git-LFS on your behalf** — if you have set it up, obsync inherits
+  it for free by running git; it will never turn it on for you.
 - **overwrites a conflict copy** — that is the one way this design could
   actually lose bytes.
 - **exits on a sync failure.** It parks alive and keeps saying why, because a

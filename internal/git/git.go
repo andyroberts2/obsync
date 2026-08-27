@@ -30,6 +30,7 @@ import (
 
 	"github.com/andyroberts2/obsync/internal/clock"
 	"github.com/andyroberts2/obsync/internal/config"
+	"github.com/andyroberts2/obsync/internal/vault"
 )
 
 // networkDeadline converts a hung network git into a countable failure (§1).
@@ -80,6 +81,14 @@ type Repo struct {
 	// never written again. The branch obsync syncs cannot become a thing a
 	// human changes by accident.
 	branch string
+
+	// excludeFile and staging are the two owned paths inside .git obsync
+	// writes through: the repo's exclude file, where the ignore floor goes
+	// (§5), and the directory every obsync write is renamed out of (§6).
+	// Both are resolved once at bootstrap by asking git, because a .git that
+	// is a file points somewhere else entirely.
+	excludeFile string
+	staging     string
 
 	log   *slog.Logger
 	clock clock.Clock
@@ -191,26 +200,51 @@ func (r *Repo) Changed() ([]string, error) {
 // Stage puts the given paths in the index, including the ones that are there to
 // be removed.
 //
-// The paths arrive as NUL-separated literal pathspecs on stdin, which is the
-// only form that is correct for a vault: a note title may contain a space, a
-// newline or a glob character, and any of the three would otherwise be read as
-// something other than the name of the file it is.
+// One pathspec is added to whatever it is given, and it is §5's one exception:
+// `.obsidian/plugins/*/data.json` is excluded on the `git add` itself, which no
+// .gitignore can negate. Plugin settings are where community plugins keep API
+// keys, and this audience points obsync at repos that may be public — so
+// overriding the noisy half of the floor is a preference obsync respects, and
+// committing a credential is the one unrecoverable mistake it will not make.
+// It is git's own pathspec magic rather than a name obsync filters out, because
+// it must hold against a vault whose .gitignore re-includes the file: at that
+// point git reports the path as changed, and only the add can still refuse it.
+//
+// The exclusion is never the only pathspec. `git add --all` with nothing but an
+// exclusion means "everything except this", which is the whole tree — so a
+// caller with an empty committable set gets no git at all rather than one that
+// would sweep in the floor.
 func (r *Repo) Stage(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	pathspecs := literalPathspecs(paths)
+	pathspecs = append(pathspecs, ":(exclude,glob)"+vault.PluginData+"\x00"...)
+
+	_, err := r.run(invocation{
+		dir:   r.vault,
+		stdin: pathspecs,
+		args:  []string{"add", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"},
+	})
+	return err
+}
+
+// literalPathspecs writes paths as the NUL-separated pathspec list git reads
+// from stdin, which is the only form that is correct for a vault: a note title
+// may contain a space, a newline or a glob character, and any of the three
+// would otherwise be read as something other than the name of the file it is.
+//
+// :(literal) is what stops `Notes/[draft] plan.md` from being a character
+// class. It cannot be omitted for "ordinary" paths, because obsync has no say
+// in what a human names a note.
+func literalPathspecs(paths []string) []byte {
 	var pathspecs bytes.Buffer
 	for _, path := range paths {
-		// :(literal) is what stops Notes/[draft] plan.md from being a
-		// character class. It cannot be omitted for "ordinary" paths, because
-		// obsync has no say in what a human names a note.
 		pathspecs.WriteString(":(literal)")
 		pathspecs.WriteString(path)
 		pathspecs.WriteByte(0)
 	}
-	_, err := r.run(invocation{
-		dir:   r.vault,
-		stdin: pathspecs.Bytes(),
-		args:  []string{"add", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"},
-	})
-	return err
+	return pathspecs.Bytes()
 }
 
 // Staged is what the index holds that HEAD does not: the change one commit

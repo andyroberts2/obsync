@@ -52,6 +52,15 @@ var forbidden = []struct {
 	{literal: `"clone"`, only: "internal/git/bootstrap.go", named: "**re-clones or self-repairs a damaged repo**", promise: "obsync clones once, at " +
 		"bootstrap, into a directory that holds no repo; it never re-clones, because a re-clone " +
 		"discards exactly the commits obsync exists to have made (§7)"},
+	{literal: `"lfs"`, named: "**configures git-LFS on your behalf**", promise: "obsync never configures git-LFS: if a human has set it " +
+		"up, obsync inherits it for free by running git, and turning it on for them would break " +
+		"the out-of-tree merge, which would then compute conflicts over pointer files (§5)"},
+	{literal: `".gitignore"`, named: "**writes your vault's `.gitignore`**", promise: "obsync never writes the vault's .gitignore: that file " +
+		"is content, it is the user's, and it is the one thing that outranks obsync's own ignore " +
+		"floor (§5)"},
+	{literal: `"rm"`, only: "internal/git/tracking.go", named: "**deletes a file from your vault of its own accord**", promise: "obsync's only " +
+		"git rm is the one that untracks the churn subset, and it is always --cached: the index " +
+		"stops carrying those paths and every byte stays on disk (§5)"},
 }
 
 func TestObsyncNeverHandsGitTheArgvItPromisedNotTo(t *testing.T) {
@@ -70,8 +79,8 @@ func TestObsyncNeverHandsGitTheArgvItPromisedNotTo(t *testing.T) {
 	}
 }
 
-// The one exception is one, and it is where it says it is. A promise with an
-// exception is only checkable while the exception is a single named place.
+// The exceptions are one each, and each is where it says it is. A promise with
+// an exception is only checkable while the exception is a single named place.
 func TestTheOneCloneIsTheOneBootstrapMakes(t *testing.T) {
 	t.Parallel()
 
@@ -82,6 +91,29 @@ func TestTheOneCloneIsTheOneBootstrapMakes(t *testing.T) {
 	if clones != 1 {
 		t.Errorf("obsync's source names the clone subcommand %d times, want exactly one — the "+
 			"bootstrap case that makes an empty directory a copy of the remote (§3, §7)", clones)
+	}
+}
+
+// The same shape for the one git rm, plus the half that makes it safe: --cached
+// in the same file, so that "the index stops carrying it and every byte stays
+// on disk" is a fact about the source rather than a claim about it.
+func TestTheOneGitRmIsCachedOnlyAndUntracksTheChurnSubset(t *testing.T) {
+	t.Parallel()
+
+	removals, cached := 0, false
+	for path, source := range obsyncSource(t) {
+		removals += strings.Count(source, `"rm"`)
+		if path == "internal/git/tracking.go" && strings.Contains(source, `"--cached"`) {
+			cached = true
+		}
+	}
+	if removals != 1 {
+		t.Errorf("obsync's source names the rm subcommand %d times, want exactly one — the "+
+			"one-shot that takes the churn subset out of the index (§5)", removals)
+	}
+	if !cached {
+		t.Error("internal/git/tracking.go does not pass --cached, so obsync's one git rm is one " +
+			"that deletes files from the vault. It untracks and never deletes (§5)")
 	}
 }
 

@@ -195,6 +195,16 @@ own exclude file at every startup and never committed. A default rather than a
 rule — the vault's `.gitignore` outranks it, and belongs to the user alone.
 _Avoid_: ignore list, exclusions, default gitignore
 
+**Churn subset**:
+The part of the ignore floor obsync takes out of the index once, in a vault
+whose history already carries it — ignore rules only affect untracked paths, so
+a workspace file already committed churns forever whatever the floor says. It is
+the whole floor except plugin settings, which are left alone: untracking those
+would delete deliberately-synced settings from every other clone and would not
+unleak a key the remote's history already holds. `git rm --cached`, once, in one
+loudly-messaged commit, every byte left on disk.
+_Avoid_: cleanup commit, untracking pass, purge
+
 **Refused path**:
 A path obsync will not put in a commit, whatever its state — a
 credential-shaped filename, or a file over the size ceiling. Skipped, never a
