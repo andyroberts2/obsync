@@ -76,6 +76,13 @@ type Repo struct {
 	// git asks.
 	credentialEnvironment []string
 
+	// sizeCeiling is the largest single file obsync will commit, and the
+	// largest blob a merge may invent (§5, §4). It is the one configured value
+	// in that area — a fact about the remote rather than a taste — and it is
+	// held here because the merge is where obsync applies it to bytes no `git
+	// add` ever saw.
+	sizeCeiling int64
+
 	// branch is the tracked branch: resolved once by Bootstrap and fixed for
 	// the process lifetime (§3), which is why it is set at construction and
 	// never written again. The branch obsync syncs cannot become a thing a

@@ -9,10 +9,10 @@
 // What a run does in this build: ask git what changed, take out the paths it
 // refuses to commit and the ones still being written, commit the rest as one
 // commit, fetch, classify, fast-forward what is only behind, merge what has
-// genuinely diverged out of tree so that both sides survive, and push (#24,
-// #27, #28, #29, #30). Everything that will later stand between those steps —
-// the gates (#32) and the two merge ceilings (#31) — is a rule added to a loop
-// that already turns.
+// genuinely diverged out of tree so that both sides survive unless a ceiling
+// says a human should look first, and push (#24, #27, #28, #29, #30, #31).
+// What will later stand between those steps — the nine gates (#32) — is a rule
+// added to a loop that already turns.
 //
 // When it turns is cadence.go: the quiet window, the max-wait cap, the jittered
 // tick and the network backoff, none of which is a knob (#25).
@@ -61,9 +61,10 @@ type Loop struct {
 	// frozen is the full freeze obsync is in, or empty, and networkFrozen the
 	// network freeze. This build has two causes for the first — a remote
 	// holding refs but not the tracked branch, and HEAD moving off the tracked
-	// branch (§3) — and one for the second, an upstream rewrite; the nine gates
-	// that will produce the rest are #32's, and so is a tier that is a type
-	// rather than two fields.
+	// branch (§3) — and four for the second: an upstream rewrite, and each of
+	// §4's three ways a merge stops rather than being improvised into a commit.
+	// The nine gates that will produce the rest are #32's, and so is a tier
+	// that is a type rather than two fields.
 	//
 	// A full freeze stops obsync touching the repo at all, so it gates the
 	// local half as well as the network one; a network freeze leaves the local
@@ -313,8 +314,16 @@ func (l *Loop) stillWithheld(ctx context.Context) bool {
 // freeze clears on a fact, never on a failure to establish one. The probe is a
 // network command like any other, so a failure backs the network half off and
 // the ordinary tick retries it.
+//
+// It is asked of this one freeze by name rather than of any network freeze,
+// and that is the whole of the difference between the two shapes a network
+// freeze has. This one has to be re-checked *before* a reconcile, because an
+// ordinary fetch would overwrite the record the question is asked against;
+// §4's three merge freezes are re-checked *by* a reconcile, since their cause
+// is not a fact obsync can look up but what the next merge comes out as
+// (networkThawed).
 func (l *Loop) stillRewritten(ctx context.Context, now time.Time) (bool, error) {
-	if l.networkFrozen == "" {
+	if l.networkFrozen != freezeUpstreamRewrite {
 		return false, nil
 	}
 
@@ -374,6 +383,29 @@ func (l *Loop) thawed(name string) {
 		"branch", l.repo.TrackedBranch())
 }
 
+// networkThawed clears a network freeze a run has just disproved by doing the
+// thing the freeze stopped, and says so once (§9).
+//
+// It is the shape the merge freezes need and the shape thawed cannot give
+// them: their cause is not a fact obsync can re-check on its own, it is what
+// the next merge of the two histories comes out as. So the freeze is entered by
+// computing a merge and left by computing one that is fine — a human who
+// settles the conflict, shrinks the file, or resolves the storm on either side
+// gets obsync back on the next tick, with no restart (§7).
+//
+// The upstream-rewrite freeze never reaches here: it is re-checked before a
+// reconcile happens at all, by a probe that cannot overwrite obsync's record of
+// what the remote last held, and it stops the run when it holds.
+func (l *Loop) networkThawed() {
+	if l.networkFrozen == "" {
+		return
+	}
+	cleared := l.networkFrozen
+	l.networkFrozen = ""
+	l.log.Info("the freeze cleared and obsync is syncing with the remote again", "freeze", cleared,
+		"branch", l.repo.TrackedBranch())
+}
+
 const (
 	// freezeNoUpstreamCounterpart is §3's classification row for a tracked
 	// branch the remote does not hold: obsync creates it only on a remote with
@@ -389,6 +421,30 @@ const (
 	// the tip obsync last saw. Merging would resurrect what the rewrite
 	// removed and pushing would restore it, so obsync does neither (§3).
 	freezeUpstreamRewrite = "upstream rewrite"
+
+	// The merge outcomes obsync stops the network half for rather than
+	// improvising into a commit (§4, #31). Each is a fact about *this* merge
+	// rather than about the vault, so each is re-established from scratch by
+	// every run that reaches a divergence: the freeze is entered by computing
+	// the merge and cleared by computing it again and finding it fine.
+	//
+	// freezeConflictOutsideTheTable is a conflict kind §4's closed table has no
+	// row for. Every row of that table is a rule about which side's bytes
+	// survive, and a kind with no row is one where obsync does not know the
+	// answer — including where git has an answer of its own, which is the case
+	// this reaches most often.
+	freezeConflictOutsideTheTable = "conflict outside the table"
+
+	// freezeConflictStorm is more conflicted paths in one merge than a human
+	// can be asked to read. Past that count keeping both sides stops being a
+	// kindness: the cause is nearly always structural, and it deserves human
+	// eyes before it is baked into a commit.
+	freezeConflictStorm = "conflict storm"
+
+	// freezeMergedTreeOverTheCeiling is a clean auto-merge blob over the size
+	// ceiling — the one blob a merge can invent, and so the only route through
+	// the merge path to bytes the remote has never accepted.
+	freezeMergedTreeOverTheCeiling = "merged tree over the size ceiling"
 )
 
 // perform is the body of a sync run: what changed, one commit, one push.
@@ -832,6 +888,33 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 				"removed and pushing would restore it. This clears on its own once fixed; no "+
 				"restart needed")
 		return nil
+	case errors.Is(err, git.ErrConflictOutsideTheTable):
+		// §4's fallback, and the reason the table is worth closing: obsync
+		// stops rather than guessing at bytes, and stops the smallest part of
+		// itself that could publish the guess. The fact is git's own — the
+		// conflict kind is a machine field and the paths are git's spelling —
+		// so nothing here reads a word written for a human.
+		l.networkFreeze(freezeConflictOutsideTheTable, err.Error(),
+			"look at what the two sides did to those paths and settle it yourself, in the vault or "+
+				"on the remote. obsync keeps both sides of every conflict it has a rule for and "+
+				"improvises none of the rest, so this one is yours. Your vault is still being "+
+				"committed locally meanwhile. This clears on its own once fixed; no restart needed")
+		return nil
+	case errors.Is(err, git.ErrConflictStorm):
+		l.networkFreeze(freezeConflictStorm, err.Error(),
+			"look at what changed on both sides before it is baked into a commit — a conflict this "+
+				"large is nearly always one act rather than fifty, a folder moved or a bulk edit "+
+				"or a vault restored over itself. Settle it in the vault or on the remote; your "+
+				"vault is still being committed locally meanwhile. This clears on its own once "+
+				"fixed; no restart needed")
+		return nil
+	case errors.Is(err, git.ErrMergedTreeOverTheCeiling):
+		l.networkFreeze(freezeMergedTreeOverTheCeiling, err.Error(),
+			"raise OBSYNC_SIZE_CEILING to what your remote accepts, or make that file smaller in "+
+				"the vault. It is what the two versions of it merge to, so it is bytes neither "+
+				"side holds yet and nothing of yours is waiting on it. Your vault is still being "+
+				"committed locally meanwhile. This clears on its own once fixed; no restart needed")
+		return nil
 	case errors.Is(err, git.ErrUnsettledOnWriteSide):
 		// The other aborted run the incoming change can produce, and the same
 		// tier: a path it overwrites is still being written, so nothing is
@@ -876,6 +959,7 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 		return err
 	}
 	l.networkSucceeded()
+	l.networkThawed()
 
 	switch reconciled.State {
 	case git.Ahead:

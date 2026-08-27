@@ -364,9 +364,9 @@ func TestACopyArrivingFromTheRemoteInTheSameMergeIsNotWrittenOver(t *testing.T) 
 // bytes survive. A symlink where the other side has a file is one such shape,
 // named in §4 along with submodules and mode-only conflicts.
 //
-// What tier that lands in is #31's — a network freeze, alongside the two merge
-// ceilings — so what is asserted here is the part that is #30's and does not
-// move: the vault is untouched and nothing invented reaches the remote.
+// What is asserted here is the resolution rather than the tier: the vault is
+// untouched and nothing invented reaches the remote. The tier it lands in — a
+// network freeze, alongside the two merge ceilings — is ceiling_test.go's.
 func TestAConflictWithNoRowInTheTableIsNeverImprovised(t *testing.T) {
 	t.Parallel()
 

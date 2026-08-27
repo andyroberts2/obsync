@@ -50,6 +50,7 @@ func Bootstrap(ctx context.Context, cfg config.Config, log *slog.Logger, clk clo
 		vault:                 cfg.VaultPath,
 		isolation:             credentialIsolation,
 		credentialEnvironment: cfg.CredentialEnvironment(),
+		sizeCeiling:           cfg.SizeCeiling,
 		log:                   log,
 		clock:                 clk,
 	}

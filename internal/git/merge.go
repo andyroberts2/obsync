@@ -67,6 +67,16 @@ const conflictMarker = " (obsync conflict "
 // answered by a counter, and never by an overwrite.
 const conflictStamp = "2006-01-02 1504"
 
+// conflictStormCeiling is the number of conflicted paths in one merge past
+// which obsync stops rather than resolving them (§4).
+//
+// It is a judgement about human attention rather than a fact about git, and it
+// is therefore a constant with no knob: past about fifty paths, "keep both
+// sides" stops being a kindness — the vault would gain a hundred notes where it
+// had fifty, in one commit — and the cause is nearly always structural, one act
+// rather than fifty. That deserves human eyes before it is baked into a commit.
+const conflictStormCeiling = 50
+
 // merge is §4's whole act: compute the merge outside the vault, resolve every
 // conflicted path by the keep-both rule, commit it with both parents, and apply
 // it. It answers with the conflict copies that commit carries.
@@ -82,8 +92,21 @@ func (r *Repo) merge(tip string) ([]ConflictCopy, error) {
 		return nil, err
 	}
 
-	tree, copies, err := r.resolved(merged, tip, conflicted, said)
+	// The storm ceiling is asked first, and asked of the merge rather than of
+	// the resolution: a merge over it is one obsync does not go on to resolve
+	// at all, so a merge that would also trip the size ceiling is reported as
+	// the storm it is (§4).
+	conflictedHere := conflictedPaths(conflicted)
+	if len(conflictedHere) > conflictStormCeiling {
+		return nil, fmt.Errorf("%w: the vault and the remote conflict at %d paths in one merge, and "+
+			"obsync's ceiling is %d", ErrConflictStorm, len(conflictedHere), conflictStormCeiling)
+	}
+
+	tree, copies, err := r.resolved(merged, tip, conflictedHere, said)
 	if err != nil {
+		return nil, err
+	}
+	if err := r.refuseAnInventedBlobOverTheCeiling(tree, tip, copies); err != nil {
 		return nil, err
 	}
 	commit, err := r.commitMerge(tree, tip)
@@ -300,7 +323,7 @@ const (
 // is kept exactly as git computed it, so two devices appending to one daily
 // note — the common case — produces no copy at all, and neither binaries nor
 // `.obsidian/` config get any special casing on the way through.
-func (r *Repo) resolved(merged, tip string, conflicted []conflictedEntry,
+func (r *Repo) resolved(merged, tip string, conflicted []conflictedPath,
 	said conflictReport) (string, []ConflictCopy, error) {
 
 	if err := said.insideTheTable(); err != nil {
@@ -314,7 +337,7 @@ func (r *Repo) resolved(merged, tip string, conflicted []conflictedEntry,
 	// minute even if the run crosses one.
 	now := r.clock.Now()
 
-	for _, at := range conflictedPaths(conflicted) {
+	for _, at := range conflicted {
 		kinds := said.about(at.path)
 		ours, hasOurs := at.stages[2]
 		theirs, hasTheirs := at.stages[3]
@@ -437,6 +460,191 @@ func (r *Repo) resolved(merged, tip string, conflicted []conflictedEntry,
 	}
 	tree, err := r.treeWith(merged, records.Bytes())
 	return tree, copies, err
+}
+
+// refuseAnInventedBlobOverTheCeiling is §4's second merge ceiling: the merge
+// may not introduce a blob over the size ceiling to the remote.
+//
+// A **clean auto-merge blob** existed on neither side, so it is the only source
+// of new bytes a merge can introduce and the only route through the merge path
+// to content the remote has never accepted. Everything else in the merged tree
+// came from one parent or the other: the vault's own bytes passed the ceiling
+// at the `git add`, and the remote's are already reachable from its tip.
+//
+// A conflict copy is exempt at any size, and that is a positive decision rather
+// than an omission (§4). Its bytes are the losing version of a path — the
+// remote's, or the vault's own in the one row where git decides which side
+// keeps the path — so they are bytes that have already passed the ceiling once,
+// on whichever side they came from, and pack negotiation never re-sends them.
+//
+// Mid-merge there is no skipping a path, because a merged tree must hold
+// something at every path: refusal is a staging-time verb. So the whole merge
+// stops, and stops before anything is committed or applied.
+func (r *Repo) refuseAnInventedBlobOverTheCeiling(tree, tip string, copies []ConflictCopy) error {
+	invented, err := r.cleanAutoMergeBlobs(tree, tip, copies)
+	if err != nil || len(invented) == 0 {
+		return err
+	}
+	sizes, err := r.blobSizes(invented)
+	if err != nil {
+		return err
+	}
+	for _, blob := range invented {
+		size, known := sizes[blob.oid]
+		if !known {
+			return fmt.Errorf("git cat-file said nothing about %s, which obsync had just read out "+
+				"of the merged tree at %q", blob.oid, blob.path)
+		}
+		if size > r.sizeCeiling {
+			return fmt.Errorf("%w: merging the vault and the remote invents %q at %s, and obsync's "+
+				"size ceiling is %s", ErrMergedTreeOverTheCeiling, blob.path,
+				config.FormatSize(size), config.FormatSize(r.sizeCeiling))
+		}
+	}
+	return nil
+}
+
+// cleanAutoMergeBlobs is every path the merged tree holds bytes at that neither
+// parent holds there — the blobs the merge itself invented.
+//
+// It is decided without reading a word of content: a path holds a new blob
+// **iff its oid differs from its oid in both parents**, so this is two
+// `diff-tree -r -z` runs and the intersection of what they name. That is what
+// keeps the cost bounded by the merge rather than by the vault — a listing of
+// the whole tree would size-check every attachment a vault has ever held on
+// every divergence.
+//
+// The vault's side is asked first and answered alone when it is empty: a merge
+// that changed nothing against the vault invented nothing either, and the
+// second diff-tree is a command not run.
+func (r *Repo) cleanAutoMergeBlobs(tree, tip string, copies []ConflictCopy) ([]newBlob, error) {
+	ours, err := r.blobsDifferingFrom("HEAD", tree)
+	if err != nil || len(ours) == 0 {
+		return nil, err
+	}
+	theirs, err := r.blobsDifferingFrom(tip, tree)
+	if err != nil {
+		return nil, err
+	}
+	alsoTheirs := make(map[string]bool, len(theirs))
+	for _, blob := range theirs {
+		alsoTheirs[blob.path] = true
+	}
+	exempt := make(map[string]bool, len(copies))
+	for _, written := range copies {
+		exempt[written.Path] = true
+	}
+
+	var invented []newBlob
+	for _, blob := range ours {
+		if alsoTheirs[blob.path] && !exempt[blob.path] {
+			invented = append(invented, blob)
+		}
+	}
+	return invented, nil
+}
+
+// newBlob is one path in the merged tree and the object it holds there.
+type newBlob struct {
+	path string
+	oid  string
+}
+
+// blobsDifferingFrom reads `diff-tree -r -z` as what a tree holds that a commit
+// does not: the raw format's records, which with -z are the metadata and the
+// path as two records rather than one line.
+//
+// --no-renames is passed rather than relied on. diff-tree is plumbing and does
+// not read diff.renames — measured at both matrix points, including against a
+// vault config that sets it — and a rename record would carry two paths in one
+// pair, which is a shape this reads as the next entry rather than as one.
+func (r *Repo) blobsDifferingFrom(parent, tree string) ([]newBlob, error) {
+	out, err := r.run(invocation{
+		dir:  r.vault,
+		args: []string{"diff-tree", "-r", "-z", "--no-renames", parent, tree},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	records := splitNUL(out)
+	var blobs []newBlob
+	for at := 0; at+1 < len(records); at += 2 {
+		// ":<srcmode> <dstmode> <srcoid> <dstoid> <status>", and it is read as
+		// fields because no path is in it — the path is the record after it,
+		// which is the whole reason -z is passed.
+		fields := strings.Fields(records[at])
+		if len(fields) != 5 || !strings.HasPrefix(records[at], ":") {
+			return nil, fmt.Errorf("git diff-tree reported an entry obsync could not read: %q", records[at])
+		}
+		if mode, oid := fields[1], fields[3]; holdsABlob(mode) {
+			blobs = append(blobs, newBlob{path: records[at+1], oid: oid})
+		}
+	}
+	if len(records)%2 != 0 {
+		return nil, fmt.Errorf("git diff-tree reported %q with no path after it", records[len(records)-1])
+	}
+	return blobs, nil
+}
+
+// holdsABlob reports whether a tree entry mode is one whose object is a blob.
+// The list is git's own and closed: everything else at a path in a diff is
+// either absence (000000, one side of an add or a delete) or a submodule
+// (160000), whose object this repository need not even hold.
+func holdsABlob(mode string) bool {
+	switch mode {
+	case "100644", "100755", "120000":
+		return true
+	default:
+		return false
+	}
+}
+
+// blobSizes is how many bytes each of these objects is, asked of git rather
+// than by reading them: the question is a size, and reading a 95MB attachment
+// to find out how big it is is the one thing this ceiling exists to avoid.
+//
+// The object names go in on stdin rather than on the argv, because what the
+// merge invents is bounded by the merge and not by fifty — a divergence that
+// merges ten thousand paths cleanly is an ordinary bulk import from the other
+// side, and an argv of ten thousand object names is not.
+//
+// This is the one place obsync reads git's output a line at a time, and it is
+// safe for exactly the reason the rule against it exists: that rule is about
+// paths, and there is no path in this output. An object name, a type and a
+// count of bytes is all of it, and none of the three can hold a newline. A NUL
+// form exists in a later git than obsync's floor, so the choice is this or a
+// second command per object.
+func (r *Repo) blobSizes(blobs []newBlob) (map[string]int64, error) {
+	var asked bytes.Buffer
+	for _, blob := range blobs {
+		asked.WriteString(blob.oid)
+		asked.WriteByte('\n')
+	}
+	out, err := r.run(invocation{
+		dir:   r.vault,
+		stdin: asked.Bytes(),
+		args:  []string{"cat-file", "--batch-check"},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sizes := map[string]int64{}
+	for _, answer := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
+		fields := strings.Fields(answer)
+		if len(fields) != 3 || fields[1] != "blob" {
+			return nil, fmt.Errorf("git cat-file --batch-check answered %q, which is not the blob "+
+				"obsync asked it about", answer)
+		}
+		size, err := strconv.ParseInt(fields[2], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("git cat-file --batch-check answered %q, whose size is not a "+
+				"number: %w", answer, err)
+		}
+		sizes[fields[0]] = size
+	}
+	return sizes, nil
 }
 
 // conflictedPath is one path and every stage of it git reported, in the order
@@ -778,6 +986,29 @@ func (r *Repo) applyMerge(commit string) error {
 // remote is not, and the local half keeps committing while a human looks. What
 // obsync will not do is improvise a resolution — every row of the table is a
 // rule about which side's bytes survive, and a kind with no row is one where
-// obsync does not know the answer. Sorting it into that tier is #31's, along
-// with the two merge ceilings that stop the network half the same way.
+// obsync does not know the answer. It is the fallback of a closed table rather
+// than a shape nobody expected: an ordinary act reaches it, and renaming a
+// folder in the vault while another device adds a note inside it is the one
+// that reaches it most often.
 var ErrConflictOutsideTheTable = errors.New("the merge hit a conflict obsync has no rule for")
+
+// ErrConflictStorm is more conflicted paths in one merge than §4's ceiling.
+//
+// It is a network freeze (§7), and it applies nothing: the merge is not
+// resolved, no copy is written, and the vault is left exactly as the human left
+// it while the local half goes on committing. What a storm nearly always means
+// is one structural act rather than fifty disagreements, and baking that into a
+// merge commit — doubling every conflicted note — is the outcome the ceiling
+// exists to put a human in front of.
+var ErrConflictStorm = errors.New("more paths conflicted in one merge than obsync will resolve unasked")
+
+// ErrMergedTreeOverTheCeiling is a clean auto-merge blob over the size ceiling:
+// the one blob a merge can invent, and so the only route through the merge path
+// to bytes the remote has never accepted.
+//
+// It is a network freeze (§7), and it applies nothing. Like the ceiling at the
+// `git add` it is prevention rather than a guarantee — obsync can never discover
+// a remote's real limit — so what it buys is a rejection that does not happen
+// and a human told where to look, rather than a doomed push of a pack that will
+// be refused after it has been uploaded in full.
+var ErrMergedTreeOverTheCeiling = errors.New("the merge invents a blob over obsync's size ceiling")

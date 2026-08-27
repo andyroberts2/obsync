@@ -262,6 +262,22 @@ git rather than obsync decides which side keeps that path, a file on one side
 where the other has a directory. Never annotated, never overwritten.
 _Avoid_: sidecar, conflicted copy, duplicate
 
+**Clean auto-merge blob**:
+The bytes a merge invents: the result of git merging two versions of a path
+cleanly, which existed on neither side. The only content a merge can introduce
+that the remote has never accepted, and therefore the only thing in a merged
+tree the size ceiling has an opinion about. Recognised by its object differing
+from the object at that path in both parents, never by reading it.
+_Avoid_: merged file, new content, generated blob
+
+**Conflict storm**:
+A merge conflicting at more paths than a human can be asked to read. Past that
+count keeping both sides stops being a kindness — the cause is nearly always one
+structural act rather than that many disagreements — so obsync stops the network
+half and applies nothing, rather than doubling every conflicted note in one
+commit.
+_Avoid_: mass conflict, conflict flood, too many conflicts
+
 **Attention note**:
 The vault-root note obsync writes when it needs a human to look at something —
 live freezes first, then outstanding conflict copies, refused paths, and paths
