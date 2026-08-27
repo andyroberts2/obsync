@@ -1,72 +1,75 @@
 # Operating obsync
 
-obsync answers exactly one question about itself — **does this need a human?**
+obsync answers exactly one question about itself: **does this need a human?**
 This page is what to do when the answer is yes.
 
-It does not list what obsync can be frozen on. The running system enumerates
-that itself, more accurately than a page can: the attention note's first section
-is derived from live state on every run and names the freeze, the conclusive
-fact behind it, and the remedy. What is here is the shape — the three tiers,
-what clears each of them, and the four things obsync cannot tell you itself.
+It does not list every state obsync can be frozen in. The running system
+enumerates those itself, more accurately than a page can. What is here is the
+shape: the three tiers, what clears each of them, and the four things obsync
+cannot tell you itself.
 
 ---
 
 ## Start here
 
-In this order. The first two are seconds and answer most of it.
+In this order. The first two take seconds and answer most of it.
 
 1. **Read `obsync-attention.md` at the root of the vault.** obsync writes it
-   when it needs a human and **deletes** it when it does not, so the file being
-   there at all is the signal. Four sections, in this order: live freezes, with
-   the fact and the remedy for each; outstanding conflict copies, each
-   wikilinked beside the note it is a copy of; refused paths; and paths
-   something is rewriting faster than obsync can ever see them still. A section
-   with nothing in it is absent rather than empty.
-2. **`docker compose exec obsync obsync status`** — the service, then the
-   binary, because `docker exec` runs a command rather than the image's
-   entrypoint. The same state, from the process rather than from the vault, plus
-   the build version. It always exits 0: it is a report, not a verdict.
-3. **`docker compose logs --since 1h obsync`.** Empty is the designed state: a healthy
-   obsync writes nothing for hours, and anything needing a human is repeated
-   once an hour, so an hour of log that is empty means an hour with nothing
-   wrong. `OBSYNC_LOG_LEVEL=debug` adds every git invocation with its full argv,
-   exit status and duration, and is safe to turn on — the credential is never in
-   an argv, a URL or a log line.
-4. **`docker ps`.** The image carries its own `HEALTHCHECK`, so the health
-   column is obsync's answer to the one question. What each verdict covers is
-   [`interface.md`](interface.md#3-the-health-contract); what your runtime does
+   when it needs a human, and **deletes** it when it does not, so the file being
+   there at all is the signal. It has four sections, in this order:
+
+   1. Live freezes, with the fact and the remedy for each.
+   2. Outstanding conflict copies, each wikilinked beside the note it copies.
+   3. Refused paths.
+   4. Paths something is rewriting faster than obsync can see them settle.
+
+   A section with nothing in it is absent rather than empty.
+2. **Run `docker compose exec obsync obsync status`.** That is the service, then
+   the binary, because `docker exec` runs a command rather than the image's
+   entrypoint. You get the same state from the process rather than from the
+   vault, plus the build version. It always exits 0, because it is a report
+   rather than a verdict.
+3. **Run `docker compose logs --since 1h obsync`.** Empty is the designed state.
+   A healthy obsync writes nothing for hours, and anything needing a human is
+   repeated once an hour. An empty hour of log therefore means an hour with
+   nothing wrong. `OBSYNC_LOG_LEVEL=debug` adds every git invocation with its
+   full argv, exit status and duration, and is safe to turn on. The credential
+   never appears in an argv, a URL or a log line.
+4. **Run `docker ps`.** The image carries its own `HEALTHCHECK`, so the health
+   column is obsync's answer to the one question. What each verdict covers is in
+   [`interface.md`](interface.md#3-the-health-contract). What your runtime does
    with it is [below](#health-and-your-runtime).
 
 ---
 
 ## Do not restart it
 
-> **Load-bearing documentation** (§11, [#16](../../issues/16)).
+> **Load-bearing documentation** ([#16](../../issues/16)).
 > **"This clears on its own once fixed; no restart needed."**
 >
 > obsync writes that sentence at the end of every remedy it prints, and it is
-> true of every freeze in the design: gates are re-checked at the top of every
+> true of every freeze in the design. Gates are re-checked at the top of every
 > run, and a frozen obsync keeps ticking, re-evaluating, and doing nothing else.
 > Repair the cause and obsync starts syncing again within a tick, with no
 > restart and nothing to clear by hand. Never cut this line.
 
 **A restart destroys the diagnosis and repairs nothing.** obsync parks alive
 rather than exiting precisely so that the diagnosis survives, and what it holds
-is process-lifetime:
+lives only as long as the process:
 
-- **The remote's own words**, on a rejected push, live in the running process
+- **The remote's own words** on a rejected push live in the running process
   until the next hourly retry. A restarted obsync says nothing about the
   rejection until it has tried again and been refused again.
-- **The network backoff and the backoff ceiling's clock** start over, so a
-  remote that has been failing for a day reads as one that has just started.
+- **The network backoff and its clock** start over, so a remote that has been
+  failing for a day reads as one that has just started.
 - **The local failure streak** starts over, so a repository that was one run
   from being called damaged is five again.
-- **"Attempted, never succeeded"** starts over: a restarted obsync has genuinely
+- **"Attempted, never succeeded"** starts over. A restarted obsync genuinely has
   not attempted a push yet, which is not a failure and is not reported as one.
 
 The one freeze a restart *cannot* clear is the write-verify freeze
-[below](#a-tree-obsync-could-not-verify), and it is keyed on a ref rather than
-on the process for exactly this reason.
+[below](#a-tree-obsync-could-not-verify). It is keyed on a ref rather than on
+the process, for exactly this reason.
 
 ---
 
@@ -80,46 +83,46 @@ category.
 |---|---|---|---|---|
 | **Aborted run** | This pass, and nothing else | Nothing above debug | Healthy | The next wake-up, ~60s later |
 | **Network freeze** | The network half. The vault goes on being committed locally | The freeze, its fact and its remedy — once on entry, then once an hour | Unhealthy at once | The fact ceasing to be true |
-| **Full freeze** | Everything — obsync stops touching the repository at all | The same | Unhealthy at once | The fact ceasing to be true |
+| **Full freeze** | Everything. obsync stops touching the repository at all | The same | Unhealthy at once | The fact ceasing to be true |
 
-**An aborted run is not news.** obsync lost a race — someone else held the index
-lock, a file moved while it was being staged, an incoming change touched a path
-the vault was writing — and the next run starts fresh. It is silent by design,
-because making a transient loss news is how the signal becomes noise. What it is
-not is unrecorded: consecutive aborted runs in the local half are what the local
-failure streak counts.
+**An aborted run is not news.** obsync lost a race, and the next run starts
+fresh. Someone else held the index lock, or a file moved while it was being
+staged, or an incoming change touched a path the vault was writing. An aborted
+run is silent by design, because making a transient loss into news is how a
+signal becomes noise. It is not unrecorded, though: consecutive aborted runs in
+the local half are what the local failure streak counts.
 
 **A network freeze means the vault is sound and its relationship to the remote
 is not.** obsync keeps committing the vault locally throughout, so nothing you
-write is at risk while one stands, and there is no cap on how far the local
-branch runs ahead of the remote. Nothing leaves or arrives until it clears.
+write is at risk while one stands. There is no cap on how far the local branch
+runs ahead of the remote. Nothing leaves or arrives until the freeze clears.
 
 **A full freeze means committing would itself be wrong**, so obsync stops
-entirely and stays alive. It writes the attention note anyway — that touches the
-vault rather than the repository — except where it has nothing to write it
-through: a vault it cannot write in at all, a non-empty directory it refused to
-adopt rather than writing a file into, and the cases where there is no
-repository yet, since every file obsync writes is renamed into place out of a
-staging directory inside `.git`. In those, the log is the only channel.
+entirely and stays alive. It writes the attention note anyway, because that
+touches the vault rather than the repository. There are three cases where it has
+nothing to write the note through: a vault it cannot write in at all, a
+non-empty directory it refused to adopt, and the cases where there is no
+repository yet. Every file obsync writes is renamed into place out of a staging
+directory inside `.git`. In those three cases the log is the only channel.
 
 **Where two are live at once, the full freeze wins.**
 
 ### What a frozen obsync is doing
 
 Ticking. Every wake-up re-asks the whole question and does nothing else with the
-answer, so the freeze that started when you were asleep clears the minute after
-you fix it. On top of that:
+answer, so the freeze that started while you slept clears the minute after you
+fix it. On top of that:
 
-- **Anything needing a human is repeated once an hour**, never once a tick —
-  which is what makes `docker logs --since 1h` empty exactly when nothing is
-  wrong and never empty when something is.
+- **Anything needing a human is repeated once an hour**, never once a tick. That
+  is what makes `docker logs --since 1h` empty exactly when nothing is wrong and
+  never empty when something is.
 - **A push the remote rejected is retried once an hour**, and the retry is a
   whole network half, so other people's changes still arrive while it stands.
-- **A remote that is merely unreachable** is retried on the ordinary backoff,
-  60s doubling to a ceiling of 15 minutes, and obsync keeps retrying past the
-  point where it stops calling itself healthy.
+- **A remote that is merely unreachable** is retried on the ordinary backoff:
+  60s, doubling to a ceiling of 15 minutes. obsync keeps retrying past the point
+  where it stops calling itself healthy.
 - **A damaged repository** is retried differently, and that is the one exception
-  worth knowing: see [below](#a-damaged-repository).
+  worth knowing. See [below](#a-damaged-repository).
 
 ---
 
@@ -130,16 +133,16 @@ they are here.
 
 ### A tree obsync could not verify
 
-After obsync applies an incoming change to the vault it checks that the vault
+After obsync applies an incoming change to the vault, it checks that the vault
 holds the tree it computed. If it does not, obsync has stopped being able to
-trust its own view of the vault, so it stops — and before it does, it writes the
-tree it *meant* to apply to `refs/obsync/failed-apply`, because that commit is a
-real object that nothing else points at and a later `gc` would prune the one
+trust its own view of the vault, so it stops. Before it does, it writes the tree
+it *meant* to apply to `refs/obsync/failed-apply`, because that commit is a real
+object that nothing else points at, and a later `gc` would prune the one
 artifact that explains the mess.
 
 **This is the one freeze a restart cannot clear, and the one you clear
 yourself.** The ref is itself the gate: while it exists obsync stops touching
-the repository, and it keeps checking, so deleting the ref is what releases
+the repository, and obsync keeps checking, so deleting the ref is what releases
 it.
 
 ```bash
@@ -153,24 +156,24 @@ git -C /path/to/vault show refs/obsync/failed-apply:'Daily/2026-08-24.md'
 git -C /path/to/vault update-ref -d refs/obsync/failed-apply
 ```
 
-obsync attempts no repair of its own here and never will: a tool that has just
-proved it cannot apply a tree correctly is the last thing that should try again
-unsupervised. The ref is never pushed.
+obsync attempts no repair of its own here and never will. A tool that has just
+proved it cannot apply a tree correctly must not try again unsupervised. The ref
+is never pushed.
 
 ### A damaged repository
 
 A repository obsync can no longer read — a corrupt or empty object, a truncated
-index, a ref pointing at nothing — is not something a gate can catch, because it
-is never a cheap conclusive fact: it is something a command runs into. obsync
-finds it by working. Every sync run already reads exactly the objects obsync
-depends on, and no scan of the whole repository improves on that, which is why
-obsync never runs `git fsck`.
+index, a ref pointing at nothing — is not something a gate can catch. It is
+never a cheap conclusive fact: it is something a command runs into. obsync finds
+it by working. Every sync run already reads exactly the objects obsync depends
+on, and no scan of the whole repository improves on that, which is why obsync
+never runs `git fsck`.
 
 git's exit status cannot tell a rotted object from a locked index, so **time is
 the classifier**: five consecutive sync runs whose local half failed. At five,
-obsync deletes `.git/index` and tries once more — the index is derived state,
+obsync deletes `.git/index` and tries once more. The index is derived state,
 reconstructible from the working tree, and **obsync may discard derived state
-and never discards history**. The cost is stated rather than hidden: a human's
+and never discards history**. The cost is stated rather than hidden: your
 staged-but-uncommitted work is dropped. The files are untouched, and the next
 run would have committed them anyway.
 
@@ -179,13 +182,13 @@ git's own first line of stderr, the streak count, and how much room is left on
 the disk when there is almost none.
 
 **This freeze is the one that self-clears by retrying rather than by
-re-checking.** While it stands obsync runs one read-only `git status` a tick and
-nothing else; the tick that succeeds releases it.
+re-checking.** While it stands, obsync runs one read-only `git status` a tick
+and nothing else. The tick that succeeds releases it.
 
-> **Load-bearing documentation** (§7, [#15](../../issues/15)).
+> **Load-bearing documentation** ([#15](../../issues/15)).
 > **The recovery recipe.** obsync never re-clones and never repairs a repository
 > by replacing it, because a re-clone discards exactly the commits obsync exists
-> to have made — and obsync cannot tell whether a damaged object is one the
+> to have made. obsync also cannot tell whether a damaged object is one the
 > remote already holds or one only this disk ever had. This recipe is what
 > replaces that code. Never cut it.
 >
@@ -224,56 +227,57 @@ nothing else; the tick that succeeds releases it.
 > docker compose start obsync
 > ```
 >
-> **Step 4 is the one that is easy to skip and expensive to skip.** The vault is
-> the side obsync treats as true, and the repository you have just attached says
-> the remote holds files the vault does not — so without it obsync does exactly
-> what it is built to do and publishes the deletion of every note another device
-> pushed while this one was frozen. Restoring is the safe direction and deleting
-> again is cheap: the one thing step 4 can get wrong is resurrecting a note you
-> deliberately deleted while obsync was down, and you delete it again in
-> Obsidian.
+> **Step 4 is easy to skip and expensive to skip.** The vault is the side obsync
+> treats as true, and the repository you have just attached says the remote
+> holds files the vault does not. Without step 4, obsync does what it is built
+> to do and publishes the deletion of every note another device pushed while
+> this one was frozen.
 >
-> Three things about the state you are looking at, all easy to misread:
+> Restoring is the safe direction, and deleting again is cheap. The one thing
+> step 4 can get wrong is bringing back a note you deliberately deleted while
+> obsync was down, and you delete that again in Obsidian.
 >
-> - **Before step 3, obsync has already deleted `.git/index`**, and it builds one
->   back from HEAD before it commits anything. A `git status` reporting every
->   file in the vault as deleted is a missing index, not a lost vault.
+> Three things about the state you are looking at are easy to misread:
+>
+> - **Before step 3, obsync has already deleted `.git/index`**, and it builds
+>   one back from HEAD before it commits anything. A `git status` reporting
+>   every file in the vault as deleted is a missing index, not a lost vault.
 > - **After step 3 that is no longer the reading.** The repository you attached
 >   has an index of its own, so a file reported deleted there is a real
->   difference between the remote and the vault, and step 4 is what answers it.
-> - **Your notes were never touched.** Everything in the working tree is
->   yours and is exactly as you left it. What is at risk is only what had been
+>   difference between the remote and the vault. Step 4 is what answers it.
+> - **Your notes were never touched.** Everything in the working tree is yours
+>   and is exactly as you left it. What is at risk is only what had been
 >   committed and not yet pushed, which is what step 2 keeps.
 >
 > The repository you reattached is at the remote's tip and the vault holds your
 > files, so obsync's first run after step 6 commits the difference between them
-> and pushes it. That is the ordinary loop, not a repair — which is exactly why
+> and pushes it. That is the ordinary loop rather than a repair, which is why
 > the difference has to be one you meant.
 
 ### A push the remote rejected
 
-The remote received the push, evaluated it, and said no — a pre-receive hook, a
-branch protection rule, a storage quota, a pack over a limit. It is a verdict
-rather than a failure, so obsync stops the network half on the first occurrence
-rather than waiting to see whether it repeats, and reports it immediately.
+The remote received the push, evaluated it, and said no. The cause is a
+pre-receive hook, a branch protection rule, a storage quota, or a pack over a
+limit. It is a verdict rather than a failure, so obsync stops the network half
+on the first occurrence rather than waiting to see whether it repeats.
 
-> **Load-bearing documentation** (§7, [#18](../../issues/18)).
-> **The recipe is entirely yours, and obsync relays, never diagnoses.**
-> obsync prints the remote's own words verbatim, in a fenced block, labelled as
-> the remote's rather than obsync's, and adds nothing to them. It never guesses
-> at which file or which rule is the problem, because git ships the remote's
-> reason as *"a human-readable explanation"* and nothing else — there is no
-> machine field naming a path, and a guess printed beside a fact reads as a
-> diagnosis. Never cut this line, and never replace the relayed text with an
-> interpretation of it.
+> **Load-bearing documentation** ([#18](../../issues/18)).
+> **The recipe is entirely yours, and obsync relays, never diagnoses.** obsync
+> prints the remote's own words verbatim, in a fenced block, labelled as the
+> remote's rather than obsync's, and adds nothing to them. It never guesses at
+> which file or which rule is the problem, because git ships the remote's reason
+> as *"a human-readable explanation"* and nothing else. There is no machine
+> field naming a path, and a guess printed beside a fact reads as a diagnosis.
+> Never cut this line, and never replace the relayed text with an interpretation
+> of it.
 >
 > 1. **Look at the remote, not at the vault.** There is nothing wrong here to
 >    find. obsync's local half is still committing and the vault is intact.
-> 2. **Read the remote's words in the attention note** — the fenced block under
->    the freeze. They are what the remote said, exactly as it arrived.
+> 2. **Read the remote's words in the attention note**, in the fenced block
+>    under the freeze. They are what the remote said, exactly as it arrived.
 > 3. **Change whatever the remote objects to, on the remote.** Relax the hook,
->    adjust the branch protection rule, raise the quota, widen the credential's
->    scope.
+>    adjust the branch protection rule, raise the quota, or widen the
+>    credential's scope.
 > 4. **Wait.** obsync retries the whole network half once an hour and clears the
 >    freeze when a push lands. Nothing else is needed.
 >
@@ -281,8 +285,8 @@ rather than waiting to see whether it repeats, and reports it immediately.
 > the local branch runs ahead meanwhile. It will not rewind the commit the
 > remote refused: a subcommand that drops a commit is the self-repair this
 > design does not do, and the rejected commit may be the only copy of the work
-> in it. If the offending content genuinely has to go, that is your own `git`
-> in the vault, and obsync syncs the result like any other edit.
+> in it. If the offending content genuinely has to go, that is your own `git` in
+> the vault, and obsync syncs the result like any other edit.
 
 The pack obsync uploads grows while this stands, because the hourly retries keep
 merging and committing. That is the fail-open-locally rule working rather than a
@@ -296,24 +300,23 @@ run them under:
 
 - **Under plain `docker compose`**, an unhealthy obsync shows as `unhealthy` in
   `docker ps` and nothing else happens. Nothing restarts it, which is what
-  obsync's design expects: a parked obsync holding a diagnosis is the point.
+  obsync's design expects. A parked obsync holding a diagnosis is the point.
 - **Under Swarm**, an unhealthy task is replaced. A container restarted for
-  being unhealthy loses everything in the list [above](#do-not-restart-it) —
-  and because a freeze is reported as unhealthy, an unattended restart can turn
-  a diagnosable stuck state into a loop that keeps destroying its own diagnosis.
+  being unhealthy loses everything in the list [above](#do-not-restart-it). A
+  freeze is reported as unhealthy, so an unattended restart can turn a
+  diagnosable stuck state into a loop that keeps destroying its own diagnosis.
   The write-verify freeze is the one that survives it, deliberately.
 
-If you run obsync under Swarm, decide deliberately what you want an unhealthy
-task to do before you deploy it. A `restart_policy` of `condition: none` stops
-the *replacement*; it does not stop Swarm acting on the health status in the
-first place, so do not plan on the parked process still being there to ask.
+If you run obsync under Swarm, decide what you want an unhealthy task to do
+before you deploy it. A `restart_policy` of `condition: none` stops the
+*replacement*. It does not stop Swarm acting on the health status in the first
+place, so do not plan on the parked process still being there to ask.
 
 Plan on the ref instead. Everything in the list [above](#do-not-restart-it) is
-process state and is genuinely gone, and the attention note is derived from
-process state — so a note holding a rejection's relayed words is rewritten
-without them until obsync has been refused again. The one thing keyed on
-something a restart cannot reach is `refs/obsync/failed-apply`, which is why the
-freeze that matters most is the freeze that is keyed on a ref.
+process state and is genuinely gone. The attention note is derived from process
+state too, so a note holding a rejection's relayed words is rewritten without
+them until obsync has been refused again. The one thing keyed on something a
+restart cannot reach is `refs/obsync/failed-apply`.
 
 ---
 
@@ -327,42 +330,40 @@ to tell you how much is left.
   the index through a temp file and a rename, so running out of room *aborts
   commands* rather than leaving half an object behind.
 - **What it does instead is fail runs**, and consecutive failed runs are exactly
-  what the streak counts — so a disk that stays full eventually reads as a
-  damaged repository, and says so with the free space in the same line. Free
-  room, and the freeze clears on the tick after `git status` succeeds. There is
-  nothing else to do and nothing to repair.
+  what the streak counts. A disk that stays full eventually reads as a damaged
+  repository, and obsync says so with the free space in the same line. Free some
+  room, and the freeze clears on the tick after `git status` succeeds.
 - **Plan headroom for the attachments, not for the notes.** When both sides
-  changed one file, obsync keeps both: the remote pays nothing, because the
-  copy's bytes are a blob it already holds, and the **vault volume carries the
-  file twice** until you resolve the pair and delete the copy. For notes that is
-  kilobytes; for a 90MB video edited in two places it is 90MB, once per such
+  changed one file, obsync keeps both. The remote pays nothing, because the
+  copy's bytes are a blob it already holds. The **vault volume carries the file
+  twice**, until you resolve the pair and delete the copy. For notes that is
+  kilobytes. For a 90MB video edited in two places it is 90MB, once per such
   file in the merge. The measurements are in
-  [`research/sizing.md`](research/sizing.md), and the README's **Sizing**
-  section states what they mean for a deployment.
+  [`research/sizing.md`](research/sizing.md).
 
 ---
 
 ## When something else is writing the vault
 
-obsync is built for a vault that has another writer in it — that is the ordinary
-case, and it is why every run asks git what changed rather than trusting a file
+obsync is built for a vault that has another writer in it. That is the ordinary
+case. It is why every run asks git what changed rather than trusting a file
 watcher, and why a file that is still being written is left out of *this* commit
 rather than committed in half.
 
-What a **third writer** obsync cannot see looks like, if one appears:
+A **third writer** that obsync cannot see looks like this:
 
 - **Conflict copies with no explanation.** Both sides of a note changed, and one
   of the sides was not you.
-- **Runs that abort and retry**, visible only at debug: an incoming change
+- **Runs that abort and retry**, visible only at debug. An incoming change
   touched a path something else was writing, so obsync recomputed rather than
-  applying over it.
-- **A path in the note's last section** — something is rewriting it faster than
+  writing over it.
+- **A path in the note's last section.** Something is rewriting it faster than
   obsync can ever see it settle, so it is never committed at all.
 
 The commonest cause is **Obsidian's own Headless Sync running beside obsync**.
-obsync cannot detect it and cannot coordinate with it; see the README's fit
-section, which is where the decision belongs, because it decides whether obsync
-is for you at all rather than what to do at 3am.
+obsync cannot detect it and cannot coordinate with it. See the README's fit
+section, which is where that decision belongs: it decides whether obsync is for
+you at all, rather than what to do at 3am.
 
 ---
 
@@ -371,6 +372,7 @@ is for you at all rather than what to do at 3am.
 Stop the container and delete it. Everything obsync wrote lives in namespaces it
 declared — `obsync-attention.md`, conflict copies, `.git/info/exclude`,
 `.git/obsync/`, `.git/obsync.lock` and `refs/obsync/failed-apply` — so removal
-is a deletion rather than an untangling. The vault is a git repository with your
-notes in it and your remote configured, which is what it was before. The full
-list is [`interface.md`](interface.md#4-what-obsync-writes-into-the-vault).
+is a deletion rather than an untangling. The vault is left as a git repository
+with your notes in it and your remote configured, which is what it was before.
+The full list is in
+[`interface.md`](interface.md#4-what-obsync-writes-into-the-vault).

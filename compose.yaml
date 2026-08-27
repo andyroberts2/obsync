@@ -1,133 +1,130 @@
 # obsync's reference stack: ignis serving an Obsidian vault in a browser, and
 # obsync keeping that vault in step with one remote git branch.
 #
-# **This file is normative rather than exemplary.** It is the one document whose
-# correctness an operator inherits by *copying* rather than by reading, so the
-# lines below are decisions rather than illustrations — and it is exercised in
-# CI the same way the image is, because a normative file nobody runs is an
-# example with a stronger adjective.
+# Copy this file rather than reading it. The lines below are decisions, not
+# illustrations, and CI runs this file so that copying it stays safe.
 #
-# To deploy it: change `OBSYNC_REPO` to your own repository, put your token in
-# `./secrets/obsync-token`, and name your vault folder under `./vaults`. Nothing
-# else here is a placeholder.
+# To deploy it, change three things:
+#
+#   1. `OBSYNC_REPO`, to your own repository.
+#   2. `./secrets/obsync-token`, to hold your token.
+#   3. `./vaults/notes`, to name your own vault folder.
+#
+# Nothing else here is a placeholder.
 
 services:
-  # Obsidian in the browser with the vault on the server. obsync is not coupled
-  # to ignis — it assumes an Obsidian vault on a mounted volume, and ignis is
-  # the documented reference stack.
+  # Obsidian in the browser, with the vault on the server. obsync is not
+  # coupled to ignis. It needs an Obsidian vault on a mounted volume, and ignis
+  # is the reference stack this project documents.
   ignis:
     image: nobbe/ignis:latest
     environment:
-      # ignis chowns its vault root to this pair on boot and writes every vault
-      # file as it, which is what obsync's `user:` below is matched against.
+      # ignis chowns its vault root to this pair at boot and writes every vault
+      # file as it. obsync's `user:` line below must match.
       PUID: "1000"
       PGID: "1000"
 
-      # **Load-bearing documentation** (§11, #16 —
-      # https://github.com/andyroberts2/obsync/issues/16). ignis buffers a
-      # browser's write in memory and flushes it to disk this many milliseconds
-      # later. Zero is already ignis's default, and that is precisely the
-      # argument for setting it here: a normative file resting on someone else's
-      # default is one upstream change away from silently breaking obsync's read
-      # path. Above zero, obsync reads content that is *stale* rather than torn
-      # — and worse, it can apply an incoming change to a path ignis is holding
-      # buffered, so ignis's flush overwrites the remote's edit and obsync
-      # commits it back as a fresh local one. obsync cannot see into another
-      # process's memory, so there is no check to write and this line is the
-      # whole of the answer. Never remove it.
+      # **Load-bearing documentation** (#16 —
+      # https://github.com/andyroberts2/obsync/issues/16). ignis holds a
+      # browser's write in memory and flushes it to disk this many
+      # milliseconds later.
+      #
+      # Zero is already ignis's default. Setting it here is what stops an
+      # upstream change to that default from breaking obsync quietly. Above
+      # zero, obsync reads content that is out of date. Worse, obsync can
+      # write an incoming change to a path that ignis still holds in memory,
+      # and ignis then overwrites the remote's edit. obsync cannot see into
+      # another process's memory, so this line is the whole of the answer.
+      # Never remove it.
       WRITE_COALESCE_MS: "0"
     volumes:
       - ./vaults:/vaults
       - ./data:/app/data
       - obsidian-app:/app/obsidian-app
     ports:
-      # ignis serves on 8080 inside the container. Which interface and which
-      # host port it is published on is ignis's business and yours; obsync
-      # neither knows nor cares.
+      # ignis serves on 8080 inside the container. Which host port you publish
+      # it on is your choice, and obsync neither knows nor cares.
       - "8080:8080"
     restart: unless-stopped
 
   obsync:
-    # The floating major, never `latest` and never a patch. obsync's value is
-    # running unattended for months, so a pin that never moves is a vault
-    # sidecar sitting on a stale base image; a floating major moves with every
-    # release that promises not to change what you set or pinned. Pre-1.0 there
-    # is no meaningful floating major, so this reads `:0.3` today and becomes
-    # `:1` at 1.0 — the one line in obsync's documentation with a scheduled
-    # change.
+    # Pin the floating major, never `latest` and never a patch version. obsync
+    # runs unattended for months, so a pin that never moves leaves it on a
+    # stale base image. Before 1.0 there is no floating major, so this reads
+    # `:0.3` today and becomes `:1` at 1.0.
     image: ghcr.io/andyroberts2/obsync:0.3
 
-    # **Load-bearing documentation** (§8, #12 —
-    # https://github.com/andyroberts2/obsync/issues/12). This line is what
-    # replaces a `PUID`/`PGID` knob: obsync runs as whatever UID:GID Docker's
-    # own `user:` names, with no `/etc/passwd` entry and no root entrypoint, and
-    # it must be the pair ignis writes the vault as. Detection was rejected —
-    # adopting the vault's owner requires already being root, and a vault
-    # chowned wrong would have obsync confidently adopt the wrong identity — and
-    # a root-then-drop entrypoint was rejected because it means starting as root
-    # in the one container whose job is holding a write-scoped credential. What
-    # earns this line the right to replace code is that a mismatch is caught
-    # conclusively: an unwritable vault is a full freeze with a named cause, not
-    # silent corruption. Never remove it.
+    # **Load-bearing documentation** (#12 —
+    # https://github.com/andyroberts2/obsync/issues/12). This line replaces a
+    # `PUID`/`PGID` setting. obsync runs as whatever UID and GID Docker's own
+    # `user:` names, with no `/etc/passwd` entry and no root entrypoint, and
+    # the pair must be the one ignis writes the vault as.
+    #
+    # obsync does not detect the vault's owner, because reading it needs root
+    # and a vault chowned wrong would make obsync adopt the wrong identity. A
+    # mismatch here is caught instead: a vault obsync cannot write in is a full
+    # freeze with a named cause, rather than silent corruption. Never remove
+    # this line.
     user: "1000:1000"
 
     environment:
-      # The only required variable. Every other one below is here because this
-      # deployment has a fact to state, not because obsync needs it.
+      # The only required variable. Everything else below is here because this
+      # deployment has a fact to state.
       OBSYNC_REPO: https://github.com/you/vault.git
 
-      # Required for an http(s) remote, and a file rather than a variable so
+      # Required for an http(s) remote. It is a file rather than a variable so
       # that rotating the token is a write rather than a redeploy: obsync
-      # re-reads it every time git asks for a credential. An `ssh://` or
-      # scp-style remote needs no variable at all — it needs the two mounts
-      # commented out under `volumes:` below instead.
+      # re-reads the file every time git asks for a credential. An `ssh://` or
+      # scp-style remote needs no variable. It needs the two mounts commented
+      # out under `volumes:` instead.
       OBSYNC_TOKEN_FILE: /run/secrets/obsync-token
 
     volumes:
-      # One vault per container, mounted at obsync's default vault path — which
-      # is `/vault`, singular, deliberately not ignis's `/vaults`. Point it at
-      # the one folder under ignis's vault root that this obsync syncs; two
-      # vaults is two obsync services, because each needs its own repository,
-      # branch and token anyway.
+      # One vault per container, mounted at obsync's default vault path. That
+      # path is `/vault`, singular, and it is deliberately not ignis's
+      # `/vaults`. Point it at the one folder under ignis's vault root that
+      # this obsync syncs. Two vaults means two obsync services, because each
+      # needs its own repository, branch and token.
       - ./vaults/notes:/vault
 
       # Read-only, because obsync only ever reads it. The token never reaches a
       # URL, an argv, a log line or `git remote -v`.
       - ./secrets/obsync-token:/run/secrets/obsync-token:ro
 
-      # **Load-bearing documentation** (§8, #12 —
+      # **Load-bearing documentation** (#12 —
       # https://github.com/andyroberts2/obsync/issues/12). For an `ssh://` or
-      # scp-style remote, uncomment both of these and drop OBSYNC_TOKEN_FILE
-      # above. obsync stores and manages neither file; SSH needs no knobs, and
-      # this is what "arrives as an ordinary mount" means here.
+      # scp-style remote, uncomment both mounts below and remove
+      # OBSYNC_TOKEN_FILE above. obsync neither stores nor manages either file.
       #
-      # The second one is the one nobody expects, and leaving it out is silent.
-      # `user:` above names a UID the image has no `/etc/passwd` entry for — by
-      # design, that is the whole point of it — and ssh reads the home directory
-      # it expands `~` to out of that entry rather than out of HOME. Measured in
-      # obsync's own image: with no entry ssh exits before it reads any
-      # configuration (`No user exists for uid 1000`), and with an entry whose
-      # home is somewhere else it looks for the key somewhere else. Either way
-      # git reports a remote it could not read, which obsync tiers as an
-      # unreachable remote — so a wrong or absent passwd line is a vault that is
-      # quietly not backed up for a day before anything says so. One line for
-      # this UID is the whole file, and its home field must be the image's HOME:
+      # The second mount is the one nobody expects, and leaving it out fails
+      # silently. The `user:` line above names a UID that the image has no
+      # `/etc/passwd` entry for, and ssh reads the home directory it expands
+      # `~` to out of that entry rather than out of HOME.
+      #
+      # Measured in obsync's own image: with no entry, ssh exits before it
+      # reads any configuration (`No user exists for uid 1000`). With an entry
+      # whose home is somewhere else, ssh looks for the key somewhere else.
+      # Either way git reports a remote it could not read, obsync treats that
+      # as an unreachable remote, and your vault is quietly not backed up for a
+      # day before anything says so.
+      #
+      # One line for this UID is the whole file, and its home field must be the
+      # image's HOME:
       #
       #   obsync:x:1000:1000:obsync:/home/obsync:/sbin/nologin
       #
       # - ./secrets/ssh:/home/obsync/.ssh:ro
       # - ./secrets/passwd:/etc/passwd:ro
 
-    # Longer than Docker's 10s default, and that is not a preference. On SIGTERM
-    # obsync refuses to start a new run, finishes the one in flight, and exits,
-    # with a hard deadline of about 30 seconds on the only part of a run that
-    # can be waiting on the outside world. At 10s Docker would SIGKILL it
-    # mid-run instead, which is how a shutdown manufactures a half-applied tree.
+    # Longer than Docker's 10s default, and that is not a preference. On
+    # SIGTERM obsync refuses to start a new run, finishes the run in flight,
+    # and exits, with a deadline of about 30 seconds. At 10s Docker kills it
+    # mid-run, which is how a shutdown leaves a half-applied tree.
     stop_grace_period: 45s
 
     restart: unless-stopped
 
-    # There is no healthcheck line here: the image carries its own, so
+    # There is no healthcheck line here. The image carries its own, so
     # `docker ps` shows whether obsync needs a human with nothing added. Note
     # that Swarm acts on health status and plain Compose ignores it.
 
