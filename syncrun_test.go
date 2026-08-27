@@ -470,12 +470,25 @@ func TestTheNextRunPushesWhatTheLastOneCouldNot(t *testing.T) {
 // killing a local command halfway is how this design manufactures the one state
 // it cannot recover from (§1).
 //
-// Measured: a run that commits, reconciles and pushes drives eighteen git
+// Measured: a run that commits, reconciles and pushes drives twenty-one git
 // commands — five of them writing the private git config, of which one is the
 // credential isolation's forced askpass — and takes out exactly two deadlines,
 // one for each of the two that talk to the remote. The credential helper is not
 // among them: it is pinned per invocation rather than written down
 // (internal/git/isolation.go).
+//
+// Twenty-one rather than the eighteen this said before #28, and all three are
+// bootstrap's: the two that ask git where its exclude file and staging
+// directory are, and the one that asks which plugin data files this vault
+// already tracks. An ordinary run gained no git, and neither did the network
+// half, which is what this test is actually about.
+//
+// Re-measured after the refusal layer moved to the index rather than adjusted,
+// and still twenty-one: the diff-index the refusal check reads is the one the
+// commit message was already written from, and the `git reset` that takes a
+// refused path back out runs only when something else staged one. The two runs
+// that do cost a git more than this one are the churn one-shot's, which happens
+// once ever, and any run that finds a refused path in the index.
 //
 // The loop waits on the same clock for its own cadence, and those waits are not
 // timeouts: nothing is killed when one expires. So the assertion is both halves

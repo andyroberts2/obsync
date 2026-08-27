@@ -64,7 +64,50 @@ func Bootstrap(ctx context.Context, cfg config.Config, log *slog.Logger, clk clo
 		return nil, err
 	}
 	repo.branch = branch
+
+	// The ignore floor goes in before the first run, because the first run is
+	// the one looking at a vault obsync was not watching: without it, the
+	// workspace file ignis has been rewriting all week is in the first commit.
+	// A floor obsync could not write is a refusal rather than a warning — the
+	// alternative is syncing a vault under rules obsync said it applies and
+	// does not — and it is retried on the next run like every other refusal.
+	if err := repo.resolveOwnedPaths(); err != nil {
+		_ = repo.Close()
+		return nil, err
+	}
+	if err := repo.writeIgnoreFloor(); err != nil {
+		_ = repo.Close()
+		return nil, err
+	}
+	repo.reportTrackedPluginData()
 	return repo, nil
+}
+
+// reportTrackedPluginData says, once and loudly, that this vault's history
+// already carries plugin settings (§5, §9's WARN row).
+//
+// It is advisory and it is the whole of what obsync does about it: those files
+// keep syncing, because untracking them would delete deliberately-synced
+// settings from every other clone and would not unleak a key the remote's
+// history already holds. What obsync guarantees is the other half — it will
+// never be the thing that adds one.
+//
+// A vault git cannot be asked about is not a reason to refuse a bootstrap that
+// otherwise succeeded, so the failure is a debug line: the WARN is news about
+// the vault, and its absence is not news about anything.
+func (r *Repo) reportTrackedPluginData() {
+	tracked, err := r.TrackedPluginData()
+	if err != nil {
+		r.log.Debug("obsync could not ask which plugin data files this vault already tracks",
+			"problem", err)
+		return
+	}
+	if len(tracked) == 0 {
+		return
+	}
+	r.log.Warn("this vault already tracks plugin data files, which is where community plugins keep "+
+		"API keys; obsync leaves them alone and keeps syncing them, and will never add one itself",
+		"paths", tracked, "count", len(tracked))
 }
 
 // resolveTrackedBranch performs the bootstrap and answers with the branch

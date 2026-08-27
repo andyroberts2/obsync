@@ -6,12 +6,12 @@
 // its next wake-up until that run is over. No mutex, no queue, and nothing to
 // go wrong under load.
 //
-// What a run does in this build: ask git what changed, commit it as one commit,
-// fetch, classify, fast-forward what is only behind, and push what is only
-// ahead (#24, #27). Everything that will later stand between those steps — the
-// gates (#32), the ignore floor and refused paths (#28), the settle guard
-// (#29), and the out-of-tree merge a real divergence needs (#30) — is a rule
-// added to a loop that already turns.
+// What a run does in this build: ask git what changed, take out the paths it
+// refuses to commit, commit the rest as one commit, fetch, classify,
+// fast-forward what is only behind, and push what is only ahead (#24, #27,
+// #28). Everything that will later stand between those steps — the gates
+// (#32), the settle guard (#29), and the out-of-tree merge a real divergence
+// needs (#30) — is a rule added to a loop that already turns.
 //
 // When it turns is cadence.go: the quiet window, the max-wait cap, the jittered
 // tick and the network backoff, none of which is a knob (#25).
@@ -20,12 +20,14 @@ package loop
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/andyroberts2/obsync/internal/clock"
 	"github.com/andyroberts2/obsync/internal/config"
 	"github.com/andyroberts2/obsync/internal/git"
+	"github.com/andyroberts2/obsync/internal/vault"
 )
 
 // Loop is the sync loop. New builds one; Run turns it until its context is
@@ -74,6 +76,29 @@ type Loop struct {
 	// it carries the tracked branch, resolved on the first run that reached the
 	// vault and fixed for the process lifetime (§3).
 	repo *git.Repo
+
+	// refused is every path obsync is currently declining to commit, and why.
+	// It exists so the WARN fires once per path on transition rather than once
+	// per tick for as long as a 200MB video sits in the vault (§5, §9) — the
+	// standing signal is the attention note (#38), which is derived from live
+	// state and needs no memory at all.
+	//
+	// It is in-memory and process-lifetime only. A restart re-announces what
+	// is still refused, which is the right way round for a warning that is not
+	// a gate: the operator who restarted is the one looking.
+	refused map[string]string
+
+	// remoteInStep is whether the vault and the remote have ever held the same
+	// tip since obsync started, and churnUntracked whether the one-shot that
+	// untracks the churn subset has run (§5).
+	//
+	// The order is the decision. Untracking is a structural commit against a
+	// tip obsync has just confirmed, rather than against whatever the vault
+	// happened to hold at bootstrap: doing it against a stale tip risks doing
+	// it twice, and while the remote is unreachable obsync should not make a
+	// commit it cannot push.
+	remoteInStep   bool
+	churnUntracked bool
 }
 
 func New(cfg config.Config, log *slog.Logger, clk clock.Clock, wakes <-chan struct{}) *Loop {
@@ -389,30 +414,146 @@ func (l *Loop) perform(ctx context.Context, committing bool) error {
 	return l.networkHalf(ctx)
 }
 
+// untrackChurnSubset is the one-shot that takes the workspace churn and OS
+// cruft out of a vault whose history already carries them (§5), and reports
+// whether it made this run's commit.
+//
+// Ignore rules only ever affect untracked paths, so a vault that has committed
+// its workspace file once churns forever no matter what the floor says. The
+// remedy is `git rm --cached`, once, files left on disk — and its cost is
+// stated rather than hidden: the commit deletes those paths from every other
+// clone on its next pull. For a workspace file that is the point, and it is why
+// the floor stays narrow enough that this is a fair trade.
+//
+// It runs at the top of the local half rather than at bootstrap, and only after
+// a run that left the vault and the remote holding the same tip. Untracking
+// against a stale tip risks doing it twice, and while the remote is unreachable
+// obsync should not be making structural commits it cannot push.
+//
+// The untracking is its own commit and the run stops there, which keeps §2's
+// one-commit-per-run true and keeps this commit legible: a human reading git
+// log finds one loudly-messaged commit that did exactly one thing, rather than
+// a day's notes with an untracking folded into them. The next run commits the
+// notes, one tick later, once ever.
+//
+// A failure leaves the one-shot undone, so the next run tries again. The one
+// way it can fail that is not a broken repo is a human's own staged work in the
+// index, which git refuses to discard — and it clears the moment obsync commits
+// that work like any other change.
+func (l *Loop) untrackChurnSubset() (bool, error) {
+	if l.churnUntracked || !l.remoteInStep {
+		return false, nil
+	}
+
+	churn, err := l.repo.TrackedChurnSubset()
+	if err != nil {
+		return false, err
+	}
+	if len(churn) == 0 {
+		l.churnUntracked = true
+		return false, nil
+	}
+
+	if err := l.repo.Untrack(churn); err != nil {
+		return false, err
+	}
+	// This commit records the index like any other, so it passes the refusal
+	// layer like any other: a human who staged a credential before the one-shot
+	// fired would otherwise have it carried out by the one commit in obsync
+	// that is not built from the committable set. One diff-index, once ever.
+	if _, err := l.stagedWithoutRefused(); err != nil {
+		return false, err
+	}
+	if err := l.repo.Commit(untrackMessage(churn)); err != nil {
+		return false, err
+	}
+	l.churnUntracked = true
+
+	// WARN rather than the INFO a run that committed gets, because the news is
+	// not that obsync committed: it is that this commit reaches every other
+	// clone of the repo and takes those paths out of it too (§9's advisory
+	// row). It is true, it needs no action, and an operator should not have to
+	// find out from a diff.
+	l.log.Warn("obsync stopped tracking the workspace and cruft files its ignore floor covers, in "+
+		"one commit; every byte is still on disk, and pulling this commit removes those paths from "+
+		"your other clones too",
+		"paths", len(churn), "subject", untrackSubject(churn))
+	return true, nil
+}
+
+// reportRefusals says what obsync is refusing to commit, once per path on
+// transition (§5, §9).
+//
+// Once, because a refused path stays refused: a 200MB attachment is reported by
+// git as changed on every run for as long as it sits in the vault, and a WARN a
+// tick is how a signal becomes noise. Forgetting a path that stopped being
+// refused is deliberate rather than an omission — the same file arriving again
+// is news again — and the transition out is silent, because a file that went
+// back to syncing is a run that changed something and says so where every other
+// run does.
+func (l *Loop) reportRefusals(refused []vault.Refusal) {
+	if l.refused == nil {
+		l.refused = map[string]string{}
+	}
+	still := make(map[string]bool, len(refused))
+	for _, refusal := range refused {
+		still[refusal.Path] = true
+		if _, known := l.refused[refusal.Path]; known {
+			continue
+		}
+		l.refused[refusal.Path] = refusal.Reason
+		l.log.Warn("obsync is not committing this path, and the rest of the vault keeps syncing; "+
+			"the remote holds the last version that passed and your vault holds a newer one",
+			"path", refusal.Path, "reason", refusal.Reason)
+	}
+	for path := range l.refused {
+		if !still[path] {
+			delete(l.refused, path)
+		}
+	}
+}
+
 // localHalf is status and commit: the part of a run that touches only the vault
 // and its .git.
 func (l *Loop) localHalf() error {
+	if untracked, err := l.untrackChurnSubset(); err != nil || untracked {
+		return err
+	}
+
 	changed, err := l.repo.Changed()
 	if err != nil {
 		return err
 	}
 
-	// The committable set is what a run would actually stage. Nothing is
-	// subtracted from it yet — the ignore floor and refused paths are #28, and
-	// unsettled paths #29 — so in this build it is everything git reports.
-	committable := changed
+	// The committable set is what a run would actually commit. The ignore floor
+	// has already come out of it, by git rather than here — status does not
+	// report an untracked path the exclude file covers — which is what leaves
+	// the vault's own .gitignore able to overrule the floor (§5). What obsync
+	// subtracts itself is the refusal layer; unsettled paths join it in #29.
+	committable, refused := vault.CommittableSet(l.config.VaultPath, changedPaths(changed), l.config.SizeCeiling)
+	l.reportRefusals(refused)
+
+	// A tree holding nothing but refused paths is quiet: no commit, no push,
+	// and no repeated warning (§5).
 	if len(committable) == 0 {
 		return nil
 	}
 
-	if err := l.repo.Stage(committable); err != nil {
+	// What the add is given is narrower than what the commit will carry: a
+	// path whose change the index already holds in full has nothing in the
+	// working tree to stage, and naming one that git also ignores is fatal to
+	// the whole add rather than to that pathspec (git.ChangedPath). So the
+	// committable set decides whether to commit and the working tree decides
+	// what to add, and a run with nothing to add still commits what a human
+	// staged.
+	if err := l.repo.Stage(toStage(changed, committable)); err != nil {
 		return err
 	}
 	// What the index holds is what the commit will carry, and it is not always
 	// what status reported: an edit that puts a file back the way HEAD has it
 	// is a change to the tree and no change to the commit. Committing anyway
 	// would put an empty commit in a human's history.
-	staged, err := l.repo.Staged()
+	staged, err := l.stagedWithoutRefused()
 	if err != nil {
 		return err
 	}
@@ -429,6 +570,95 @@ func (l *Loop) localHalf() error {
 	}
 	l.log.Info("committed", "paths", len(staged), "subject", subject(staged))
 	return nil
+}
+
+// stagedWithoutRefused is what the index would commit, with any refused path
+// somebody else staged taken back out of it first (§5). Both of obsync's
+// commits go through it, and that is the point of it being one function.
+//
+// The subtraction the committable set makes decides what obsync *stages*, and
+// that is not the whole of what a commit records: `git add` is not the only way
+// a path reaches the index, and `git commit` records the index. A human's own
+// `git add -A` in their vault — muscle memory, and what every plugin that
+// drives git for them does — would otherwise put a refused path in obsync's
+// commit and push it, in the same run whose WARN said obsync was not committing
+// it. That is the one unrecoverable mistake in this design (§5), so it is
+// checked against the list obsync will actually commit rather than against what
+// status happened to report.
+//
+// It costs no extra git in the ordinary case: this is the same diff-index the
+// commit message is written from. The unstaging happens only when something
+// else staged a refused path, and is index-only.
+func (l *Loop) stagedWithoutRefused() ([]git.Change, error) {
+	staged, err := l.repo.Staged()
+	if err != nil {
+		return nil, err
+	}
+	_, refused := l.refusedAmong(staged)
+	if len(refused) == 0 {
+		return staged, nil
+	}
+	if err := l.repo.Unstage(refused); err != nil {
+		return nil, err
+	}
+
+	staged, err = l.repo.Staged()
+	if err != nil {
+		return nil, err
+	}
+	// Fail closed rather than commit one anyway. A refusal never freezes the
+	// loop, but a run that cannot keep this particular promise is a run that
+	// does not commit: the vault is intact either way, and the mistake this
+	// prevents is the one no later commit can undo.
+	if reason, still := l.refusedAmong(staged); len(still) > 0 {
+		return nil, fmt.Errorf("obsync could not take %q back out of the index and will not commit "+
+			"a refused path: %s", still[0], reason)
+	}
+	return staged, nil
+}
+
+// refusedAmong is the paths of these that obsync refuses to commit, and the
+// reason the first of them is refused.
+func (l *Loop) refusedAmong(staged []git.Change) (string, []string) {
+	paths := make([]string, len(staged))
+	for i, change := range staged {
+		paths[i] = change.Path
+	}
+	_, refusals := vault.CommittableSet(l.config.VaultPath, paths, l.config.SizeCeiling)
+	if len(refusals) == 0 {
+		return "", nil
+	}
+	refused := make([]string, len(refusals))
+	for i, refusal := range refusals {
+		refused[i] = refusal.Path
+	}
+	return refusals[0].Reason, refused
+}
+
+// changedPaths is what git reported as changed, by name: the dirty set the
+// committable set is computed from.
+func changedPaths(changed []git.ChangedPath) []string {
+	paths := make([]string, len(changed))
+	for i, change := range changed {
+		paths[i] = change.Path
+	}
+	return paths
+}
+
+// toStage is the committable set narrowed to the paths the working tree holds
+// something to stage for, which is what `git add` is given (git.ChangedPath).
+func toStage(changed []git.ChangedPath, committable []string) []string {
+	keep := make(map[string]bool, len(committable))
+	for _, path := range committable {
+		keep[path] = true
+	}
+	paths := make([]string, 0, len(committable))
+	for _, change := range changed {
+		if change.InWorkingTree && keep[change.Path] {
+			paths = append(paths, change.Path)
+		}
+	}
+	return paths
 }
 
 // networkHalf is the part of a run that talks to the remote: fetch, classify,
@@ -499,7 +729,12 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 	switch state {
 	case git.Ahead:
 		return l.push(ctx, now)
+	case git.Equal:
+		l.remoteInStep = true
 	case git.Behind:
+		// The fast-forward already happened, so the vault now holds the
+		// remote's tip.
+		l.remoteInStep = true
 		// A run that changed something says so, and this changed the vault
 		// (§9): someone else's edit is now in front of the human.
 		l.log.Info("the vault caught up with the remote", "branch", l.repo.TrackedBranch())
@@ -509,6 +744,10 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 		// it lands obsync holds its commits locally rather than pushing them:
 		// the push could only be refused, since every write to the remote is a
 		// fast-forward or it does not happen (§3).
+		//
+		// Not in step, deliberately: the fetch was fine, and obsync still
+		// cannot publish, which is exactly the state the churn one-shot waits
+		// out rather than making a structural commit into.
 		l.log.Debug("the vault and the remote have both changed", "branch", l.repo.TrackedBranch())
 	}
 	// Equal, or reconciled: a run that changed nothing says nothing, because
@@ -530,6 +769,7 @@ func (l *Loop) push(ctx context.Context, now time.Time) error {
 		return err
 	}
 	l.lastPush = now
+	l.remoteInStep = true
 	l.networkSucceeded()
 	l.log.Info("pushed", "branch", l.repo.TrackedBranch())
 	return nil

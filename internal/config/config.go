@@ -263,7 +263,7 @@ func (c Config) attrs() []slog.Attr {
 		slog.String("branch", c.Branch),
 		slog.String("token_file", c.CredentialFile),
 		slog.String("username", c.Username),
-		slog.String("size_ceiling", formatSize(c.SizeCeiling)),
+		slog.String("size_ceiling", FormatSize(c.SizeCeiling)),
 		slog.String("author_name", c.CommitIdentity.Name),
 		slog.String("author_email", c.CommitIdentity.Email),
 		slog.String("log_level", strings.ToLower(c.LogLevel.String())),

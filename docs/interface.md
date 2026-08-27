@@ -357,6 +357,12 @@ plus **any single file over the size ceiling**.
 way to switch a refusal off. The list stays short instead: someone who
 genuinely wants a `.pem` in their vault renames the file.
 
+**Nothing else switches one off either.** If something else puts a refused path
+in the index — a plugin that runs `git add`, or your own muscle memory — obsync
+takes it back out before it commits, because `git commit` records the index
+rather than what obsync staged. That is index-only: your file's bytes are never
+touched.
+
 **A refusal skips the path and never stops the loop.** Everything else in the
 vault keeps syncing. The consequence is stated plainly: while a tracked path is
 refused, the remote holds the last version that passed and the vault holds a

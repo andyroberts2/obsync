@@ -247,10 +247,10 @@ func (r *Repo) fastForward(tip string) error {
 	if err != nil {
 		return err
 	}
-	for _, path := range changed {
-		if touched[path] {
+	for _, change := range changed {
+		if touched[change.Path] {
 			return fmt.Errorf("%w: the vault holds a change to %q, which the incoming commits "+
-				"overwrite", ErrVaultWrittenMidRun, path)
+				"overwrite", ErrVaultWrittenMidRun, change.Path)
 		}
 	}
 

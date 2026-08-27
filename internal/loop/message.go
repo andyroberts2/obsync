@@ -102,3 +102,54 @@ func count(n int) string {
 	}
 	return grouped.String()
 }
+
+// untrackMessage is what the churn-subset one-shot's commit says (§5).
+//
+// It is loud on purpose, and the loudness is the consequence rather than the
+// act: this commit reaches every other clone of the repo on its next pull and
+// removes those paths there too. A reader finding it in `git log` a year later
+// gets the whole story — what left the index, that nothing left a disk, why,
+// and how to overrule it — without having to know obsync exists.
+func untrackMessage(paths []string) string {
+	var message strings.Builder
+	message.WriteString(untrackSubject(paths))
+	message.WriteString(`
+
+These are workspace state and OS cruft: they change every time the vault is
+opened and they mean nothing on another machine, so obsync's ignore floor
+covers them. Ignore rules only affect untracked paths, which is why files
+already in this history had to be removed from the index for the floor to
+take effect at all.
+
+Every byte is still on disk. Nothing was deleted from the vault.
+
+Pulling this commit removes these paths from your other clones too. For a
+workspace file that is the point. If you want one of them tracked, name it
+in the vault's own .gitignore — that file outranks obsync's floor, and
+obsync never writes it.
+
+`)
+	listed := 0
+	for _, path := range paths {
+		if listed == bodyCap {
+			break
+		}
+		message.WriteString("- ")
+		message.WriteString(path)
+		message.WriteString("\n")
+		listed++
+	}
+	if beyond := len(paths) - listed; beyond > 0 {
+		message.WriteString("… and " + count(beyond) + " more\n")
+	}
+	return message.String()
+}
+
+// untrackSubject names the file when exactly one was untracked and counts them
+// otherwise, which is the shape every other subject obsync writes has (§2).
+func untrackSubject(paths []string) string {
+	if len(paths) == 1 {
+		return "Stop tracking " + paths[0] + ", which obsync's ignore floor covers"
+	}
+	return "Stop tracking " + count(len(paths)) + " files obsync's ignore floor covers"
+}

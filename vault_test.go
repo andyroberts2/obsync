@@ -783,6 +783,28 @@ func (e *vaultEnv) removeHook(name string) {
 	}
 }
 
+// installVaultHook writes an executable hook into the vault's own repo, and
+// removeVaultHook takes it away again. A hook is the human's file in the
+// human's repo, and obsync sets no core.hooksPath, so this is how a test
+// arranges the one thing that fails a local git obsync had every reason to
+// expect to succeed.
+func (e *vaultEnv) installVaultHook(name, script string) {
+	e.t.Helper()
+
+	path := filepath.Join(e.vault, ".git", "hooks", name)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		e.t.Fatalf("installing the vault's %s hook: %v", name, err)
+	}
+}
+
+func (e *vaultEnv) removeVaultHook(name string) {
+	e.t.Helper()
+
+	if err := os.Remove(filepath.Join(e.vault, ".git", "hooks", name)); err != nil {
+		e.t.Fatalf("removing the vault's %s hook: %v", name, err)
+	}
+}
+
 // lockedBuffer is what obsync logs into. The loop writes from its own
 // goroutine, so the buffer is locked rather than left to -race to find.
 type lockedBuffer struct {
@@ -1137,4 +1159,78 @@ func (e *vaultEnv) restart() {
 	e.stopped, e.turning = false, false
 	e.finished = make(chan struct{})
 	e.driveWith(e.wakes)
+}
+
+// newVaultWith is newVault with further variables on the config surface set —
+// OBSYNC_SIZE_CEILING, which is the one value in §5's area that is configured
+// at all, because it is a fact about the remote rather than a taste.
+func newVaultWith(t *testing.T, extra ...string) *vaultEnv {
+	t.Helper()
+
+	return newVaultReachedBy(t, func(e *vaultEnv) (string, []string) {
+		return "file://" + e.remote, extra
+	})
+}
+
+// vaultAlreadyTracks is the vault an operator brings to obsync with history
+// already in it: the paths named are written, committed by the human, and
+// pushed, so they are tracked in both the vault and the remote before obsync
+// has ever looked. It is the state the churn subset exists for — ignore rules
+// only ever affect untracked paths, so a floor entry already in history churns
+// forever until something takes it out of the index (§5).
+func (e *vaultEnv) vaultAlreadyTracks(paths ...string) {
+	e.t.Helper()
+
+	for _, path := range paths {
+		// A file the test already wrote keeps its own bytes: this says what the
+		// history holds, not what the file says, and a test that wrote a
+		// .gitignore before calling this meant the .gitignore it wrote.
+		if e.vaultHoldsYet(path) {
+			continue
+		}
+		e.writeNote(path, "what "+path+" held before obsync\n")
+	}
+	e.mustGit(e.vault, "add", "-A")
+	e.mustGit(e.vault, e.asAHuman("commit", "--quiet", "-m", "the vault's own history")...)
+	e.pushVaultTo("main")
+}
+
+// excludeFile is the repo's own exclude file, which is where obsync writes the
+// ignore floor and one of its owned paths (§5, §10).
+func (e *vaultEnv) excludeFile() string {
+	e.t.Helper()
+
+	content, err := os.ReadFile(filepath.Join(e.vault, ".git", "info", "exclude"))
+	if err != nil {
+		e.t.Fatalf("reading the repo's exclude file: %v. obsync said:\n%s", err, e.log.String())
+	}
+	return string(content)
+}
+
+// vaultTracks reports whether the vault's index carries a path, which is the
+// question `git rm --cached` changes the answer to and nothing else does.
+func (e *vaultEnv) vaultTracks(path string) bool {
+	e.t.Helper()
+
+	out, code := e.git(e.vault, "ls-files", "--error-unmatch", "--", ":(literal)"+path)
+	return code == 0 && strings.TrimSpace(out) != ""
+}
+
+// remoteSubjects is every commit subject on the remote's branch, newest first.
+// It is how "exactly once, ever" is asserted about a commit obsync makes at
+// most one of.
+func (e *vaultEnv) remoteSubjects() []string {
+	e.t.Helper()
+
+	out := e.mustGit(e.remote, "log", "--format=%s", "refs/heads/main")
+	return strings.Split(strings.TrimRight(out, "\n"), "\n")
+}
+
+// writeAttachment writes a file of exactly size bytes in the vault: an
+// attachment someone dragged in, which is the only thing in a vault big enough
+// for the size ceiling to have an opinion about.
+func (e *vaultEnv) writeAttachment(path string, size int) {
+	e.t.Helper()
+
+	e.writeNote(path, strings.Repeat("a", size))
 }

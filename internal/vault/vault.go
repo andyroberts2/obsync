@@ -12,6 +12,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/andyroberts2/obsync/internal/config"
 )
 
 // IgnoreFloor is the fixed set of paths obsync excludes from the vault (§5).
@@ -21,9 +23,10 @@ import (
 // holds (§10, docs/interface.md).
 //
 // The entries are gitignore patterns, in the order they are written to the
-// repo's exclude file. Writing that file is #28's; what this package needs
-// them for is gate 2, which has to tell "a directory holding a vault" from "a
-// directory holding the cruft a volume accumulates".
+// repo's exclude file at every startup — where git, rather than anything here,
+// is what applies them. What this package reads them for itself is gate 2,
+// which has to tell "a directory holding a vault" from "a directory holding the
+// cruft a volume accumulates", in a directory that holds no repo to ask.
 var IgnoreFloor = []string{
 	".obsidian/workspace.json",
 	".obsidian/workspace-mobile.json",
@@ -115,8 +118,17 @@ func ShowsMoreThanIgnoreFloor(dir string) (bool, string, error) {
 // .git/info/exclude, where git is what applies it, so a floor with two readings
 // is a floor that means two things.
 func matchesIgnoreFloor(relative string, isDir bool) bool {
+	return coveredBy(IgnoreFloor, relative, isDir)
+}
+
+// coveredBy reports whether a path relative to the vault root is covered by any
+// of a closed list of gitignore patterns, under the rules matchesIgnoreFloor
+// documents. The ignore floor, the churn subset and the refused-path list are
+// all such lists, and reading all three the same way is what keeps obsync's
+// answer and git's answer one answer.
+func coveredBy(patterns []string, relative string, isDir bool) bool {
 	relative = filepath.ToSlash(relative)
-	for _, entry := range IgnoreFloor {
+	for _, entry := range patterns {
 		directory, namesDirectory := strings.CutSuffix(entry, "/")
 		if !namesDirectory {
 			if covers(entry, relative) {
@@ -127,10 +139,10 @@ func matchesIgnoreFloor(relative string, isDir bool) bool {
 		if isDir && covers(directory, relative) {
 			return true
 		}
-		// ...and everything under it. The walk skips a directory that matched,
-		// so nothing reaches here today; the rule is stated in full anyway,
-		// because a partial one that is only true because of how its one caller
-		// walks is the next caller's surprise.
+		// ...and everything under it, which is what the churn subset's own
+		// caller asks: git names the tracked file `.trash/gone.md`, and it is
+		// the directory above it that the floor covers. Gate 2's walk never
+		// reaches here, because it skips a directory that matched.
 		for ancestor := path.Dir(relative); ancestor != "."; ancestor = path.Dir(ancestor) {
 			if covers(directory, ancestor) {
 				return true
@@ -161,4 +173,146 @@ func covers(pattern, relative string) bool {
 		}
 	}
 	return true
+}
+
+// PluginData is the one ignore-floor entry that is also applied as a pathspec
+// exclusion on the `git add` itself, which no .gitignore can negate (§5).
+//
+// It is the design's one place where obsync cannot be overruled, and the reason
+// is asymmetric: overriding a noisy default is a preference, and committing a
+// credential is unrecoverable. `.obsidian/plugins/*/data.json` is where
+// community plugins keep their API keys, and this audience points obsync at
+// repos that may be public.
+//
+// It is also the one floor entry the churn subset leaves out — refuse to add,
+// never remove (§5).
+const PluginData = ".obsidian/plugins/*/data.json"
+
+// ChurnSubset is the part of the ignore floor obsync untracks once, in a vault
+// whose history already carries it: ignore rules only affect untracked paths,
+// so a vault that has ever committed its workspace file churns forever
+// regardless of what the floor says (§5).
+//
+// It is the whole floor except PluginData. Untracking an already-tracked
+// data.json would delete deliberately-synced plugin settings from every other
+// clone, and would not unleak a key the remote's history already holds; the
+// rule is never to be the thing that commits a key for the first time.
+var ChurnSubset = churnSubset()
+
+func churnSubset() []string {
+	subset := make([]string, 0, len(IgnoreFloor)-1)
+	for _, entry := range IgnoreFloor {
+		if entry != PluginData {
+			subset = append(subset, entry)
+		}
+	}
+	return subset
+}
+
+// RefusedPaths is the closed list of filenames obsync will not put in a commit,
+// whatever their state (§5). Its contents are part of the declared surface,
+// because changing them silently changes what a user's repo holds (§10,
+// docs/interface.md).
+//
+// The entries are gitignore patterns that name no directory, so each matches
+// that name at any depth in the vault, exactly as the floor's own bare-name
+// entries do.
+//
+// Name-matching only — no content scanning, ever. Sniffing for a private-key
+// header would catch a key saved as notes.md, but this is a note-taking vault:
+// people write *about* keys, paste example blocks, and keep security runbooks.
+// A refusal is silent by omission, so a false positive is the expensive error,
+// and nobody names a note id_rsa. The list stays short precisely so that no
+// escape hatch is needed — someone who genuinely wants a .pem in their vault
+// renames the file.
+var RefusedPaths = []string{
+	".env", ".env.*",
+	"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+	"*.pem", "*.key", "*.p12", "*.pfx",
+	".netrc", ".npmrc", ".pypirc",
+	"credentials",
+}
+
+// Refusal is one path obsync will not commit, and the conclusive fact that
+// makes it so — which is what the WARN says and what the attention note will
+// carry (§9, #38).
+type Refusal struct {
+	Path   string
+	Reason string
+}
+
+// CommittableSet is the paths a sync run would actually stage, and the ones it
+// refuses (§5). It is what "commit if dirty" means to the loop: a tree holding
+// nothing but refused paths is quiet, and produces no commit, no push and no
+// repeated warning.
+//
+// Two of the three subtractions the glossary names have already happened by the
+// time changed arrives here, and neither is obsync's arithmetic:
+//
+//   - The ignore floor is git's, applied through the exclude file obsync wrote
+//     at startup. That is load-bearing rather than incidental — the floor is a
+//     default rather than a rule, and it is git reading .gitignore first that
+//     lets a vault's own `!.obsidian/workspace.json` overrule it. A second
+//     subtraction here, in obsync's own code, would be a floor that cannot be
+//     overruled, which is the floor's whole purpose inverted.
+//   - Unsettled paths are #29's, and are subtracted here when that lands.
+//
+// So what is left is the refusal layer, and it is deliberately the only one of
+// the three obsync applies itself: a credential reaching a repo that may be
+// public is the one unrecoverable mistake in this design, and a mechanism a
+// human can switch off is not one that prevents it.
+//
+// A refusal skips the path and never freezes the loop. If a 200MB video lands
+// in the vault and obsync stops, every note the user writes stops reaching the
+// remote because of an attachment, and a stopped sidecar is the failure that
+// gets a sync tool uninstalled. The stated consequence is that while a tracked
+// path is refused, the remote holds the last version that passed and the
+// working tree holds a newer one: stale, consistent, and visible.
+func CommittableSet(root string, changed []string, sizeCeiling int64) ([]string, []Refusal) {
+	committable := make([]string, 0, len(changed))
+	var refused []Refusal
+	for _, relative := range changed {
+		if reason := refuses(root, relative, sizeCeiling); reason != "" {
+			refused = append(refused, Refusal{Path: relative, Reason: reason})
+			continue
+		}
+		committable = append(committable, relative)
+	}
+	return committable, refused
+}
+
+// refuses answers why obsync will not commit a path, or "" when it will.
+//
+// "Whatever its state" is meant literally, and the case worth naming is a
+// refused path that is being *deleted*: obsync does not commit that either. It
+// is the same instinct as leaving an already-tracked data.json alone — obsync
+// never puts a credential in a repo and never takes a human's decision about
+// one out of their hands — and it is honest about what it would buy, since a
+// key the remote's history already holds is not unleaked by a commit removing
+// it. Removing it is one `git rm` and one push, by the human, deliberately.
+func refuses(root, relative string, sizeCeiling int64) string {
+	if coveredBy(RefusedPaths, relative, false) {
+		return "its name is on obsync's refused-path list, which obsync matches by name and never " +
+			"by content"
+	}
+
+	// The size is read from the vault rather than from git, because the bytes
+	// that would reach the remote are the ones on disk. A path obsync cannot
+	// stat is one git has just reported and something else has since moved —
+	// the third writer, or an ordinary deletion — and there is no fact here to
+	// refuse on. Refusing on the absence of a fact is what would turn a
+	// vanished file into a path that silently stops syncing.
+	info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(relative)))
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= sizeCeiling {
+		return ""
+	}
+	return "it is " + config.FormatSize(info.Size()) + " and obsync's size ceiling is " +
+		config.FormatSize(sizeCeiling)
+}
+
+// InChurnSubset reports whether a tracked path is one of the ones obsync
+// untracks in its one-shot: the ignore floor minus PluginData, read the way git
+// reads it.
+func InChurnSubset(relative string) bool {
+	return coveredBy(ChurnSubset, relative, false)
 }

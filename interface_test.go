@@ -481,6 +481,29 @@ func TestTheIgnoreFloorOnThePageIsTheOneObsyncCarries(t *testing.T) {
 	}
 }
 
+// The refused-path list is on the surface for the same reason the floor is, and
+// this page said so in as many words: changing either silently changes what a
+// user's repo contains. So it is pinned the same way, entry for entry.
+//
+// The page writes it several names to a line, which is how an operator reads a
+// closed list of filenames rather than a configuration file — so the block is
+// read back as entries rather than as lines.
+func TestTheRefusedPathListOnThePageIsTheOneObsyncCarries(t *testing.T) {
+	t.Parallel()
+
+	var got []string
+	for _, line := range fencedBlockAfter(t, "### Refused paths") {
+		for _, entry := range strings.Split(line, ",") {
+			got = append(got, strings.TrimSpace(entry))
+		}
+	}
+	if !slices.Equal(got, vault.RefusedPaths) {
+		t.Errorf("%s lists the refused paths as %v, and obsync carries %v: the list is one closed "+
+			"list on the declared surface, so the page and the code state it once each and never "+
+			"differently (§5, §10)", interfacePage, got, vault.RefusedPaths)
+	}
+}
+
 // fencedBlockAfter is the lines of the first ``` block below a heading, which
 // is how the page states a closed list an operator reads as one.
 func fencedBlockAfter(t *testing.T, heading string) []string {

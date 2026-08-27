@@ -21,15 +21,37 @@ type Change struct {
 	Kind Kind
 }
 
+// ChangedPath is one path git reports as changed, and whether the working tree
+// holds something for a `git add` to stage.
+//
+// The two are not the same question, and the difference is a run obsync cannot
+// finish. A path a human took out of the index with `git rm --cached` while
+// their .gitignore covers it is reported as changed — the commit carries the
+// deletion, and the index already holds it in full — and there is nothing in
+// the working tree to stage, because to git the file is now untracked and
+// ignored. Naming such a path on an add is fatal: git refuses to add an ignored
+// path and refuses the *whole* add with it, staging nothing (measured at both
+// matrix points, exit 1). One of them would take every note in the vault out of
+// the same commit, on every run from then on, because nothing clears the record
+// until something commits it — which is the same shape as the rename record
+// parseStatus reads the destination of, one column along.
+type ChangedPath struct {
+	Path string
+	// InWorkingTree is git's second status column: the working tree against
+	// the index. A "." there is a change the index already holds in full, and
+	// an add naming it is a no-op at best.
+	InWorkingTree bool
+}
+
 // parseStatus reads `git status --porcelain=v2 -z -uall`.
 //
 // The record layout is git's, and the reason obsync asks for this format rather
 // than the readable one is the vault: a note title carries spaces and unicode
 // and may legally contain a newline, so a path is only unambiguous when it ends
 // at a NUL and is the last field of its record.
-func parseStatus(out []byte) ([]string, error) {
+func parseStatus(out []byte) ([]ChangedPath, error) {
 	records := splitNUL(out)
-	var paths []string
+	var paths []ChangedPath
 	for i := 0; i < len(records); i++ {
 		record := records[i]
 		if record == "" {
@@ -42,7 +64,11 @@ func parseStatus(out []byte) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			paths = append(paths, path)
+			inWorkingTree, err := worktreeColumn(record)
+			if err != nil {
+				return nil, err
+			}
+			paths = append(paths, ChangedPath{Path: path, InWorkingTree: inWorkingTree})
 		case '2':
 			// 2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>\0<origPath>
 			//
@@ -59,18 +85,26 @@ func parseStatus(out []byte) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
+			inWorkingTree, err := worktreeColumn(record)
+			if err != nil {
+				return nil, err
+			}
 			i++
 			if i >= len(records) {
 				return nil, fmt.Errorf("git status reported a rename of %q with no original path", path)
 			}
-			paths = append(paths, path)
+			paths = append(paths, ChangedPath{Path: path, InWorkingTree: inWorkingTree})
 		case 'u':
 			// u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
+			//
+			// An unmerged path's XY names which side is missing rather than
+			// what the working tree holds, so the add is given it and lets git
+			// answer. It is gate 4's state anyway (#32).
 			path, err := fieldAfter(record, 10)
 			if err != nil {
 				return nil, err
 			}
-			paths = append(paths, path)
+			paths = append(paths, ChangedPath{Path: path, InWorkingTree: true})
 		case '?':
 			// ? <path>. Read with the same helper as every other record
 			// rather than by slicing a fixed prefix off: a record too short to
@@ -80,7 +114,7 @@ func parseStatus(out []byte) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			paths = append(paths, path)
+			paths = append(paths, ChangedPath{Path: path, InWorkingTree: true})
 		case '!':
 			// Only ever present with --ignored, which obsync does not pass.
 			continue
@@ -144,6 +178,22 @@ func splitNUL(out []byte) []string {
 		return nil
 	}
 	return strings.Split(trimmed, "\x00")
+}
+
+// worktreeColumn reads the second half of a changed record's XY field: git's
+// answer for the working tree against the index, as against X, which is the
+// index against HEAD. It is the one field that says whether an add has anything
+// to do for this path (ChangedPath).
+func worktreeColumn(record string) (bool, error) {
+	rest, err := fieldAfter(record, 1)
+	if err != nil {
+		return false, err
+	}
+	xy, _, _ := strings.Cut(rest, " ")
+	if len(xy) != 2 {
+		return false, fmt.Errorf("git status reported a record obsync could not read: %q", record)
+	}
+	return xy[1] != '.', nil
 }
 
 // fieldAfter returns what follows the first n spaces of a status record — the

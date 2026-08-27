@@ -46,9 +46,15 @@ func parseSize(raw string) (int64, error) {
 		"95MB — and never raw bytes", raw)
 }
 
-// formatSize writes a size back in the form it was configured in, in the
+// FormatSize writes a size back in the form it was configured in, in the
 // largest unit that divides it exactly.
-func formatSize(size int64) string {
+//
+// It is exported because obsync says a size in more than one place — the
+// startup line's size_ceiling, and the refusal that names a file too big to
+// commit — and two spellings of one number is one number a human has to
+// reconcile. A file's own size rarely divides a unit exactly, so it falls
+// through to bytes, which is honest rather than rounded.
+func FormatSize(size int64) string {
 	for _, unit := range sizeUnits {
 		if size%unit.scale == 0 {
 			return strconv.FormatInt(size/unit.scale, 10) + unit.suffix
