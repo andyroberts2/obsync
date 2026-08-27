@@ -709,3 +709,110 @@ func (e *vaultEnv) everyNote() map[string]string {
 	}
 	return notes
 }
+
+// The table is closed for every kind git names, and not only for the kinds that
+// happen to come with blobs. git reports some conflicts as a message about a
+// path and no stages at all — a folder split across two new folders, where it
+// cannot say which half a note the other side added belongs in — and it resolves
+// those itself, silently, by leaving the note where it was.
+//
+// That is an improvised resolution like any other: obsync has no rule for it,
+// so it applies nothing rather than inheriting git's answer (§4).
+func TestAConflictGitNamesWithoutBlobsIsNeverImprovisedEither(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.vaultAlreadyTracks("Projects/one.md", "Projects/two.md", "Projects/three.md",
+		"Projects/four.md", "Projects/five.md", "Projects/six.md")
+	env.remoteCommit("Projects/from the laptop.md", "written on the laptop\n")
+	theirs := env.remoteTip()
+	// The vault splits the folder down the middle, so git can see the rename
+	// and cannot say which half the laptop's new note belongs in.
+	env.renameNote("Projects/one.md", "Work/one.md")
+	env.renameNote("Projects/two.md", "Work/two.md")
+	env.renameNote("Projects/three.md", "Work/three.md")
+	env.renameNote("Projects/four.md", "Archive/four.md")
+	env.renameNote("Projects/five.md", "Archive/five.md")
+	env.renameNote("Projects/six.md", "Archive/six.md")
+
+	env.wake()
+
+	for _, path := range []string{
+		"Projects/from the laptop.md", "Work/from the laptop.md", "Archive/from the laptop.md",
+	} {
+		if env.vaultHoldsYet(path) {
+			t.Errorf("the vault holds %q, want nothing applied: git chose where that note went, "+
+				"and a conflict §4's closed table has no row for is never resolved by inheriting "+
+				"git's own answer to it (§4)", path)
+		}
+	}
+	if copies := env.conflictCopies(); len(copies) != 0 {
+		t.Errorf("obsync wrote %v for a conflict it has no rule for, want none (§4)", copies)
+	}
+	if got := env.remoteTip(); got != theirs {
+		t.Errorf("the remote's branch moved to %s, want it still at %s — obsync published a merge "+
+			"it had no rule for (§4)", got, theirs)
+	}
+}
+
+// §4's rename/rename row, in the shape that actually happens: renaming a note
+// is not something a person does *instead* of editing it. Both sides rename the
+// same note to different names and both keep writing in it, and git's own
+// merged tree then holds conflict markers at **both** names — measured at both
+// matrix points, because merge-ort content-merges the two renames against the
+// base and puts the conflicted result under each name.
+//
+// Leaving git's tree alone here would be the one thing this whole policy
+// exists to prevent, twice over. Each name keeps its own side's note.
+func TestBothSidesRenamingAndEditingOneNoteLeavesNeitherNameConflicted(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	// Long enough that a one-line edit leaves the two names similar enough for
+	// git to see the renames at all: a shorter note is answered by two adds
+	// and merges clean, which is the same outcome by a different route.
+	env.writeNote("Daily/2026-08-24.md", "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n")
+	env.vaultAlreadyTracks("Daily/2026-08-24.md")
+	env.onTheLaptop(func(laptop string) {
+		if err := os.Rename(filepath.Join(laptop, "Daily/2026-08-24.md"),
+			filepath.Join(laptop, "Daily/named on the laptop.md")); err != nil {
+			env.t.Fatalf("renaming the note on the laptop: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(laptop, "Daily/named on the laptop.md"),
+			[]byte("l1\nwritten on the laptop\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n"), 0o644); err != nil {
+			env.t.Fatalf("writing on the laptop: %v", err)
+		}
+	})
+	env.renameNote("Daily/2026-08-24.md", "Daily/named in the vault.md")
+	env.writeNote("Daily/named in the vault.md", "l1\nwritten in the vault\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n")
+
+	env.wake()
+
+	for path, content := range env.everyNote() {
+		for _, marker := range []string{"<<<<<<<", ">>>>>>>"} {
+			if strings.Contains(content, marker) {
+				t.Errorf("the vault's %q holds a conflict marker (%s) after both sides renamed and "+
+					"edited one note; git's own merged tree holds them at both names, and leaving "+
+					"that tree alone is exactly what §4 forbids", path, marker)
+			}
+		}
+	}
+	if got, want := env.vaultFile("Daily/named in the vault.md"),
+		"l1\nwritten in the vault\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n"; got != want {
+		t.Errorf("the vault's own name holds %q, want %q: the content rule is applied at the "+
+			"vault's name (§4)", got, want)
+	}
+	if got, want := env.vaultFile("Daily/named on the laptop.md"),
+		"l1\nwritten on the laptop\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n"; got != want {
+		t.Errorf("the laptop's name holds %q, want %q: both names exist, each with its own side's "+
+			"note, so neither side's writing is lost and neither needs a copy (§4)", got, want)
+	}
+	if got, want := env.remoteFile("Daily/named on the laptop.md"),
+		"l1\nwritten on the laptop\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n"; got != want {
+		t.Errorf("the remote holds %q at the laptop's name, want %q", got, want)
+	}
+	if env.vaultHoldsYet("Daily/2026-08-24.md") {
+		t.Error("the vault still holds the note under its old name, want it gone: both sides " +
+			"renamed it away (§4)")
+	}
+}

@@ -37,10 +37,9 @@ and the other side's lands beside it as an ordinary note named
 `Note (obsync conflict 2026-08-24 1403).md`, byte for byte, committed in the
 same commit — resolve it by editing the two together and deleting the copy, and
 the ordinary loop commits that like any other edit. The loop keeps its own time
-too: it ticks every 60s so a change nothing
-reported still arrives, waits out an unreachable remote from 60s to 15 minutes
-while carrying on committing locally, and finishes the run in flight before it
-exits. And it is woken by the vault itself: obsync holds an inotify watch on
+too: it ticks every 60s so a change nothing reported still arrives, waits out an
+unreachable remote from 60s to 15 minutes while carrying on committing locally,
+and finishes the run in flight before it exits. And it is woken by the vault itself: obsync holds an inotify watch on
 every directory in it, kept in step as folders come and go, so an edit is
 committed ten seconds after the vault goes quiet rather than at the next tick —
 and every five minutes anyway while someone is still typing. The watch only ever

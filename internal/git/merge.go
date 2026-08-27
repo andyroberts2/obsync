@@ -82,7 +82,7 @@ func (r *Repo) merge(tip string) ([]ConflictCopy, error) {
 		return nil, err
 	}
 
-	tree, copies, err := r.resolved(merged, conflicted, said)
+	tree, copies, err := r.resolved(merged, tip, conflicted, said)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func (r *Repo) mergeTree(tip string) (tree string, conflicted []conflictedEntry,
 		out, err = command.Stdout, nil
 	}
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, conflictReport{}, err
 	}
 	return parseMergeTree(out)
 }
@@ -154,7 +154,21 @@ type conflictedEntry struct {
 // says so in a message naming both the new name and the canonical one, so the
 // canonical path is something git states rather than something obsync recovers
 // from the suffix it happens to have chosen.
-type conflictReport map[string][]conflictSaid
+//
+// It is kept both ways round, and both readings are load-bearing. The dispatch
+// asks what git said *about one path*; the closed table is asked of *every
+// message*, in the order git wrote them, because git resolves some conflicts
+// itself and reports them as a message and no blobs at all — so a table asked
+// only of the paths that came with blobs is not closed (measured: a folder
+// split evenly across two new folders is `CONFLICT(directory rename unclear
+// split)`, one message, one path, no stages, at both matrix points).
+type conflictReport struct {
+	inOrder []conflictSaid
+	byPath  map[string][]conflictSaid
+}
+
+// about is every message git wrote that named this path.
+func (said conflictReport) about(relative string) []conflictSaid { return said.byPath[relative] }
 
 type conflictSaid struct {
 	kind string
@@ -178,38 +192,44 @@ type conflictSaid struct {
 func parseMergeTree(out []byte) (tree string, conflicted []conflictedEntry, said conflictReport, err error) {
 	records := splitNUL(out)
 	if len(records) == 0 {
-		return "", nil, nil, errors.New("git merge-tree --write-tree answered nothing")
+		return "", nil, conflictReport{}, errors.New("git merge-tree --write-tree answered nothing")
 	}
 	tree = records[0]
-	said = conflictReport{}
+	said = conflictReport{byPath: map[string][]conflictSaid{}}
 
 	at := 1
 	for ; at < len(records) && records[at] != ""; at++ {
 		entry, err := parseConflictedEntry(records[at])
 		if err != nil {
-			return "", nil, nil, err
+			return "", nil, conflictReport{}, err
 		}
 		conflicted = append(conflicted, entry)
 	}
 	at++
 
 	for at < len(records) {
+		// Bounded by what is left to read as well as signed, because the
+		// arithmetic below it would otherwise overflow rather than refuse: a
+		// count obsync misread — the way it would misread a future git that
+		// added a field — is a number this loop must survive rather than
+		// index with, and nothing on the sync loop's path may panic.
 		count, err := strconv.Atoi(records[at])
-		if err != nil || count < 0 {
-			return "", nil, nil, fmt.Errorf("git merge-tree reported a message obsync could not "+
+		if err != nil || count < 0 || count > len(records) {
+			return "", nil, conflictReport{}, fmt.Errorf("git merge-tree reported a message obsync could not "+
 				"read: %q is not a count of paths", records[at])
 		}
 		at++
 		// The paths, the kind and the message. The message itself is read only
 		// so that it is not mistaken for the next record.
 		if at+count+1 >= len(records) {
-			return "", nil, nil, fmt.Errorf("git merge-tree reported a message about %d paths with "+
+			return "", nil, conflictReport{}, fmt.Errorf("git merge-tree reported a message about %d paths with "+
 				"fewer than that left to read", count)
 		}
 		message := conflictSaid{kind: records[at+count], paths: records[at : at+count]}
 		at += count + 2
+		said.inOrder = append(said.inOrder, message)
 		for _, relative := range message.paths {
-			said[relative] = append(said[relative], message)
+			said.byPath[relative] = append(said.byPath[relative], message)
 		}
 	}
 	return tree, conflicted, said, nil
@@ -280,18 +300,22 @@ const (
 // is kept exactly as git computed it, so two devices appending to one daily
 // note — the common case — produces no copy at all, and neither binaries nor
 // `.obsidian/` config get any special casing on the way through.
-func (r *Repo) resolved(merged string, conflicted []conflictedEntry,
+func (r *Repo) resolved(merged, tip string, conflicted []conflictedEntry,
 	said conflictReport) (string, []ConflictCopy, error) {
+
+	if err := said.insideTheTable(); err != nil {
+		return "", nil, err
+	}
 
 	var records bytes.Buffer
 	var copies []ConflictCopy
 	taken := map[string]bool{}
+	// One merge is one conflict event, so every copy it writes carries the same
+	// minute even if the run crosses one.
+	now := r.clock.Now()
 
 	for _, at := range conflictedPaths(conflicted) {
-		kinds := said[at.path]
-		if err := insideTheTable(at.path, kinds); err != nil {
-			return "", nil, err
-		}
+		kinds := said.about(at.path)
 		ours, hasOurs := at.stages[2]
 		theirs, hasTheirs := at.stages[3]
 
@@ -320,7 +344,7 @@ func (r *Repo) resolved(merged string, conflicted []conflictedEntry,
 			if err != nil {
 				return "", nil, err
 			}
-			written, err := r.copyOf(merged, canonical, taken)
+			written, err := r.copyOf(merged, canonical, now, taken)
 			if err != nil {
 				return "", nil, err
 			}
@@ -329,17 +353,50 @@ func (r *Repo) resolved(merged string, conflicted []conflictedEntry,
 			copies = append(copies, written)
 
 		case names(kinds, kindRenameRename):
-			// Both names exist in the merged tree, each with its own side's
-			// content, and the content rule is already applied at the vault's
-			// name. There is nothing to substitute and no copy to write: the
-			// remote's bytes are not losing, they are at a name of their own.
+			// Both names exist and each keeps its own side's note, so there is
+			// no copy to write: the remote's bytes are not losing, they are at
+			// a name of its own.
+			//
+			// git's tree cannot be left alone here, and this is the one row
+			// where its stages are not each side's own bytes. When both sides
+			// also *edited* — which is what a person does to a note they
+			// renamed — merge-ort content-merges the two renames against the
+			// base and records the conflicted result, markers and all, at
+			// **both** names and in **both** stages. Measured at both matrix
+			// points. So each name is set back to the blob its own side holds
+			// at it, which each parent states and neither merge invented.
+			//
+			// Which side a name belongs to is the stages' answer as everywhere
+			// else: stage 2 is the vault's rename, stage 3 the remote's, and
+			// stage 1 alone is the name the rename came from, which the merged
+			// tree has already stopped carrying.
+			if hasOurs && hasTheirs {
+				return "", nil, fmt.Errorf("%w: git reported both sides' blobs at %q under a "+
+					"rename/rename", ErrConflictOutsideTheTable, at.path)
+			}
+			if !hasOurs && !hasTheirs {
+				break
+			}
+			renamedBy := tip
+			if hasOurs {
+				renamedBy = "HEAD"
+			}
+			entry, held, err := r.entryIn(renamedBy, at.path)
+			if err != nil {
+				return "", nil, err
+			}
+			if !held {
+				return "", nil, fmt.Errorf("%w: git renamed a note to %q and the side it renamed "+
+					"it on does not hold it there", ErrConflictOutsideTheTable, at.path)
+			}
+			setInIndex(&records, entry)
 
 		case hasOurs && hasTheirs:
 			// The content row, and the add/add row with it. The vault's bytes
 			// go back to the canonical path — git left conflict markers there,
 			// and this substitution is why one never reaches a note — and the
 			// remote's become a copy beside it.
-			written, err := r.copyOf(merged, at.path, taken)
+			written, err := r.copyOf(merged, at.path, now, taken)
 			if err != nil {
 				return "", nil, err
 			}
@@ -361,7 +418,7 @@ func (r *Repo) resolved(merged string, conflicted []conflictedEntry,
 			// deletion stands — absence is a view of the path like any other —
 			// and the remote's version, which git left sitting at the canonical
 			// path, becomes a copy instead.
-			written, err := r.copyOf(merged, at.path, taken)
+			written, err := r.copyOf(merged, at.path, now, taken)
 			if err != nil {
 				return "", nil, err
 			}
@@ -415,10 +472,19 @@ func names(kinds []conflictSaid, kind string) bool {
 	return false
 }
 
-// insideTheTable refuses a conflicted path §4's table has no row for, and it is
-// asked of every kind git named the path in rather than only of the one the
-// dispatch below happens to match — so a shape obsync recognises in part is
-// refused rather than resolved by the half it recognised.
+// insideTheTable refuses a merge §4's table has no row for, and it is asked of
+// **every message git wrote**, in the order it wrote them — not of the kinds
+// the dispatch below happens to match, and not only of the paths that came with
+// blobs.
+//
+// Both of those narrowings leak, and the second leaks silently, which is why
+// this is one question asked once rather than a question asked per path.
+// Measured at both matrix points: git resolves some conflicts itself and
+// reports them as a message about a path and no stages at all — a folder split
+// evenly across two new folders is `CONFLICT(directory rename unclear split)`,
+// and git quietly decides where the other side's new note goes. A table asked
+// only of paths with blobs never sees that one, so obsync would inherit git's
+// answer to a question §4 says obsync has no answer to.
 //
 // The table is closed, and closing it is the decision rather than an omission:
 // submodules, a symlink against a file, and whatever a future git adds are all
@@ -430,14 +496,18 @@ func names(kinds []conflictSaid, kind string) bool {
 // accompany a row: git says it could not merge a binary, or that it merged
 // content at the path, and neither changes what happens to it. §4 says so in as
 // many words — binaries get no special casing, because git reports the plain
-// content conflict beside the binary one.
-func insideTheTable(relative string, kinds []conflictSaid) error {
-	for _, said := range kinds {
-		switch said.kind {
+// content conflict beside the binary one. Nothing is allowed here for being
+// *informational*: a clean merge writes no messages at all (measured, both
+// points), so every message obsync ever reads is one git wrote about a merge it
+// could not complete on its own.
+func (said conflictReport) insideTheTable() error {
+	for _, message := range said.inOrder {
+		switch message.kind {
 		case kindContents, kindModifyDelete, kindRenameRename, kindFileDirectory,
 			kindBinary, kindAutoMerging:
 		default:
-			return fmt.Errorf("%w: git reported %q at %q", ErrConflictOutsideTheTable, said.kind, relative)
+			return fmt.Errorf("%w: git reported %q at %q", ErrConflictOutsideTheTable,
+				message.kind, message.paths)
 		}
 	}
 	return nil
@@ -476,9 +546,13 @@ func renamedOutOfTheWay(moved string, kinds []conflictSaid) (string, error) {
 // already writing. A taken name gets a counter rather than a replacement, and
 // the loop cannot run away: every candidate that is taken stays taken, so the
 // first free one is reached and kept.
-func (r *Repo) copyOf(merged, canonical string, taken map[string]bool) (ConflictCopy, error) {
+//
+// The minute is the merge's, taken once and handed in, rather than read again
+// per candidate: one conflict event writes copies a human is told to resolve
+// together, so they say the same minute even when the run straddles one.
+func (r *Repo) copyOf(merged, canonical string, at time.Time, taken map[string]bool) (ConflictCopy, error) {
 	for counter := 1; ; counter++ {
-		candidate := conflictCopyName(canonical, r.clock.Now(), counter)
+		candidate := conflictCopyName(canonical, at, counter)
 		if taken[candidate] {
 			continue
 		}
@@ -527,27 +601,62 @@ func conflictCopyName(canonical string, at time.Time, counter int) string {
 	return folder + stem + marker + extension
 }
 
-// treeHolds reports whether a tree already carries a path.
+// entryIn is what a tree or a commit holds at a path, and whether it holds
+// anything there at all.
 //
 // ls-tree with a pathspec rather than `cat-file -e <tree>:<path>`, and the
 // difference is the whole reason: measured at both matrix points, cat-file
 // exits 128 for a path a tree does not hold — git's everything-code, which also
 // covers a damaged object store — while ls-tree exits 0 either way and answers
-// by printing the path or printing nothing. One is a conclusive fact and the
+// by printing the entry or printing nothing. One is a conclusive fact and the
 // other is a guess.
 //
 // The pathspec is :(literal) for Stage's reason: a note title may hold a glob
 // character, and `Notes/[draft] plan.md` is a name rather than a character
 // class.
-func (r *Repo) treeHolds(tree, relative string) (bool, error) {
+func (r *Repo) entryIn(tree, relative string) (conflictedEntry, bool, error) {
 	out, err := r.run(invocation{
 		dir:  r.vault,
-		args: []string{"ls-tree", "-z", "--name-only", tree, "--", ":(literal)" + relative},
+		args: []string{"ls-tree", "-z", tree, "--", ":(literal)" + relative},
 	})
 	if err != nil {
-		return false, err
+		return conflictedEntry{}, false, err
 	}
-	return len(splitNUL(out)) > 0, nil
+	records := splitNUL(out)
+	if len(records) == 0 {
+		return conflictedEntry{}, false, nil
+	}
+	entry, err := parseTreeEntry(records[0])
+	return entry, err == nil, err
+}
+
+// treeHolds reports whether a tree already carries a path.
+func (r *Repo) treeHolds(tree, relative string) (bool, error) {
+	_, held, err := r.entryIn(tree, relative)
+	return held, err
+}
+
+// parseTreeEntry reads one `<mode> <type> <oid>\t<path>` record of `ls-tree
+// -z`. The path is what follows the first tab, because nothing before it can
+// hold one and a note title legally can.
+func parseTreeEntry(record string) (conflictedEntry, error) {
+	unreadable := func() (conflictedEntry, error) {
+		return conflictedEntry{}, fmt.Errorf("git ls-tree reported an entry obsync could not "+
+			"read: %q", record)
+	}
+	mode, rest, found := strings.Cut(record, " ")
+	if !found {
+		return unreadable()
+	}
+	_, rest, found = strings.Cut(rest, " ")
+	if !found {
+		return unreadable()
+	}
+	oid, relative, found := strings.Cut(rest, "\t")
+	if !found {
+		return unreadable()
+	}
+	return conflictedEntry{mode: mode, oid: oid, path: relative}, nil
 }
 
 // setInIndex and removeFromIndex write one record of what `git update-index

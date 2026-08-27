@@ -217,8 +217,9 @@ _Avoid_: blocked file, rejected file, skipped file
 The largest single file obsync will commit. Set from what the remote will
 accept, not from taste — the one value in this area that is configured. Applied
 wherever obsync would introduce new bytes to the remote: staging, and the one
-blob a merge can invent. Never applied to bytes the remote already holds, which
-is why a conflict copy is exempt at any size.
+blob a merge can invent. Never applied to bytes that have already passed it —
+the remote's, or the vault's own at the `git add` — which is why a conflict copy
+is exempt at any size, whichever side lost.
 _Avoid_: file size limit, max blob
 
 **Owned path**:
