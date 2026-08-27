@@ -71,6 +71,20 @@ type vaultEnv struct {
 // does happens while a test is still building the vault it will look at.
 func newVault(t *testing.T) *vaultEnv {
 	t.Helper()
+	return newVaultReachedBy(t, nil)
+}
+
+// newVaultReachedBy is newVault with the route to the remote left to the
+// caller: reach is handed the half-built environment and answers with the URL
+// obsync is pointed at plus any further variables that route needs.
+//
+// The default is file://, which is what every test that is not about the
+// credential path wants — it authenticates with nothing, so nothing about a
+// credential can go wrong in it. The credential path's own tests hand back an
+// http:// URL in front of the same bare repo, because file:// is exactly the
+// route that cannot see any of what they assert.
+func newVaultReachedBy(t *testing.T, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
+	t.Helper()
 
 	base := t.TempDir()
 	env := &vaultEnv{
@@ -84,11 +98,17 @@ func newVault(t *testing.T) *vaultEnv {
 	}
 
 	env.mustGit(base, "init", "--bare", "--quiet", "-b", "main", env.remote)
+
+	repoURL, extra := "file://"+env.remote, []string(nil)
+	if reach != nil {
+		repoURL, extra = reach(env)
+	}
+
 	if err := os.MkdirAll(env.vault, 0o755); err != nil {
 		t.Fatalf("creating the vault: %v", err)
 	}
 	env.mustGit(env.vault, "init", "--quiet", "-b", "main")
-	env.mustGit(env.vault, "remote", "add", config.RemoteName, "file://"+env.remote)
+	env.mustGit(env.vault, "remote", "add", config.RemoteName, repoURL)
 
 	// An Obsidian vault always has .obsidian/, which is later the vault
 	// sentinel (#32). It is here from the start so that every test runs
@@ -96,24 +116,32 @@ func newVault(t *testing.T) *vaultEnv {
 	env.writeNote(".obsidian/app.json", "{}\n")
 	env.mustGit(env.vault, "add", "-A")
 	env.mustGit(env.vault, append(append([]string{}, humanIdentity...), "commit", "--quiet", "-m", "the vault before obsync")...)
-	env.mustGit(env.vault, "push", "--quiet", config.RemoteName, "refs/heads/main:refs/heads/main")
+
+	// The vault arrives already pushed, by the path a human's own git took
+	// before obsync existed: the bytes go over file:// and the remote-tracking
+	// ref is written by hand, which is exactly what a `git push origin` would
+	// have left behind. Doing it in two steps rather than through origin keeps
+	// building a vault credential-free whatever route obsync is given.
+	env.mustGit(env.vault, "push", "--quiet", "file://"+env.remote, "refs/heads/main:refs/heads/main")
+	env.mustGit(env.vault, "update-ref", "refs/remotes/"+config.RemoteName+"/main", "HEAD")
 
 	// The configuration comes through the same environment block an operator
 	// sets, resolved by the same code that resolves it in production. Its
 	// startup line goes nowhere: the buffer below holds what the sync loop
 	// says, so a test asserting that a quiet run is quiet is not reading
 	// startup's output.
-	cfg, _, err := config.Resolve([]string{
-		"OBSYNC_REPO=file://" + env.remote,
+	cfg, _, err := config.Resolve(append([]string{
+		"OBSYNC_REPO=" + repoURL,
 		"OBSYNC_VAULT_PATH=" + env.vault,
-	}, io.Discard)
+	}, extra...), io.Discard)
 	if err != nil {
 		t.Fatalf("resolving the test configuration: %v", err)
 	}
 
-	// Info is the level an operator gets by default, and the level at which
-	// "healthy is quiet" is a claim worth checking (§9).
-	log := slog.New(slog.NewTextHandler(env.log, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// The level is the resolved one rather than a fixed Info, so a test that
+	// needs to see what DEBUG carries — every git invocation with its full
+	// argv (§9) — asks for it through the same variable an operator sets.
+	log := slog.New(slog.NewTextHandler(env.log, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	env.syncLoop = loop.New(cfg, log, env.clock, env.wakes)
 	t.Cleanup(env.stop)
 	return env

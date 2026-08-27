@@ -209,7 +209,7 @@ func (l *Loop) attach() error {
 		return nil
 	}
 
-	repo, err := git.Attach(l.config.VaultPath, l.config.CommitIdentity, l.log, l.clock)
+	repo, err := git.Attach(l.config, l.log, l.clock)
 	if err != nil {
 		return err
 	}

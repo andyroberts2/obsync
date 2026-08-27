@@ -26,6 +26,16 @@ const stampedVersion = "0.0.0-test+stamp"
 var obsyncBin string
 
 func TestMain(m *testing.M) {
+	// A credential-helper invocation re-enters obsync rather than the suite.
+	// Seam 1 drives the sync loop in this process, so the obsync a git it
+	// starts finds at its own path is this test binary — and this is what
+	// makes that invocation the real subcommand instead of a second copy of
+	// the suite. It is obsync's own code either way: the same run() the built
+	// binary calls, dispatched before m.Run parses the flags go test passes.
+	if len(os.Args) > 1 && os.Args[1] == "credential-helper" {
+		os.Exit(run(os.Args[1:], os.Environ(), os.Stdin, os.Stdout, os.Stderr))
+	}
+
 	dir, err := os.MkdirTemp("", "obsync-build")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "creating a build directory: %v\n", err)
@@ -64,8 +74,8 @@ func TestStatusReportsTheBuildVersion(t *testing.T) {
 }
 
 // §10's subcommands are a closed list of four, and this build recognises all
-// four: only status does anything, and the other three say they are not
-// implemented rather than being refused as typos. Without a row per case, a
+// four: healthcheck says it is not implemented rather than being refused as a
+// typo, and the other three do what §10 says they do. Without a row per case, a
 // subcommand dropped from the declared surface still exits non-zero and the
 // suite stays green — measured, by dropping healthcheck.
 func TestEveryDeclaredSubcommandIsRecognised(t *testing.T) {
@@ -75,9 +85,11 @@ func TestEveryDeclaredSubcommandIsRecognised(t *testing.T) {
 		name string
 		args []string
 		// exitCode is what §10 promises for an empty environment block: 0 for
-		// status, which always succeeds, 1 for the two this build has not
-		// implemented, and 1 for the sync loop, which refuses a block with no
-		// OBSYNC_REPO in it (§8).
+		// status, which always succeeds; 1 for healthcheck, which this build
+		// has not implemented; 1 for the sync loop, which refuses a block with
+		// no OBSYNC_REPO in it (§8); and 1 for credential-helper, which is
+		// git's and is being invoked here without the operation git always
+		// names (the protocol itself is credential_test.go's).
 		exitCode int
 		// quietStdout marks the subcommands §10 leaves no stdout to: the sync
 		// loop, whose output is logfmt on stderr, and healthcheck, which is
@@ -237,9 +249,16 @@ const pendingLines = 64
 // its environment.
 func startLoop(t *testing.T, env ...string) *process {
 	t.Helper()
+	return startLoopFrom(t, obsyncBin, env...)
+}
+
+// startLoopFrom is startLoop with the binary named, for the one test that cares
+// where obsync is installed rather than what it was configured with.
+func startLoopFrom(t *testing.T, binary string, env ...string) *process {
+	t.Helper()
 
 	ctx, stop := context.WithCancel(t.Context())
-	cmd := exec.CommandContext(ctx, obsyncBin)
+	cmd := exec.CommandContext(ctx, binary)
 	cmd.Env = append([]string{}, env...)
 	// obsync's exit path is SIGTERM (§1), so that is what stopping it means
 	// here; WaitDelay is the backstop for a build that ignored the signal.

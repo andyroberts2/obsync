@@ -471,8 +471,10 @@ func TestTheNextRunPushesWhatTheLastOneCouldNot(t *testing.T) {
 // it cannot recover from (§1).
 //
 // Measured: a run that commits and pushes drives thirteen git commands — five
-// of them writing the private git config — and takes out exactly one deadline
-// to time one of them out with.
+// of them writing the private git config, of which one is the credential
+// isolation's forced askpass — and takes out exactly one deadline to time one
+// of them out with. The credential helper is not among them: it is pinned per
+// invocation rather than written down (internal/git/isolation.go).
 //
 // The loop waits on the same clock for its own cadence, and those waits are not
 // timeouts: nothing is killed when one expires. So the assertion is both halves

@@ -20,6 +20,7 @@ import (
 
 	"github.com/andyroberts2/obsync/internal/clock"
 	"github.com/andyroberts2/obsync/internal/config"
+	"github.com/andyroberts2/obsync/internal/credential"
 	"github.com/andyroberts2/obsync/internal/loop"
 )
 
@@ -30,7 +31,7 @@ import (
 var version = "dev"
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Environ(), os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Environ(), os.Stdin, os.Stdout, os.Stderr))
 }
 
 // run is main's body with its environment, streams and exit status returned
@@ -41,7 +42,7 @@ func main() {
 // anywhere, because obsync is a compose sidecar behind a fixed entrypoint and
 // never a CLI anyone types. The environment is the whole configuration
 // surface (§8).
-func run(args []string, environ []string, stdout, stderr io.Writer) int {
+func run(args []string, environ []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	subcommand := ""
 	if len(args) > 0 {
 		subcommand = args[0]
@@ -61,7 +62,17 @@ func run(args []string, environ []string, stdout, stderr io.Writer) int {
 	case "":
 		return syncLoop(environ, stderr)
 
-	case "healthcheck", "credential-helper":
+	case "credential-helper":
+		// git's, not a human's: git runs it as `credential.helper` with the
+		// operation it wants appended, which is why an invocation with no
+		// operation is the one thing here that answers a human at all (§10).
+		if len(args) != 2 {
+			_, _ = fmt.Fprintln(stderr, "obsync: credential-helper is git's; git names the operation it wants")
+			return 1
+		}
+		return credential.Helper(args[1], environ, stdin, stdout)
+
+	case "healthcheck":
 		// Recognised, so the surface an operator meets is the one §10 declares,
 		// and saying so out loud beats healthcheck's eventual silence while
 		// there is no status file for it to be silent about.
