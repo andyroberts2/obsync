@@ -44,8 +44,18 @@ var IgnoreFloor = []string{
 	".vscode/",
 	".idea/",
 	".obsidian-git-data",
-	"obsync-attention.md",
+	AttentionNote,
 }
+
+// AttentionNote is the note obsync writes at the vault root when it needs a
+// human to look at something, and deletes when it does not (§9).
+//
+// Its name lives here, in the list that keeps it out of every commit, because
+// the two facts are one: the note is derived fresh every run and is meaningless
+// in any clone but this one, so tracking it would push a warning to readers who
+// cannot act on it. One definition, so that the file obsync writes and the
+// floor entry that hides it can never be two names.
+const AttentionNote = "obsync-attention.md"
 
 // ShowsMoreThanIgnoreFloor reports whether a directory holds anything the
 // ignore floor does not cover, and names the first such path.

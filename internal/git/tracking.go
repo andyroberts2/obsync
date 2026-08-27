@@ -117,11 +117,66 @@ func (r *Repo) resolveOwnedPaths() error {
 // directory gate 2 would then have to reason about and a trace obsync left
 // somewhere it had promised to stop.
 func (r *Repo) WriteStatus(content []byte) error {
-	if _, err := os.Stat(r.gitDir); err != nil {
+	if err := r.repositoryStillThere(); err != nil {
 		return fmt.Errorf("obsync will not write a status file into a repository that is not "+
 			"there: %w", err)
 	}
 	return r.writeOwnedFile(r.statusFile, content)
+}
+
+// ReconcileAttentionNote is the whole of what obsync does to §9's attention
+// note, and it is one function on purpose: what the vault holds and what obsync
+// would say are compared, and the vault is changed only where the two differ.
+//
+// Three outcomes, and the middle one is the reason this is not two calls. There
+// is nothing left to say, so the note is **deleted rather than emptied** — an
+// empty note is still a note, and the whole signal is that the file is there.
+// The bytes already there are the bytes obsync would write, so nothing happens
+// at all: obsync's own writes are not suppressed from the watcher (§4), so a
+// note rewritten every run would wake the loop every run for no change. Or they
+// differ, and the note is written through the same write-then-rename every
+// owned path goes through (§6), so a human reading it sees the previous note or
+// the new one and never half of one.
+//
+// The destination is the vault rather than the repository, which is what lets a
+// full freeze still write one (§9) — a full freeze stops obsync touching the
+// *repo*, and this is a file obsync declared and the human does not own. The
+// repository is checked for still being there anyway, for the reason WriteStatus
+// gives: the staging directory this is renamed out of lives inside `.git`, and
+// writing through it creates what it needs, so a `.git` that has gone would
+// otherwise be partly recreated by the act of saying so.
+func (r *Repo) ReconcileAttentionNote(content []byte) error {
+	if err := r.repositoryStillThere(); err != nil {
+		return fmt.Errorf("obsync will not write an attention note into a vault that is no longer "+
+			"a repository: %w", err)
+	}
+
+	note := filepath.Join(r.vault, vault.AttentionNote)
+	held, err := os.ReadFile(note)
+	switch {
+	case len(content) == 0:
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return os.Remove(note)
+	case err == nil && bytes.Equal(held, content):
+		return nil
+	}
+	return r.writeOwnedFile(note, content)
+}
+
+// repositoryStillThere is the fact both of obsync's own writes are gated on:
+// the repository the staging directory lives in has not gone away since
+// bootstrap resolved where it was.
+//
+// It is a check rather than a courtesy because writing creates the directories
+// it needs. Without it, a vault that stopped being a repository would gain an
+// empty `.git/obsync/` from the very run that noticed — a directory gate 2 would
+// then have to reason about, and a trace obsync left somewhere it had promised
+// to stop.
+func (r *Repo) repositoryStillThere() error {
+	_, err := os.Stat(r.gitDir)
+	return err
 }
 
 // StatusFilePath is where the status file lives for the vault at vaultPath,

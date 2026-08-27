@@ -7,8 +7,9 @@ import (
 )
 
 // signal is §9, and it is the whole of what a sync run tells the outside world
-// about itself: the status file rewritten, and one line to a human if one is
-// needed and none has been said for an hour.
+// about itself: the status file rewritten, the attention note reconciled
+// against what obsync can see, and one line to a human if one is needed and
+// none has been said for an hour.
 //
 // It runs at the end of every wake-up whatever the run turned out to be. A
 // parked obsync means PID liveness carries no information at all, so the signal
@@ -28,6 +29,11 @@ func (l *Loop) signal(now time.Time) {
 
 	file := l.statusFile(now)
 	l.write(file)
+	// The third channel, and the only one that goes where this user is already
+	// looking (§9, #38). It is written from the same live state the file is,
+	// on the same wake-up, so the note in the vault, the verdict `docker ps`
+	// acts on and the line in the log cannot describe three different obsyncs.
+	l.reconcileAttentionNote(now)
 
 	// The verdict is derived from the same file a subcommand reads, by the same
 	// function, so that what obsync repeats to a human and what `obsync

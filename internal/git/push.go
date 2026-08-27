@@ -128,6 +128,27 @@ type RemoteRejection struct {
 	Said []string
 }
 
+// Relayed is the remote's own words as the lines they arrived as: git's
+// trailing (<reason>), which git-push(1) defines as "a human-readable
+// explanation", followed by whatever the far end said for itself.
+//
+// It exists beside Error rather than instead of it because the two places a
+// human reads this want two shapes. A log line is one line, so Error joins them
+// with a separator. §9 obliges the attention note to carry them **verbatim in a
+// fenced block, labelled as the remote's words rather than obsync's** — and a
+// block is a thing made of lines, which is exactly what a hook's own multi-line
+// sentence is.
+//
+// Nothing branches on any of it, here or anywhere: obsync relays and never
+// diagnoses.
+func (r *RemoteRejection) Relayed() []string {
+	relayed := make([]string, 0, len(r.Said)+1)
+	if r.Reason != "" {
+		relayed = append(relayed, r.Reason)
+	}
+	return append(relayed, r.Said...)
+}
+
 func (r *RemoteRejection) Error() string {
 	relayed := "the remote received obsync's push, evaluated it and rejected it. Its own " +
 		"explanation, relayed and not interpreted: " + quoted(r.Reason)

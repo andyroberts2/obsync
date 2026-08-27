@@ -115,8 +115,23 @@ as designed. Whatever does need you is repeated once an hour and never once a
 tick, so `docker logs --since 1h` is empty exactly when nothing is wrong and
 never empty when something is.
 
-Not yet: the attention note and the container image. obsync is not something to
-point at a vault yet.
+And there is a fourth place, which is the one you are actually looking at: your
+vault. When obsync needs a human it writes `obsync-attention.md` at the vault
+root, and **deletes it** when it does not — so the note being there at all is
+the signal. It has four sections and it gains and loses them as reality
+changes: whatever obsync has frozen, with the fact behind it and what to do,
+closing on *"this clears on its own once fixed; no restart needed"*; every
+conflict copy still standing, each wikilinked beside the note it is a copy of
+so you resolve the pair inside Obsidian; every path obsync is refusing to
+commit; and every path something is rewriting faster than obsync can ever see
+it still. Every section is worked out again from scratch on every run — the
+freezes from what the gates just found, the rest from your vault — so the note
+is never in charge of what it describes and cannot disagree with it for longer
+than one run. A push the remote rejected carries the remote's own words in a
+fenced block, labelled as the remote's rather than obsync's. The note is in the
+ignore floor, so it is never committed and reaches no other clone.
+
+Not yet: the container image. obsync is not something to point at a vault yet.
 
 ## What obsync will never do
 

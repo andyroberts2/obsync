@@ -14,6 +14,10 @@
 // holds the tree it just applied, and push what the remote will take (#24, #27,
 // #28, #29, #30, #31, #32, #33, #34, #35).
 //
+// Every wake-up ends the same way whatever the run turned out to be: obsync
+// writes down what it knows about itself and reconciles the note it leaves in
+// the vault for a human, which is signal.go and attention.go (#37, #38).
+//
 // The interlocks come first and everything after them is a thing obsync does to
 // a vault they said it may (§7). What a failure then *means* is tier.go: three
 // tiers, a closed list, and the one place a run's outcome is reported. What a
@@ -234,6 +238,14 @@ type liveFreeze struct {
 	fact   string
 	remedy string
 	since  time.Time
+
+	// relayed is somebody else's words, kept apart from obsync's own so that
+	// the attention note can print them as what they are: a block, labelled as
+	// theirs (§9). Only a remote rejection has any — it is the one freeze whose
+	// conclusive fact is a sentence a party other than obsync wrote — and for
+	// every other freeze this is empty, which is the difference between a
+	// relayed verdict and obsync's own account of what it observed.
+	relayed []string
 }
 
 // record is the freeze as the status file carries it, or nil when obsync is not
@@ -550,13 +562,18 @@ func (l *Loop) freeze(name, fact, remedy string) error {
 
 // networkFreeze stops the network half and leaves the local one committing: the
 // vault is sound, and its relationship to the remote is not (§7).
-func (l *Loop) networkFreeze(name, fact, remedy string) error {
+//
+// relayed is whatever the far end said for itself, and it is variadic because
+// exactly one of the five network freezes has any: a remote rejection is the
+// one whose fact was written by somebody other than obsync (§9, #38).
+func (l *Loop) networkFreeze(name, fact, remedy string, relayed ...string) error {
 	now := l.clock.Now()
 	if l.networkFrozen.name == name {
 		l.networkFrozen.fact, l.networkFrozen.remedy = fact, remedy
+		l.networkFrozen.relayed = relayed
 		return errNetworkFrozen
 	}
-	l.networkFrozen = liveFreeze{name: name, fact: fact, remedy: remedy, since: now}
+	l.networkFrozen = liveFreeze{name: name, fact: fact, remedy: remedy, since: now, relayed: relayed}
 	l.saidNeedsHumanAt = now
 	l.log.Error("obsync has stopped syncing with the remote until this is repaired", "freeze", name,
 		"fact", fact, "remedy", remedy)
@@ -1575,7 +1592,8 @@ func (l *Loop) push(ctx context.Context, now time.Time) error {
 		// freeze says nothing on the runs after the first and the retry has to
 		// go on being pushed out an hour on every one of them.
 		l.retryHourly(now)
-		return l.networkFreeze(freezeRemoteRejection, rejected.Error(), remoteRejectionRemedy)
+		return l.networkFreeze(freezeRemoteRejection, rejected.Error(), remoteRejectionRemedy,
+			rejected.Relayed()...)
 	case errors.Is(err, git.ErrLostTheRace):
 		// The remote answered, and what it answered is that obsync is behind:
 		// somebody else pushed between this run's fetch and this run's push.

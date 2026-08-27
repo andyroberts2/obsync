@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -815,6 +816,101 @@ func conflictCopyName(canonical string, at time.Time, counter int) string {
 		marker += " " + strconv.Itoa(counter)
 	}
 	return folder + stem + marker + extension
+}
+
+// OutstandingConflictCopies is every conflict copy standing in the vault right
+// now, each paired with the note it is a copy of — the two names a human edits
+// together, and what §9's second section is derived from.
+//
+// It is a walk of the vault rather than a question to git, and that is §4's own
+// mechanism rather than a shortcut taken here: recovery is stateless and **the
+// filename pattern is the state**, so a conflict exists exactly while a file
+// matching it exists, whatever an index or a commit says about it. Asking git
+// would also tie the answer to a repository that may be the very thing the note
+// is about — the damage freeze is precisely the state where git cannot answer,
+// and the freeze section is what an operator needs most in that moment.
+//
+// `.git` is skipped, so obsync's own staging directory can never be read as a
+// copy. A name obsync cannot read back as one of its own is left out rather
+// than guessed at: the pattern belongs to obsync, and a note a human happened
+// to name that way is theirs.
+//
+// The order is the walk's, which is lexical and therefore the same every run —
+// which matters, because a note whose lines reordered themselves would be
+// rewritten every run for no change.
+func (r *Repo) OutstandingConflictCopies() ([]ConflictCopy, error) {
+	var copies []ConflictCopy
+	err := filepath.WalkDir(r.vault, func(entry string, info fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(r.vault, entry)
+		if err != nil {
+			return err
+		}
+		if relative == ".git" {
+			return fs.SkipDir
+		}
+		if info.IsDir() {
+			return nil
+		}
+		relative = filepath.ToSlash(relative)
+		if canonical, mine := canonicalOf(relative); mine {
+			copies = append(copies, ConflictCopy{Path: relative, Of: canonical})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("obsync could not look through the vault at %q for conflict "+
+			"copies: %w", r.vault, err)
+	}
+	return copies, nil
+}
+
+// canonicalOf is conflictCopyName's exact inverse: the note a copy is a copy
+// of, and whether this name is one obsync wrote at all.
+//
+// It is here rather than beside its caller because the two halves are one
+// format: a name obsync can write and cannot read back is a conflict a human is
+// never told about, and keeping them apart is how that happens. Everything it
+// checks is a part conflictCopyName puts there — the marker, a stamp that
+// parses at the layout obsync writes, the counter a collision inside one minute
+// appends, and the extension kept last so Obsidian renders the copy.
+func canonicalOf(relative string) (string, bool) {
+	folder, name := path.Split(relative)
+	at := strings.LastIndex(name, conflictMarker)
+	if at <= 0 {
+		// at == 0 is a name that is nothing but a marker and a suffix, which is
+		// not something conflictCopyName can produce: a dotfile keeps its whole
+		// name in front of the marker.
+		return "", false
+	}
+	stem, rest := name[:at], name[at+len(conflictMarker):]
+	closed := strings.IndexByte(rest, ')')
+	if closed < 0 {
+		return "", false
+	}
+	if _, err := time.Parse(conflictStamp, rest[:closed]); err != nil {
+		return "", false
+	}
+	extension := trimConflictCounter(rest[closed+1:])
+	if extension != "" && !strings.HasPrefix(extension, ".") {
+		return "", false
+	}
+	return folder + stem + extension, true
+}
+
+// trimConflictCounter takes off the " 2" a second copy of one note inside one
+// minute carries, and leaves anything else exactly as it found it.
+func trimConflictCounter(tail string) string {
+	digits := 1
+	for digits < len(tail) && tail[digits] >= '0' && tail[digits] <= '9' {
+		digits++
+	}
+	if !strings.HasPrefix(tail, " ") || digits == 1 {
+		return tail
+	}
+	return tail[digits:]
 }
 
 // entryIn is what a tree or a commit holds at a path, and whether it holds
