@@ -7,16 +7,16 @@ order to serve obsidian as a web app, the standard obsidian git plugin cannot
 be used in-browser, so this is not an option to keep changes in sync with a
 remote git repo. This sidecar is a workaround to achieve a similar outcome.
 
-obsync watches a mounted Obsidian vault (the same folder that ignis is using). 
-It commits and pushes what you write, and it pulls down what other people push, 
+obsync watches a mounted Obsidian vault (the same folder that ignis is using).
+It commits and pushes what you write, and it pulls down what other people push,
 so the vault and a remote git repository stay in step.
 
-It takes prior art as inspiration, an dbuilds on these learnings:
-- [`kubernetes/git-sync`](https://github.com/kubernetes/git-sync) pulls but doesn't pushe. 
+It takes prior art as inspiration, and builds on these learnings:
+- [`kubernetes/git-sync`](https://github.com/kubernetes/git-sync) pulls but doesn't push.
 - [`simonthum/git-sync`](https://github.com/simonthum/git-sync) does also push,
 but doesn't appear to be maintained, has no daemon, no debounce and no credential handling.
 
-## Does obsync fi your use case?
+## Does obsync fit your use case?
 
 **Yes, if:**
 
@@ -61,8 +61,8 @@ Four steps, and the third one is the whole configuration.
 2. **Copy [`compose.yaml`](compose.yaml)** out of this repository. If using
    ignis, then you can add it to your ignis `docker-compose.yml` file.
 3. **Change three things in it.** Point `OBSYNC_REPO` at your repository, put
-   your token in `./secrets/obsync-token` (just the raw token - nothing else), 
-   and change `./vaults/notes` to point to your own vault folder. 
+   your token in `./secrets/obsync-token` (just the raw token - nothing else),
+   and change `./vaults/notes` to point to your own vault folder.
    `OBSYNC_REPO` is the only variable obsync will not start without.
 4. **Run `docker compose up -d`.**
 

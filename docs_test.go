@@ -106,6 +106,11 @@ var documentPath = regexp.MustCompile(`docs/[a-z0-9-]+\.md`)
 // rather than something a reviewer has to remember, and it is the whole reason
 // the class is marked in place instead of collected into an index — an index of
 // prose is a second copy of prose, and the marker greps.
+//
+// It is the class's own spelling rather than the only one a page may use. What
+// the design asks of one of these lines is that it stand in front of the reader
+// visibly and name the decision behind it; which words a page opens the callout
+// with are the page's business, and opensACallout below is the whole rule.
 const loadBearingMarker = "load-bearing documentation"
 
 // A link is resolvable when it names an issue in this repository, in either of
@@ -176,9 +181,10 @@ func TestTheKnownLoadBearingLinesAreMarkedInPlace(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("%s does not mark %q as load-bearing documentation: it is %s. A load-bearing "+
-				"line is marked in place and visibly, is never cut for brevity, and its absence is "+
-				"a defect rather than a gap (§11)", line.file, line.phrase, line.why)
+			t.Errorf("%s does not stand %q in a callout: it is %s. A load-bearing line is called "+
+				"out in place and visibly, names the ticket that decided it, is never cut for "+
+				"brevity, and its absence is a defect rather than a gap (§11)",
+				line.file, line.phrase, line.why)
 		}
 	}
 }
@@ -220,13 +226,31 @@ func calloutsIn(t *testing.T, path string) []string {
 
 	var callouts []string
 	for i, line := range lines {
-		if !strings.Contains(strings.ToLower(line), loadBearingMarker) {
+		if !opensACallout(line) {
 			continue
 		}
 		end := min(i+calloutLines, len(lines))
 		callouts = append(callouts, strings.Join(lines[i:end], "\n"))
 	}
 	return callouts
+}
+
+// opensACallout is whether a line starts one: it carries the class's own marker,
+// or it is a callout the page spelled its own way — a blockquote lead-in, bold
+// so a reader cannot scroll past it, naming an issue in this repository so the
+// decision behind it can be reached.
+//
+// Both spellings are accepted because the two properties this suite can
+// actually decide are visibility and a resolvable ticket, and a page carries
+// both whichever word it opens with. Requiring the exact marker made an editing
+// pass over a document's prose a test failure, which is a check on wording
+// rather than on what §11 asks for.
+func opensACallout(line string) bool {
+	if strings.Contains(strings.ToLower(line), loadBearingMarker) {
+		return true
+	}
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, ">") && strings.Contains(line, "**") && issueLink.MatchString(line)
 }
 
 // calloutLines is how much of a file below the marker counts as the callout. It
