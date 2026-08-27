@@ -210,7 +210,17 @@ func TestTheTickIsSixtySecondsAndJittered(t *testing.T) {
 		env.advance(tick + tickJitter)
 	}
 
-	waits := env.clock.waitsTaken()
+	// Every run takes out a network deadline of its own, because every run
+	// fetches: the tick is the upper bound on someone else's push arriving, and
+	// it is only that because the run it starts asks the remote (§2). Those are
+	// not cadence waits — nothing is killed when a tick expires — so the ticks
+	// are the waits that are not one.
+	var waits []time.Duration
+	for _, waited := range env.clock.waitsTaken() {
+		if waited != networkDeadline {
+			waits = append(waits, waited)
+		}
+	}
 	if len(waits) < 9 {
 		t.Fatalf("obsync waited %d times over nine ticks, want one wait per tick", len(waits))
 	}
@@ -457,7 +467,11 @@ func TestASIGTERMCutsAHungPushShortAtTheShutdownDeadline(t *testing.T) {
 
 	env.turn()
 	held := awaitPid(t, pidFile)
-	env.clock.awaitDeadline(t)
+	// The hook running is the push being in flight, so every deadline this run
+	// takes out — its fetch's and its push's, both 120s — has been taken by
+	// now. They are dropped rather than counted, so that what is waited for
+	// below is the one obsync takes out when it sees the stop.
+	env.clock.drainDeadlines()
 
 	// docker stop, with the push hung.
 	env.sigterm()

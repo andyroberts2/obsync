@@ -126,7 +126,7 @@ func (r *Repo) resolveTrackedBranch(ctx context.Context, cfg config.Config) (str
 // not on is a refusal rather than a switch, and the remedy is the human's own
 // checkout.
 func (r *Repo) attach(override string) (string, error) {
-	head, err := r.headBranch()
+	head, err := r.HeadBranch()
 	if err != nil {
 		return "", err
 	}
@@ -228,7 +228,7 @@ func (r *Repo) clone(ctx context.Context, cfg config.Config) (string, error) {
 	// The branch git resolved, read back the way the attach case reads it: one
 	// value, from the repo obsync now has, rather than a second answer parsed
 	// out of what the remote said — and held to the same requirement.
-	branch, err := r.headBranch()
+	branch, err := r.HeadBranch()
 	if err != nil {
 		return "", err
 	}

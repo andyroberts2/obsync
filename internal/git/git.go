@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -150,12 +149,14 @@ func (r *Repo) writeConfig(identity config.CommitIdentity) error {
 // fixed for the process lifetime (§3).
 func (r *Repo) TrackedBranch() string { return r.branch }
 
-// headBranch is the branch HEAD is on. It is what the tracked branch resolves
+// HeadBranch is the branch HEAD is on. It is what the tracked branch resolves
 // to when obsync attaches to a vault that is already a repo — the branch the
-// human is already on, never the remote's idea of a default (§3).
+// human is already on, never the remote's idea of a default (§3) — and it is
+// what every later run compares against the branch that came out of that, since
+// HEAD moving off the tracked branch mid-life is a full freeze (§7).
 //
 // A detached HEAD has no answer here; it is gate 3, and a full freeze (#32).
-func (r *Repo) headBranch() (string, error) {
+func (r *Repo) HeadBranch() (string, error) {
 	out, err := r.run(invocation{dir: r.vault, args: []string{"symbolic-ref", "--quiet", "--short", "HEAD"}})
 	if err != nil {
 		return "", fmt.Errorf("the vault's HEAD is not on a branch: %w", err)
@@ -246,47 +247,6 @@ func (r *Repo) Commit(message string) error {
 		args:  []string{"commit", "--quiet", "--cleanup=whitespace", "-F", "-"},
 	})
 	return err
-}
-
-// UnpushedCommits reports whether the tracked branch holds commits the remote
-// is not known to have, and whether obsync knows an upstream counterpart for it
-// at all.
-//
-// Both answers come from the vault's own refs, so this costs no network and is
-// only as fresh as the last fetch or push — which is exactly enough to decide
-// whether there is anything to push, and no substitute for classification,
-// which fetches first and is #27's. The absence of a counterpart is what makes
-// a push a first push, and the only thing that sends obsync to ask the remote
-// itself what it holds (§3).
-func (r *Repo) UnpushedCommits() (unpushed, knowsCounterpart bool, err error) {
-	remoteRef := "refs/remotes/" + config.RemoteName + "/" + r.branch
-
-	// for-each-ref rather than rev-parse: a ref that does not exist is not a
-	// failure here, it is a branch obsync has never pushed, and for-each-ref
-	// says so by printing nothing and exiting 0.
-	out, err := r.run(invocation{
-		dir:  r.vault,
-		args: []string{"for-each-ref", "--format=%(objectname)", remoteRef},
-	})
-	if err != nil {
-		return false, false, err
-	}
-	if strings.TrimSpace(string(out)) == "" {
-		return true, false, nil
-	}
-
-	out, err = r.run(invocation{
-		dir:  r.vault,
-		args: []string{"rev-list", "--count", remoteRef + "..refs/heads/" + r.branch},
-	})
-	if err != nil {
-		return false, true, err
-	}
-	count, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		return false, true, fmt.Errorf("git rev-list --count answered %q, which is not a count: %w", out, err)
-	}
-	return count > 0, true, nil
 }
 
 // Push sends the tracked branch to the remote, and is the one network command

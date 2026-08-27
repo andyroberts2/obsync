@@ -6,11 +6,12 @@
 // its next wake-up until that run is over. No mutex, no queue, and nothing to
 // go wrong under load.
 //
-// What a run does in this build is the tracer bullet of #24: ask git what
-// changed, commit it as one commit, and push. Everything that will later stand
-// between those steps — the gates (#32), the ignore floor and refused paths
-// (#28), the settle guard (#29), classification and the merge (#27, #30) — is a
-// rule added to a loop that already turns.
+// What a run does in this build: ask git what changed, commit it as one commit,
+// fetch, classify, fast-forward what is only behind, and push what is only
+// ahead (#24, #27). Everything that will later stand between those steps — the
+// gates (#32), the ignore floor and refused paths (#28), the settle guard
+// (#29), and the out-of-tree merge a real divergence needs (#30) — is a rule
+// added to a loop that already turns.
 //
 // When it turns is cadence.go: the quiet window, the max-wait cap, the jittered
 // tick and the network backoff, none of which is a knob (#25).
@@ -54,13 +55,20 @@ type Loop struct {
 	retryNetworkAt time.Time
 	lastPush       time.Time
 
-	// frozen is the full freeze obsync is in, or empty. This build has one
-	// cause for it — a remote holding refs but not the tracked branch (§3) —
-	// and the nine gates that will produce the rest are #32's. A full freeze
-	// stops obsync touching the repo at all, so it gates the local half as well
-	// as the network one, and it is re-evaluated at the top of every run so
-	// that repairing the cause releases obsync with no restart (§7).
-	frozen string
+	// frozen is the full freeze obsync is in, or empty, and networkFrozen the
+	// network freeze. This build has two causes for the first — a remote
+	// holding refs but not the tracked branch, and HEAD moving off the tracked
+	// branch (§3) — and one for the second, an upstream rewrite; the nine gates
+	// that will produce the rest are #32's, and so is a tier that is a type
+	// rather than two fields.
+	//
+	// A full freeze stops obsync touching the repo at all, so it gates the
+	// local half as well as the network one; a network freeze leaves the local
+	// half committing, because the vault is sound and only its relationship to
+	// the remote is not (§7). Both are re-evaluated at the top of every run, so
+	// that repairing the cause releases obsync with no restart.
+	frozen        string
+	networkFrozen string
 
 	// repo is the vault's repository once obsync has bootstrapped into it, and
 	// it carries the tracked branch, resolved on the first run that reached the
@@ -190,9 +198,6 @@ func (l *Loop) syncRun(ctx context.Context) {
 			"vault_path", l.config.VaultPath)
 		return
 	}
-	if l.stillFrozen(ctx) {
-		return
-	}
 	if err := l.perform(ctx, committing); err != nil {
 		if errors.Is(err, git.ErrShutdownDeadline) {
 			// Not a failure a human is needed for: obsync was told to stop and
@@ -230,17 +235,17 @@ func (l *Loop) bootstrap(ctx context.Context) error {
 	return nil
 }
 
-// stillFrozen reports whether obsync is in a full freeze, having first
-// re-evaluated the fact that put it there.
+// stillWithheld reports whether the remote still holds refs but not the tracked
+// branch, which is the fact behind the one full freeze this build enters from
+// the network half.
 //
-// The fact this build freezes on is a fact about the remote, so re-checking it
-// is one read-only look at the remote per run — the same shape as the probe a
-// damage freeze self-clears by, and consistent with what a full freeze means,
-// because it touches nothing (§7). A remote obsync cannot reach answers
-// nothing, and obsync stays frozen: the freeze clears on a fact, never on a
-// failure to establish one.
-func (l *Loop) stillFrozen(ctx context.Context) bool {
-	if l.frozen == "" {
+// Re-checking it is one read-only look at the remote per run — the same shape
+// as the probe a damage freeze self-clears by, and consistent with what a full
+// freeze means, because it touches nothing (§7). A remote obsync cannot reach
+// answers nothing, and obsync stays frozen: the freeze clears on a fact, never
+// on a failure to establish one.
+func (l *Loop) stillWithheld(ctx context.Context) bool {
+	if l.frozen != freezeNoUpstreamCounterpart {
 		return false
 	}
 
@@ -248,23 +253,50 @@ func (l *Loop) stillFrozen(ctx context.Context) bool {
 	if err != nil || withheld {
 		return true
 	}
-
-	cleared := l.frozen
-	l.frozen = ""
-	l.log.Info("the freeze cleared and obsync is syncing again", "freeze", cleared,
-		"branch", l.repo.TrackedBranch())
+	l.thawed(freezeNoUpstreamCounterpart)
 	return false
+}
+
+// stillRewritten reports whether the remote's history is still the rewritten
+// one obsync stopped syncing with, and clears the network freeze when it is
+// not.
+//
+// The re-check costs no network at all: what obsync last saw the remote hold is
+// in the vault's own refs. That is not a saving, it is the point — a fetch
+// would move the remote-tracking ref and overwrite the record, and the freeze
+// would then clear on a remote that had merely gained a commit since the
+// rewrite, which is exactly when a merge would resurrect what the rewrite
+// removed.
+func (l *Loop) stillRewritten() (bool, error) {
+	if l.networkFrozen == "" {
+		return false, nil
+	}
+
+	rewritten, err := l.repo.UpstreamRewritten()
+	if err != nil {
+		return true, err
+	}
+	if rewritten {
+		return true, nil
+	}
+	cleared := l.networkFrozen
+	l.networkFrozen = ""
+	l.log.Info("the freeze cleared and obsync is syncing with the remote again", "freeze", cleared,
+		"branch", l.repo.TrackedBranch())
+	return false, nil
 }
 
 // freeze enters a full freeze, and says so once. State entry and state exit
 // each log exactly one line (§9); the hourly repeat that keeps a broken obsync
 // from going quiet in between is #37's.
 //
-// One freeze is held at a time, which is all this build can produce. Where two
-// are live at once the full freeze wins over the network one, and that ordering
-// arrives with the tiers (#32).
+// One full freeze is held at a time and the first fact wins: they stop obsync
+// doing the same nothing, so a second one arriving changes no behaviour, and
+// re-announcing a freeze obsync is already in would make the log say a state
+// changed when it did not. The ordering that matters — full over network — is
+// in the order these are asked (#32).
 func (l *Loop) freeze(name, fact, remedy string) {
-	if l.frozen == name {
+	if l.frozen != "" {
 		return
 	}
 	l.frozen = name
@@ -272,10 +304,44 @@ func (l *Loop) freeze(name, fact, remedy string) {
 		"fact", fact, "remedy", remedy)
 }
 
-// freezeNoUpstreamCounterpart is §3's classification row for a tracked branch
-// the remote does not hold: obsync creates it only on a remote with no refs at
-// all, and freezes on any other.
-const freezeNoUpstreamCounterpart = "no upstream counterpart"
+// networkFreeze stops the network half and leaves the local one committing: the
+// vault is sound, and its relationship to the remote is not (§7).
+func (l *Loop) networkFreeze(name, fact, remedy string) {
+	if l.networkFrozen == name {
+		return
+	}
+	l.networkFrozen = name
+	l.log.Error("obsync has stopped syncing with the remote until this is repaired", "freeze", name,
+		"fact", fact, "remedy", remedy)
+}
+
+// thawed clears the named full freeze if it is the one obsync is in, and says
+// so once.
+func (l *Loop) thawed(name string) {
+	if l.frozen != name {
+		return
+	}
+	l.frozen = ""
+	l.log.Info("the freeze cleared and obsync is syncing again", "freeze", name,
+		"branch", l.repo.TrackedBranch())
+}
+
+const (
+	// freezeNoUpstreamCounterpart is §3's classification row for a tracked
+	// branch the remote does not hold: obsync creates it only on a remote with
+	// no refs at all, and freezes on any other.
+	freezeNoUpstreamCounterpart = "no upstream counterpart"
+
+	// freezeHeadOffTrackedBranch is HEAD having moved off the branch bootstrap
+	// resolved. Committing would put the vault's changes on a branch nobody
+	// chose, and obsync never checks a branch out to put that right (§3).
+	freezeHeadOffTrackedBranch = "head off the tracked branch"
+
+	// freezeUpstreamRewrite is the remote's history having been rewritten under
+	// the tip obsync last saw. Merging would resurrect what the rewrite
+	// removed and pushing would restore it, so obsync does neither (§3).
+	freezeUpstreamRewrite = "upstream rewrite"
+)
 
 // perform is the body of a sync run: what changed, one commit, one push.
 //
@@ -284,6 +350,31 @@ const freezeNoUpstreamCounterpart = "no upstream counterpart"
 // obsync a local autocommitter that catches up; only the network half waits
 // (§2).
 func (l *Loop) perform(ctx context.Context, committing bool) error {
+	// HEAD is asked before anything is committed, because a commit is what
+	// this would get wrong: the tracked branch is fixed at bootstrap (§3), so
+	// a run that committed here would put the vault's changes on a branch
+	// nobody chose while the push sent the one obsync resolved. Checking the
+	// branch back out is the human's to do — obsync never runs git checkout
+	// after bootstrap, because that rewrites files they have open — and asking
+	// again every run is what makes their doing it enough (§7).
+	head, err := l.repo.HeadBranch()
+	if err != nil {
+		return err
+	}
+	if head != l.repo.TrackedBranch() {
+		l.freeze(freezeHeadOffTrackedBranch,
+			"the vault's HEAD is on "+head+" and obsync tracks "+l.repo.TrackedBranch(),
+			"check "+l.repo.TrackedBranch()+" back out in the vault; obsync never checks a branch "+
+				"out itself, because that would rewrite files you have open. This clears on its own "+
+				"once fixed; no restart needed")
+		return nil
+	}
+	l.thawed(freezeHeadOffTrackedBranch)
+
+	if l.stillWithheld(ctx) {
+		return nil
+	}
+
 	if committing {
 		if err := l.localHalf(); err != nil {
 			return err
@@ -334,7 +425,8 @@ func (l *Loop) localHalf() error {
 	return nil
 }
 
-// networkHalf is the part of a run that talks to the remote.
+// networkHalf is the part of a run that talks to the remote: fetch, classify,
+// reconcile, push (§2).
 //
 // It is the only half that waits: a failure here backs off from 60s to 15m and
 // is retried by the ordinary tick, so the backoff is a rate limit on the
@@ -344,25 +436,39 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 	if now.Before(l.retryNetworkAt) {
 		return nil
 	}
-
-	unpushed, knowsCounterpart, err := l.repo.UnpushedCommits()
-	if err != nil {
+	frozen, err := l.stillRewritten()
+	if err != nil || frozen {
 		return err
 	}
-	if !unpushed {
-		// A run that changed nothing says nothing: docker logs --since 1h
-		// being empty is a designed signal, not an accident (§9).
+
+	state, err := l.repo.Reconcile(ctx)
+	switch {
+	case errors.Is(err, git.ErrUpstreamRewrite):
+		l.networkFreeze(freezeUpstreamRewrite,
+			"the remote no longer holds the commit obsync last saw at the tip of "+
+				l.repo.TrackedBranch(),
+			"decide which history you want: take the remote's with one `git reset --hard origin/"+
+				l.repo.TrackedBranch()+"` in the vault, or put the history you meant back on the "+
+				"remote. obsync will do neither itself — merging would resurrect what the rewrite "+
+				"removed and pushing would restore it. This clears on its own once fixed; no "+
+				"restart needed")
 		return nil
-	}
-	// §3's sharpest rule, and the one place obsync may create a ref on the
-	// remote. A branch obsync has no remote-tracking ref for is a branch it has
-	// never pushed, so the remote is asked what it holds before any bytes go:
-	// a remote with no refs at all is a brand-new one and the push creates the
-	// tracked branch, and a remote holding anything else does not get a branch
-	// nobody agreed on — the name came from local HEAD, and the push would
-	// succeed. The cost to an operator who genuinely wants a dedicated branch
-	// is one deliberate manual `git push -u`.
-	if !knowsCounterpart {
+	case errors.Is(err, git.ErrVaultWrittenMidRun):
+		// An aborted run, and the abort tier reports nothing above debug: the
+		// vault is being written where the incoming change lands, which is
+		// news about the next few seconds rather than about obsync (§7).
+		l.log.Debug("the sync run was abandoned rather than applying over a file being written",
+			"problem", err)
+		return nil
+	case errors.Is(err, git.ErrNoUpstreamCounterpart):
+		// §3's sharpest rule, and the one place obsync may create a ref on the
+		// remote. The remote does not hold the tracked branch, so it is asked
+		// what it does hold before any bytes go: a remote with no refs at all
+		// is a brand-new one and the push creates the tracked branch, and a
+		// remote holding anything else does not get a branch nobody agreed on
+		// — the name came from local HEAD, and the push would succeed. The
+		// cost to an operator who genuinely wants a dedicated branch is one
+		// deliberate manual `git push -u`.
 		withheld, err := l.repo.RemoteHoldsRefsButNotTrackedBranch(ctx)
 		if err != nil {
 			l.backOff(now)
@@ -376,8 +482,37 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 					"no restart needed")
 			return nil
 		}
+		l.networkSucceeded()
+		return l.push(ctx, now)
+	case err != nil:
+		l.backOff(now)
+		return err
 	}
+	l.networkSucceeded()
 
+	switch state {
+	case git.Ahead:
+		return l.push(ctx, now)
+	case git.Behind:
+		// A run that changed something says so, and this changed the vault
+		// (§9): someone else's edit is now in front of the human.
+		l.log.Info("the vault caught up with the remote", "branch", l.repo.TrackedBranch())
+	case git.Diverged:
+		// Both sides moved, which is the designed-for case rather than an
+		// anomaly — and the out-of-tree merge that keeps both is #30's. Until
+		// it lands obsync holds its commits locally rather than pushing them:
+		// the push could only be refused, since every write to the remote is a
+		// fast-forward or it does not happen (§3).
+		l.log.Debug("the vault and the remote have both changed", "branch", l.repo.TrackedBranch())
+	}
+	// Equal, or reconciled: a run that changed nothing says nothing, because
+	// docker logs --since 1h being empty is a designed signal (§9).
+	return nil
+}
+
+// push sends the tracked branch, and is the only thing in a sync run that
+// writes to the remote.
+func (l *Loop) push(ctx context.Context, now time.Time) error {
 	// The push floor, off by default: a lower bound between pushes, checked
 	// here on the loop obsync already turns rather than kept by a second timer.
 	if !l.lastPush.IsZero() && now.Sub(l.lastPush) < pushFloor {

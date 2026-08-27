@@ -62,6 +62,15 @@ type vaultEnv struct {
 	finished chan struct{}
 	turning  bool
 	stopped  bool
+
+	// laptop is the other device's clone of the same remote, made on first use
+	// by remoteCommit.
+	laptop string
+
+	// cfg and logger are what obsync was built from, kept so that restart can
+	// build a second one over the same vault, remote and clock.
+	cfg    config.Config
+	logger *slog.Logger
 }
 
 // newVault builds a vault that is already a git repo with one commit, a bare
@@ -183,6 +192,7 @@ func newVaultToBootstrap(t *testing.T, reach func(*vaultEnv) (repoURL string, ex
 	// needs to see what DEBUG carries — every git invocation with its full
 	// argv (§9) — asks for it through the same variable an operator sets.
 	log := slog.New(slog.NewTextHandler(env.log, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	env.cfg, env.logger = cfg, log
 	env.syncLoop = loop.New(cfg, log, env.clock, env.wakes)
 	t.Cleanup(env.stop)
 	return env
@@ -771,6 +781,21 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	return waiter.ch
 }
 
+// drainDeadlines discards every deadline taken so far, so that a test waiting
+// for the next one is waiting for one it has not already seen. Its constituency
+// is a run with more than one network git in it: a fetch and a push each take
+// out a deadline of the same length, and a test that has to wait for the second
+// cannot tell it from the first by watching.
+func (c *fakeClock) drainDeadlines() {
+	for {
+		select {
+		case <-c.waits:
+		default:
+			return
+		}
+	}
+}
+
 // awaitDeadline blocks until obsync has taken out its next deadline, so that a
 // test never advances time past something that has not started waiting yet.
 func (c *fakeClock) awaitDeadline(t *testing.T) {
@@ -899,4 +924,124 @@ func (e *vaultEnv) commitsOnBranchYet(dir, branch string) string {
 	e.t.Helper()
 
 	return strings.TrimSpace(e.mustGit(dir, "rev-list", "--count", "refs/heads/"+branch))
+}
+
+// The other device, and the half of "bidirectional" this suite could not reach
+// before: a second clone of the same remote, where someone writes a note and
+// pushes it. It is a real clone driven by real git rather than a ref written by
+// hand, so what obsync fetches is what a remote really holds.
+func (e *vaultEnv) remoteCommit(path, content string) {
+	e.t.Helper()
+
+	laptop := e.laptopUpToDate()
+	full := filepath.Join(laptop, path)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		e.t.Fatalf("creating the folder for %q on the laptop: %v", path, err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		e.t.Fatalf("writing %q on the laptop: %v", path, err)
+	}
+	e.mustGit(laptop, "add", "-A")
+	e.mustGit(laptop, e.asAHuman("commit", "--quiet", "-m", "written on the laptop")...)
+	e.mustGit(laptop, "push", "--quiet", "file://"+e.remote, "refs/heads/main:refs/heads/main")
+}
+
+// remotePurgesItsTip is the operator who force-pushed to purge a leaked secret:
+// the commit at the remote's tip is gone, and the branch is force-pushed over
+// the vault's own history. This is the act obsync must never undo — the vault
+// is now *ahead* of the remote, so nothing but detection stands between the
+// purge and a push that restores it (§3, user story 35).
+//
+// The force is the human's, in their own clone. obsync has no such flag.
+func (e *vaultEnv) remotePurgesItsTip() {
+	e.t.Helper()
+
+	laptop := e.laptopUpToDate()
+	e.mustGit(laptop, "reset", "--hard", "--quiet", "HEAD~1")
+	e.mustGit(laptop, "push", "--quiet", "--force", "file://"+e.remote, "refs/heads/main:refs/heads/main")
+}
+
+// remoteRewritesItsHistory is the same act with something put back in its
+// place, which is what a real purge looks like: the tip is replaced rather than
+// removed, so the vault ends up diverged from the remote rather than ahead of
+// it, and it is the merge rather than the push that would resurrect what the
+// rewrite took out.
+func (e *vaultEnv) remoteRewritesItsHistory() {
+	e.t.Helper()
+
+	laptop := e.laptopUpToDate()
+	e.mustGit(laptop, "reset", "--hard", "--quiet", "HEAD~1")
+	if err := os.MkdirAll(filepath.Join(laptop, "Notes"), 0o755); err != nil {
+		e.t.Fatalf("creating Notes on the laptop: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(laptop, "Notes", "purged.md"), []byte("nothing to see\n"), 0o644); err != nil {
+		e.t.Fatalf("writing the note that replaces the purged one: %v", err)
+	}
+	e.mustGit(laptop, "add", "-A")
+	e.mustGit(laptop, e.asAHuman("commit", "--quiet", "-m", "the history someone rewrote")...)
+	e.mustGit(laptop, "push", "--quiet", "--force", "file://"+e.remote, "refs/heads/main:refs/heads/main")
+}
+
+// laptopUpToDate is that second clone, made on first use and brought up to the
+// remote's tip on every use — someone whose laptop is behind pulls before they
+// push, and a test is not about that.
+func (e *vaultEnv) laptopUpToDate() string {
+	e.t.Helper()
+
+	base := filepath.Dir(e.vault)
+	if e.laptop == "" {
+		e.laptop = filepath.Join(base, "laptop")
+		e.mustGit(base, "clone", "--quiet", "file://"+e.remote, e.laptop)
+		if err := os.MkdirAll(filepath.Join(e.laptop, "Notes"), 0o755); err != nil {
+			e.t.Fatalf("creating Notes on the laptop: %v", err)
+		}
+		return e.laptop
+	}
+	e.mustGit(e.laptop, "fetch", "--quiet", "file://"+e.remote, "refs/heads/main")
+	e.mustGit(e.laptop, "reset", "--hard", "--quiet", "FETCH_HEAD")
+	return e.laptop
+}
+
+// asAHuman prefixes a git argv with an identity that is not obsync's, so that a
+// commit made by the test is visibly not one obsync made.
+func (e *vaultEnv) asAHuman(args ...string) []string {
+	return append(append([]string{}, humanIdentity...), args...)
+}
+
+// vaultTip and remoteTip are the two commits a sync run exists to bring
+// together. Equal means the vault and the remote hold the same history, which
+// is a fast-forward's whole result — and, unlike a commit count, says so even
+// when both sides have the same number of commits.
+func (e *vaultEnv) vaultTip() string {
+	e.t.Helper()
+	return strings.TrimSpace(e.mustGit(e.vault, "rev-parse", "refs/heads/main"))
+}
+
+func (e *vaultEnv) remoteTip() string {
+	e.t.Helper()
+	return strings.TrimSpace(e.mustGit(e.remote, "rev-parse", "refs/heads/main"))
+}
+
+// remoteBranches is every branch the remote holds, which is how "obsync pushes
+// straight to the tracked branch — no device branch" is asserted: the absence
+// of a second branch rather than the presence of the first.
+func (e *vaultEnv) remoteBranches() []string {
+	e.t.Helper()
+
+	out := e.mustGit(e.remote, "for-each-ref", "--format=%(refname)", "refs/heads/")
+	return strings.Fields(out)
+}
+
+// restart is the operator's reflex: the container is stopped and started again,
+// which is the one thing that clears everything obsync holds in memory. The
+// vault, the remote and the clock are untouched — a restart does not rewind the
+// world — so what survives it is whatever obsync can re-derive from the repo.
+func (e *vaultEnv) restart() {
+	e.t.Helper()
+
+	e.stop()
+	e.stopped, e.turning = false, false
+	e.finished = make(chan struct{})
+	e.syncLoop = loop.New(e.cfg, e.logger, e.clock, e.wakes)
+	e.t.Cleanup(e.stop)
 }

@@ -470,11 +470,12 @@ func TestTheNextRunPushesWhatTheLastOneCouldNot(t *testing.T) {
 // killing a local command halfway is how this design manufactures the one state
 // it cannot recover from (§1).
 //
-// Measured: a run that commits and pushes drives thirteen git commands — five
-// of them writing the private git config, of which one is the credential
-// isolation's forced askpass — and takes out exactly one deadline to time one
-// of them out with. The credential helper is not among them: it is pinned per
-// invocation rather than written down (internal/git/isolation.go).
+// Measured: a run that commits, reconciles and pushes drives eighteen git
+// commands — five of them writing the private git config, of which one is the
+// credential isolation's forced askpass — and takes out exactly two deadlines,
+// one for each of the two that talk to the remote. The credential helper is not
+// among them: it is pinned per invocation rather than written down
+// (internal/git/isolation.go).
 //
 // The loop waits on the same clock for its own cadence, and those waits are not
 // timeouts: nothing is killed when one expires. So the assertion is both halves
@@ -489,9 +490,9 @@ func TestOnlyTheNetworkGitIsEverTimedOut(t *testing.T) {
 	env.wake()
 	env.stop()
 
-	if got, want := env.clock.networkDeadlinesTaken(), 1; got != want {
-		t.Errorf("obsync timed out %d gits in a run that committed and pushed, want %d — the "+
-			"push, and no local command (§1)", got, want)
+	if got, want := env.clock.networkDeadlinesTaken(), 2; got != want {
+		t.Errorf("obsync timed out %d gits in a run that committed, reconciled and pushed, want "+
+			"%d — the fetch and the push, and no local command (§1)", got, want)
 	}
 	for _, waited := range env.clock.waitsTaken() {
 		if waited == networkDeadline {
