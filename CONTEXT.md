@@ -65,6 +65,15 @@ and backs off independently of the local half.
 
 ### Timing
 
+**Wake interval**:
+The shortest gap the watcher leaves between two wake-ups. The first event after
+a quiet spell wakes the sync loop at once and everything inside the interval
+after it is folded into that one wake-up, so the cost of a bulk import is
+bounded by the interval rather than by the vault. It bounds the watcher's own
+output, never the loop's latency: what a wake-up says is that something
+happened, and a second one saying the same thing carries nothing.
+_Avoid_: event debounce, throttle, coalescing window
+
 **Quiet window**:
 How long the vault must go unmodified before a sync run is allowed to commit.
 Distinguishes "the human paused" from "the human is mid-sentence."

@@ -16,6 +16,7 @@ import (
 
 	"github.com/andyroberts2/obsync/internal/config"
 	"github.com/andyroberts2/obsync/internal/loop"
+	"github.com/andyroberts2/obsync/internal/watcher"
 )
 
 // This is seam 1: a real vault directory, a real bare remote reached over
@@ -47,11 +48,25 @@ type vaultEnv struct {
 	clock *fakeClock
 	log   *lockedBuffer
 
-	// wakes is the watcher: the channel that says something happened and never
-	// what. It is unbuffered, which is what makes a test deterministic — a
-	// second wake cannot be delivered until the run the first one started has
+	// wakes is the fake watcher: the channel that says something happened and
+	// never what. It is unbuffered, which is what makes a test deterministic —
+	// a second wake cannot be delivered until the run the first one started has
 	// finished, because the loop only looks at this channel between runs.
-	wakes chan struct{}
+	//
+	// It is what drives every test that is not about the watcher itself. The
+	// ones that are drive obsync's production watcher instead, over the same
+	// real vault, and then this channel is not the one the loop is listening
+	// to: watching says which.
+	wakes    chan struct{}
+	watching bool
+
+	// cfg and logger are what the loop is built from, held for two reasons: so
+	// that the loop can be built after the vault rather than with it — the
+	// production watcher needs the vault to exist before it can watch it — and
+	// so that restart can build a second loop over the same vault, remote and
+	// clock.
+	cfg    config.Config
+	logger *slog.Logger
 
 	syncLoop *loop.Loop
 
@@ -66,11 +81,6 @@ type vaultEnv struct {
 	// laptop is the other device's clone of the same remote, made on first use
 	// by remoteCommit.
 	laptop string
-
-	// cfg and logger are what obsync was built from, kept so that restart can
-	// build a second one over the same vault, remote and clock.
-	cfg    config.Config
-	logger *slog.Logger
 }
 
 // newVault builds a vault that is already a git repo with one commit, a bare
@@ -82,6 +92,26 @@ type vaultEnv struct {
 func newVault(t *testing.T) *vaultEnv {
 	t.Helper()
 	return newVaultReachedBy(t, nil)
+}
+
+// newWatchedVault is newVault with obsync's production watcher in place of the
+// fake one: a real inotify watch per directory in a real vault, waking a real
+// loop. It is still seam 1 — the vault, the remote and git are the same real
+// ones — and the clock is still injected, which is what lets a test say that
+// obsync noticed something before a tick could have been what noticed it.
+func newWatchedVault(t *testing.T) *vaultEnv {
+	t.Helper()
+
+	env := buildAttachedVault(t, nil)
+	env.watching = true
+	watching := watcher.Watch(env.vault, env.logger)
+	t.Cleanup(func() {
+		if err := watching.Close(); err != nil {
+			t.Errorf("closing the watcher: %v", err)
+		}
+	})
+	env.driveWith(watching.Wakes())
+	return env
 }
 
 // newVaultReachedBy is newVault with the route to the remote left to the
@@ -96,9 +126,8 @@ func newVault(t *testing.T) *vaultEnv {
 func newVaultReachedBy(t *testing.T, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
 	t.Helper()
 
-	env := newVaultToBootstrap(t, reach)
-	env.makeVaultARepoOn("main")
-	env.pushVaultTo("main")
+	env := buildAttachedVault(t, reach)
+	env.driveWith(env.wakes)
 	return env
 }
 
@@ -131,15 +160,39 @@ func (e *vaultEnv) pushVaultTo(branch string) {
 	e.mustGit(e.vault, "update-ref", "refs/remotes/"+config.RemoteName+"/"+branch, "refs/heads/"+branch)
 }
 
+// buildAttachedVault is newVaultReachedBy with nothing turning yet: the vault
+// an operator already has, its remote and the configuration, and no loop. The
+// production watcher has to be pointed at a vault that already exists, so the
+// two are built in that order and driveWith joins them.
+func buildAttachedVault(t *testing.T, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
+	t.Helper()
+
+	env := buildVault(t, reach)
+	env.makeVaultARepoOn("main")
+	env.pushVaultTo("main")
+	return env
+}
+
 // newVaultToBootstrap builds the two things bootstrap decides about — a bare
 // remote and the directory obsync is pointed at — and stops there. The
 // directory exists and is empty, the remote holds no refs, and what either of
 // them holds next is the test's to say, because that pair is the whole of what
 // bootstrap reads (§3, gate 2).
 //
-// Every environment in this suite comes through here; newVaultReachedBy is this
-// plus a vault that is already a repo, which is the case obsync attaches to.
+// Every environment in this suite is built out of the same two directories;
+// newVaultReachedBy is this plus a vault that is already a repo, which is the
+// case obsync attaches to.
 func newVaultToBootstrap(t *testing.T, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
+	t.Helper()
+
+	env := buildVault(t, reach)
+	env.driveWith(env.wakes)
+	return env
+}
+
+// buildVault is newVaultToBootstrap with nothing turning yet: the two
+// directories bootstrap decides about, and the configuration, and no loop.
+func buildVault(t *testing.T, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
 	t.Helper()
 
 	base := t.TempDir()
@@ -191,11 +244,19 @@ func newVaultToBootstrap(t *testing.T, reach func(*vaultEnv) (repoURL string, ex
 	// The level is the resolved one rather than a fixed Info, so a test that
 	// needs to see what DEBUG carries — every git invocation with its full
 	// argv (§9) — asks for it through the same variable an operator sets.
-	log := slog.New(slog.NewTextHandler(env.log, &slog.HandlerOptions{Level: cfg.LogLevel}))
-	env.cfg, env.logger = cfg, log
-	env.syncLoop = loop.New(cfg, log, env.clock, env.wakes)
-	t.Cleanup(env.stop)
+	env.cfg = cfg
+	env.logger = slog.New(slog.NewTextHandler(env.log, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	return env
+}
+
+// driveWith builds the loop the rest of this harness turns, woken by the
+// channel it is given. Every test drives one of exactly two: the fake watcher's
+// channel, or the production watcher's.
+func (e *vaultEnv) driveWith(wakes <-chan struct{}) {
+	e.t.Helper()
+
+	e.syncLoop = loop.New(e.cfg, e.logger, e.clock, wakes)
+	e.t.Cleanup(e.stop)
 }
 
 // newVaultToBootstrapWith is newVaultToBootstrap with further variables on the
@@ -388,6 +449,9 @@ func (e *vaultEnv) advance(d time.Duration) {
 func (e *vaultEnv) watcherWake() {
 	e.t.Helper()
 
+	if e.watching {
+		e.t.Fatal("this vault is watched for real; a wake-up comes from writing in it, not from here")
+	}
 	select {
 	case e.wakes <- struct{}{}:
 	case <-time.After(30 * time.Second):
@@ -410,6 +474,10 @@ func (e *vaultEnv) watcherWake() {
 func (e *vaultEnv) watcherGone() {
 	e.t.Helper()
 
+	if e.watching {
+		e.t.Fatal("this vault is watched for real; its watcher stands down when it cannot watch, " +
+			"not when a test says so")
+	}
 	if !e.turning {
 		e.t.Fatal("nothing is turning to lose its watcher")
 	}
@@ -557,6 +625,18 @@ func (e *vaultEnv) remoteHoldsYet(path string) bool {
 
 	_, code := e.git(e.remote, "cat-file", "-e", "refs/heads/main:"+path)
 	return code == 0
+}
+
+// remoteContentYet is remoteFile without stopping obsync: what the remote's tip
+// holds at a path, and whether it holds anything there at all.
+func (e *vaultEnv) remoteContentYet(path string) (string, bool) {
+	e.t.Helper()
+
+	out, code := e.git(e.remote, "cat-file", "blob", "refs/heads/main:"+path)
+	if code != 0 {
+		return "", false
+	}
+	return out, true
 }
 
 func (e *vaultEnv) commitsSoFar(dir string) string {
@@ -781,11 +861,13 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	return waiter.ch
 }
 
-// drainDeadlines discards every deadline taken so far, so that a test waiting
-// for the next one is waiting for one it has not already seen. Its constituency
-// is a run with more than one network git in it: a fetch and a push each take
-// out a deadline of the same length, and a test that has to wait for the second
-// cannot tell it from the first by watching.
+// drainDeadlines discards every deadline obsync has taken out so far, so that a
+// test waiting for the next one is waiting for one it has not already seen. It
+// has two constituencies: a run with more than one network git in it, where a
+// fetch and a push each take out a deadline of the same length and a test that
+// has to wait for the second cannot tell it from the first by watching; and a
+// test that has just waited on the OS rather than on obsync, and therefore does
+// not know how many wake-ups arrived.
 func (c *fakeClock) drainDeadlines() {
 	for {
 		select {
@@ -1054,6 +1136,5 @@ func (e *vaultEnv) restart() {
 	e.stop()
 	e.stopped, e.turning = false, false
 	e.finished = make(chan struct{})
-	e.syncLoop = loop.New(e.cfg, e.logger, e.clock, e.wakes)
-	e.t.Cleanup(e.stop)
+	e.driveWith(e.wakes)
 }

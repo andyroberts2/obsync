@@ -6,7 +6,7 @@
 // (§1–§12) throughout this repo are its sections. This build recognises the
 // declared surface's subcommands (§10), reports the build version, resolves the
 // config surface (§8), and turns a sync loop that commits the vault and pushes
-// it (#24).
+// it (#24), woken by a watch on the vault (#39).
 package main
 
 import (
@@ -22,6 +22,7 @@ import (
 	"github.com/andyroberts2/obsync/internal/config"
 	"github.com/andyroberts2/obsync/internal/credential"
 	"github.com/andyroberts2/obsync/internal/loop"
+	"github.com/andyroberts2/obsync/internal/watcher"
 )
 
 // version is stamped at link time with -ldflags "-X main.version=<version>",
@@ -127,14 +128,17 @@ func syncLoop(environ []string, stderr io.Writer) int {
 		return 1
 	}
 
-	// The watcher is the loop's other injected dependency and it does not
-	// exist yet (#39), so a nil channel is what obsync runs on: nothing but
-	// the tick wakes it. That is tick-only mode, which is a mode obsync has
-	// anyway — the mode a vault with no watch budget left runs in — rather
-	// than a placeholder to remove. Latency is the tick until #39 lands; what
-	// obsync commits is the same either way, because every run asks git what
-	// changed and the watcher never says.
-	l := loop.New(cfg, log, clock.System{}, nil)
+	// The watcher is the loop's other injected dependency: an inotify watch on
+	// every directory in the vault, whose whole contribution is to wake the
+	// loop sooner than the next tick would. It never says what changed — every
+	// run asks git — so a watcher that cannot watch costs latency and nothing
+	// else, which is why it is started rather than checked: it answers a vault
+	// it cannot watch with tick-only mode and a WARN, never with a refusal to
+	// sync.
+	watching := watcher.Watch(cfg.VaultPath, log)
+	defer func() { _ = watching.Close() }()
+
+	l := loop.New(cfg, log, clock.System{}, watching.Wakes())
 	defer func() { _ = l.Close() }()
 
 	l.Run(ctx)
