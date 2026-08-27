@@ -79,8 +79,8 @@ services:
       # Required for an http(s) remote, and a file rather than a variable so
       # that rotating the token is a write rather than a redeploy: obsync
       # re-reads it every time git asks for a credential. An `ssh://` or
-      # scp-style remote needs no variable at all — mount the key and a
-      # known_hosts at /home/obsync/.ssh instead.
+      # scp-style remote needs no variable at all — it needs the two mounts
+      # commented out under `volumes:` below instead.
       OBSYNC_TOKEN_FILE: /run/secrets/obsync-token
 
     volumes:
@@ -94,6 +94,29 @@ services:
       # Read-only, because obsync only ever reads it. The token never reaches a
       # URL, an argv, a log line or `git remote -v`.
       - ./secrets/obsync-token:/run/secrets/obsync-token:ro
+
+      # **Load-bearing documentation** (§8, #12 —
+      # https://github.com/andyroberts2/obsync/issues/12). For an `ssh://` or
+      # scp-style remote, uncomment both of these and drop OBSYNC_TOKEN_FILE
+      # above. obsync stores and manages neither file; SSH needs no knobs, and
+      # this is what "arrives as an ordinary mount" means here.
+      #
+      # The second one is the one nobody expects, and leaving it out is silent.
+      # `user:` above names a UID the image has no `/etc/passwd` entry for — by
+      # design, that is the whole point of it — and ssh reads the home directory
+      # it expands `~` to out of that entry rather than out of HOME. Measured in
+      # obsync's own image: with no entry ssh exits before it reads any
+      # configuration (`No user exists for uid 1000`), and with an entry whose
+      # home is somewhere else it looks for the key somewhere else. Either way
+      # git reports a remote it could not read, which obsync tiers as an
+      # unreachable remote — so a wrong or absent passwd line is a vault that is
+      # quietly not backed up for a day before anything says so. One line for
+      # this UID is the whole file, and its home field must be the image's HOME:
+      #
+      #   obsync:x:1000:1000:obsync:/home/obsync:/sbin/nologin
+      #
+      # - ./secrets/ssh:/home/obsync/.ssh:ro
+      # - ./secrets/passwd:/etc/passwd:ro
 
     # Longer than Docker's 10s default, and that is not a preference. On SIGTERM
     # obsync refuses to start a new run, finishes the one in flight, and exits,

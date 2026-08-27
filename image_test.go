@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,8 +63,10 @@ const ciWorkflow = ".github/workflows/ci.yml"
 // than unique ones, so that a re-run reuses the layer cache; every *container*
 // and *volume* below is named per test and removed by it.
 const (
-	seam2Tag      = "obsync:seam2"
-	seam2FloorTag = "obsync:seam2-floor"
+	seam2Tag         = "obsync:seam2"
+	seam2FloorTag    = "obsync:seam2-floor"
+	seam2NoPasswdTag = "obsync:seam2-nopasswd"
+	seam2SSHTag      = "obsync:seam2-ssh"
 )
 
 // obsyncUID is what this suite runs obsync as: an arbitrary UID:GID pair with
@@ -242,6 +245,12 @@ func TestTheImagesBinaryIsStaticAndNamesNoLoader(t *testing.T) {
 // what earns Docker's `user:` line the right to replace a PUID/PGID knob (§8).
 func seam2Volume(t *testing.T, purpose, owner string) string {
 	t.Helper()
+
+	// The seeding container is the shipped image's own git, so the shipped
+	// image has to exist — asked for here rather than remembered at each call
+	// site, because a caller running a *derived* image would otherwise be one
+	// forgotten line away from seeding against nothing.
+	seam2Image(t)
 
 	name := fmt.Sprintf("obsync-seam2-%s-%d", purpose, os.Getpid())
 	_, _, _ = dockerRun(t, "volume", "rm", "-f", name)
@@ -456,6 +465,195 @@ func imageSize(t *testing.T, image string) int64 {
 	return size
 }
 
+// withNoPasswdEntries is the shipped image with its passwd file emptied.
+//
+// It exists because the property this suite is here for — obsync working as a
+// UID with no `/etc/passwd` entry — is not what a running container on every
+// runtime actually presents. Docker leaves the image's passwd file alone, so a
+// UID its `user:` names genuinely has no entry; rootless podman *synthesises*
+// one for it, name, home and all. So on this sandbox's podman-backed socket
+// every container the rest of this suite starts has an entry after all, and the
+// claim would pass for a reason unrelated to the image.
+//
+// Emptying the file reproduces Docker's condition on a runtime that would
+// otherwise hide it, and reproduces it strictly harder: no UID has an entry
+// rather than merely this one. obsync never runs as root here, so nothing is
+// lost by root losing its entry too.
+func withNoPasswdEntries(dockerfile string) string {
+	return asRoot(dockerfile, "rm -f /etc/passwd && ln -s /dev/null /etc/passwd")
+}
+
+// The whole loop, in the image, as a UID with genuinely no passwd entry.
+//
+// This is §1's claim about the image stated as behaviour rather than as a fact
+// about a file: identity comes from obsync's private git config, so nothing on
+// the path from an empty vault directory to a commit in the bare remote may
+// need a passwd entry to exist. The neighbouring test checks that the image
+// bakes no entry; this one checks that none is needed, which is the half a
+// runtime that synthesises one would otherwise answer on the image's behalf.
+func TestTheImageSyncsAsAUIDWithGenuinelyNoPasswdEntry(t *testing.T) {
+	needsSeam2(t)
+	t.Parallel()
+
+	image := derivedImage(t, seam2NoPasswdTag, "no passwd entries at all", withNoPasswdEntries)
+	volume := seam2Volume(t, "nopasswd", obsyncUID)
+	container := startObsync(t, image, volume, nil)
+
+	// The *container's* own view rather than the image's, which is the whole
+	// difference between this test and its neighbour: a runtime that
+	// synthesises an entry would leave that one measuring an image nobody runs.
+	uid, _, _ := strings.Cut(obsyncUID, ":")
+	if entry, _, code := dockerRun(t, "exec", container, "getent", "passwd", uid); code == 0 {
+		t.Fatalf("obsync is running in a container that does have a passwd entry for its own UID "+
+			"(%q), so this test is not measuring the thing it is named after", strings.TrimSpace(entry))
+	}
+
+	waitFor(t, "obsync to clone the remote into the vault", func() bool {
+		_, _, code := dockerRun(t, "exec", container, "test", "-f", "/data/vault/Welcome.md")
+		return code == 0
+	})
+
+	docker(t, "exec", container, "sh", "-c",
+		`mkdir -p /data/vault/Daily && printf 'a note\n' > "/data/vault/Daily/2026-08-27.md"`)
+	waitFor(t, "the note to reach the bare remote", func() bool {
+		return strings.Contains(remoteTree(t, container), "Daily/2026-08-27.md")
+	})
+
+	if _, _, code := dockerRun(t, "exec", container, "obsync", "healthcheck"); code != 0 {
+		t.Errorf("obsync healthcheck exited %d as a UID with no passwd entry over a vault it had "+
+			"just published, want 0: no part of obsync reads that file, which is what makes "+
+			"Docker's `user:` line enough on its own (§1, §8)\n%s",
+			code, docker(t, "exec", container, "obsync", "status"))
+	}
+}
+
+// SSH is the one thing in the image that does read the passwd file, and the
+// reference compose is what tells an operator so.
+//
+// §8 accepts `ssh://` and scp-style remotes and gives them no knobs at all: the
+// key and a `known_hosts` arrive as ordinary mounts. The image names HOME as
+// where they go. But ssh expands `~` out of the UID's passwd entry and never
+// out of HOME, and with no entry at all it exits before reading any
+// configuration — so on a real Docker, where `user: "1000:1000"` names a UID
+// this image deliberately has no entry for, an unmounted or wrongly-homed
+// passwd line means git reports a remote it could not read. obsync tiers that
+// as an unreachable remote, which is healthy and silent for a day (§9): the
+// expensive direction. That is what earns the passwd mount its place in a
+// normative file, and this is the measurement it rests on.
+//
+// The positive half is the promise: with the line the compose documents, the
+// key mounted where the compose says lands where ssh looks. `ssh -G` is what is
+// asked because there is no reachable sshd here and none is wanted — it is
+// ssh's own canonical view of the configuration it would use, and the
+// known-hosts path is the one `~` it prints expanded.
+func TestTheImagesSSHTransportFindsTheKeyWhereTheReferenceComposeSaysToMountIt(t *testing.T) {
+	needsSeam2(t)
+	t.Parallel()
+
+	home := shippedHome(t)
+	uid, _, _ := strings.Cut(obsyncUID, ":")
+
+	withEntry := derivedImage(t, seam2SSHTag, "a passwd entry the compose documents",
+		func(dockerfile string) string {
+			return asRoot(dockerfile, "printf 'obsync:x:"+uid+":"+uid+":obsync:"+home+
+				":/sbin/nologin\\n' >> /etc/passwd")
+		})
+
+	knownHosts := sshResolves(t, withEntry, "userknownhostsfile")
+	if want := path.Join(home, ".ssh"); !strings.HasPrefix(knownHosts, want+"/") {
+		t.Errorf("with the passwd entry the reference compose documents, ssh looks for known_hosts "+
+			"at %q rather than under %q — so the mount the compose tells an operator to make is "+
+			"not the directory ssh reads, and an ssh remote silently never authenticates (§8)",
+			knownHosts, want)
+	}
+
+	// And the reason the line is there at all. A red assertion here is good
+	// news rather than a defect: it means ssh no longer needs the entry, and
+	// the compose's second mount can go.
+	noEntry := derivedImage(t, seam2NoPasswdTag, "no passwd entries at all", withNoPasswdEntries)
+	// The same pins obsync puts on every git it runs, so that a build where ssh
+	// got further than it does today asks nobody anything and waits for nothing.
+	stdout, stderr, _ := dockerRun(t, "run", "--rm", "--user", obsyncUID, "--entrypoint", "sh",
+		"--env", "GIT_TERMINAL_PROMPT=0",
+		"--env", "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=5",
+		noEntry, "-c", "git ls-remote ssh://git@127.0.0.1/owner/vault.git")
+	if said := stdout + stderr; !strings.Contains(said, "No user exists for uid "+uid) {
+		t.Errorf("with no passwd entry, git's ssh transport said %q — the reference compose "+
+			"documents a passwd mount because ssh refuses to start without one, and if that has "+
+			"stopped being true the mount has stopped being load-bearing (§8, §11)", said)
+	}
+
+	// The compose is where the whole instruction lives, and a load-bearing line
+	// is never cut for brevity: its absence is a defect rather than a gap.
+	const passwdMount = ":/etc/passwd:ro"
+	if compose := read(t, referenceCompose); !strings.Contains(compose, passwdMount) {
+		t.Errorf("%s names no %q mount for an ssh remote. It is the one thing in the SSH path an "+
+			"operator cannot infer, it is silent when missing, and this file is the one whose "+
+			"correctness they inherit by copying it (§8, §11)", referenceCompose, passwdMount)
+	}
+}
+
+// sshResolves is what the image's own ssh makes of one of its configuration
+// keys, for a host it never contacts.
+func sshResolves(t *testing.T, image, key string) string {
+	t.Helper()
+
+	said := docker(t, "run", "--rm", "--user", obsyncUID, "--entrypoint", "ssh", image,
+		"-G", "vault.example.invalid")
+	for _, line := range strings.Split(said, "\n") {
+		if name, value, found := strings.Cut(strings.TrimSpace(line), " "); found && name == key {
+			// ssh lists more than one known_hosts file; the first is the one it
+			// writes and the one an operator mounts.
+			first, _, _ := strings.Cut(value, " ")
+			return first
+		}
+	}
+	t.Fatalf("the image's ssh reported no %s:\n%s", key, said)
+	return ""
+}
+
+// obsync is PID 1, and PID 1 is where a missing signal handler stops being a
+// slow shutdown and becomes no shutdown at all: the kernel applies no default
+// action for a signal PID 1 has not asked for, so a SIGTERM obsync did not
+// handle would be discarded rather than kill it, and Docker would SIGKILL the
+// container at the end of the grace period instead.
+//
+// That is exactly what the reference compose's `stop_grace_period` is set
+// against, so the period is read from the compose rather than typed here: what
+// is under test is that an operator who copies that file gets a container which
+// finishes the run it is in and exits, rather than one killed part-way through
+// applying a tree (§1, §11).
+func TestTheImageExitsOnSIGTERMWithinTheReferenceComposesGracePeriod(t *testing.T) {
+	needsSeam2(t)
+	t.Parallel()
+
+	grace, err := time.ParseDuration(composeConfig(t, referenceCompose).Services["obsync"].StopGracePeriod)
+	if err != nil {
+		t.Fatalf("reading the reference compose's stop_grace_period: %v", err)
+	}
+
+	image := seam2Image(t)
+	volume := seam2Volume(t, "sigterm", obsyncUID)
+	container := startObsync(t, image, volume, nil)
+
+	// Stopped once it is demonstrably in the loop rather than still starting,
+	// so that what SIGTERM interrupts is obsync's own wait.
+	waitFor(t, "obsync to clone the remote into the vault", func() bool {
+		_, _, code := dockerRun(t, "exec", container, "test", "-f", "/data/vault/Welcome.md")
+		return code == 0
+	})
+
+	docker(t, "stop", "--timeout", strconv.Itoa(int(grace.Seconds())), container)
+
+	code := strings.TrimSpace(docker(t, "inspect", "--format", "{{.State.ExitCode}}", container))
+	if code != "0" {
+		t.Errorf("the container exited %s after `docker stop` inside the reference compose's %s "+
+			"grace period, want 0. 137 is the SIGKILL that follows a SIGTERM nothing acted on, and "+
+			"a container killed mid-run is how a shutdown manufactures a half-applied tree (§1)",
+			code, grace)
+	}
+}
+
 // The whole of what obsync does, in the image, as an arbitrary UID: it clones
 // the remote into an empty vault directory, commits what somebody writes there,
 // and pushes it — and Docker's own health signal says so.
@@ -594,6 +792,70 @@ func TestCIReadsTheBaseImageFromTheDockerfileRatherThanRepeatingIt(t *testing.T)
 	}
 }
 
+// CI runs the seam-2 tests by name, so a seam-2 test whose name the workflow's
+// own `-run` does not match is one that runs nowhere: skipped in every ordinary
+// loop because it asks for SEAM2, and never selected in the one job that sets
+// it. That is a silent gap rather than a red build, which is the direction this
+// project treats as expensive, and the selection is a regular expression in a
+// YAML file that nothing else reads.
+//
+// So the pattern is taken from the workflow and matched against every test in
+// this file that asks for seam 2.
+func TestCIRunsEverySeam2TestItsPatternCanSelect(t *testing.T) {
+	t.Parallel()
+
+	pattern := seam2Selection(t)
+	selects, err := regexp.Compile(pattern)
+	if err != nil {
+		t.Fatalf("%s selects the seam-2 tests with %q, which is not a regular expression: %v",
+			ciWorkflow, pattern, err)
+	}
+
+	for _, name := range seam2Tests(t) {
+		if !selects.MatchString(name) {
+			t.Errorf("%s is a seam-2 test and %s selects seam-2 tests with %q, which does not "+
+				"match it — so it is skipped everywhere SEAM2 is unset and never chosen where it "+
+				"is set, and the thing it checks about the image is checked nowhere (§12)",
+				name, ciWorkflow, pattern)
+		}
+	}
+}
+
+// seam2Selection is the `-run` pattern the workflow hands `go test`.
+func seam2Selection(t *testing.T) string {
+	t.Helper()
+
+	_, after, found := strings.Cut(read(t, ciWorkflow), "-run '")
+	pattern, _, closed := strings.Cut(after, "'")
+	if !found || !closed {
+		t.Fatalf("%s no longer selects the seam-2 tests with a quoted -run pattern, so this check "+
+			"cannot tell whether the job runs them all", ciWorkflow)
+	}
+	return pattern
+}
+
+// seam2Tests is every test in this file that asks for seam 2, by name.
+func seam2Tests(t *testing.T) []string {
+	t.Helper()
+
+	var asked []string
+	// Split on the declaration rather than parsed: what is wanted is which
+	// function bodies mention the switch, and a body is everything up to the
+	// next top-level `func`.
+	for _, function := range strings.Split(read(t, "image_test.go"), "\nfunc ") {
+		name, body, isFunction := strings.Cut(function, "(t *testing.T) {")
+		if !isFunction || !strings.HasPrefix(name, "Test") || !strings.Contains(body, "needsSeam2(t)") {
+			continue
+		}
+		asked = append(asked, name)
+	}
+	if len(asked) == 0 {
+		t.Fatalf("no test in image_test.go asks for seam 2, which cannot be right while this file " +
+			"is the seam-2 suite")
+	}
+	return asked
+}
+
 // lastFrom is the Dockerfile's final FROM line — the base the image ships on,
 // as against the builder it is compiled in.
 func lastFrom(t *testing.T) string {
@@ -659,7 +921,6 @@ func TestTheImageFreezesRatherThanCrashingOnAGitBelowTheFloor(t *testing.T) {
 	// base image bumps to.
 	const unreachableFloor = "99.0.0"
 
-	seam2Image(t)
 	image := buildAtFloor(t, unreachableFloor)
 	volume := seam2Volume(t, "floor", obsyncUID)
 	container := startObsync(t, image, volume, nil)
@@ -701,23 +962,81 @@ func TestTheImageFreezesRatherThanCrashingOnAGitBelowTheFloor(t *testing.T) {
 func buildAtFloor(t *testing.T, floor string) string {
 	t.Helper()
 
-	const copiesTheSource = "COPY . .\n"
-	dockerfile := read(t, "Dockerfile")
-	if !strings.Contains(dockerfile, copiesTheSource) {
-		t.Fatalf("the Dockerfile no longer copies the source with %q, so this test cannot raise "+
-			"the floor inside the build it is testing", strings.TrimSpace(copiesTheSource))
-	}
-	raised := strings.Replace(dockerfile, copiesTheSource,
-		copiesTheSource+"RUN printf '"+floor+"\\n' > internal/git/GIT_FLOOR\n", 1)
+	return derivedImage(t, seam2FloorTag, "a raised git floor", func(dockerfile string) string {
+		const copiesTheSource = "COPY . .\n"
+		if !strings.Contains(dockerfile, copiesTheSource) {
+			t.Fatalf("the Dockerfile no longer copies the source with %q, so this test cannot "+
+				"raise the floor inside the build it is testing", strings.TrimSpace(copiesTheSource))
+		}
+		return strings.Replace(dockerfile, copiesTheSource,
+			copiesTheSource+"RUN printf '"+floor+"\\n' > internal/git/GIT_FLOOR\n", 1)
+	})
+}
 
-	path := filepath.Join(t.TempDir(), "Dockerfile.floor")
-	if err := os.WriteFile(path, []byte(raised), 0o600); err != nil {
-		t.Fatalf("writing the raised-floor Dockerfile: %v", err)
+// derivedImage builds the shipped Dockerfile with one change applied to it, and
+// returns the tag.
+//
+// The shipped file with a line in it rather than a second Dockerfile that would
+// drift from it: everything the image is — the pinned base, the static build,
+// the entrypoint, the healthcheck, the default USER — has to be the shipped
+// thing for what the derived image does to mean anything about the shipped one.
+//
+// Serialized, because the tags are fixed so that a re-run reuses the layer
+// cache, and two parallel tests asking for the same one would otherwise race on
+// it. A second build of an unchanged Dockerfile is a cache hit rather than a
+// cost.
+var derivedBuilds sync.Mutex
+
+func derivedImage(t *testing.T, tag, purpose string, change func(string) string) string {
+	t.Helper()
+
+	derivedBuilds.Lock()
+	defer derivedBuilds.Unlock()
+
+	path := filepath.Join(t.TempDir(), "Dockerfile.derived")
+	if err := os.WriteFile(path, []byte(change(read(t, "Dockerfile"))), 0o600); err != nil {
+		t.Fatalf("writing the Dockerfile for %s: %v", purpose, err)
 	}
-	if err := buildTaggedImage(seam2FloorTag, path); err != nil {
-		t.Fatalf("building the image at a raised floor: %v", err)
+	if err := buildTaggedImage(tag, path); err != nil {
+		t.Fatalf("building the image with %s: %v", purpose, err)
 	}
-	return seam2FloorTag
+	return tag
+}
+
+// asRoot is a command run as root at the end of the shipped Dockerfile, with
+// the shipped image's own default USER put back afterwards — so the only thing
+// the derived image differs by is the command itself.
+func asRoot(dockerfile, command string) string {
+	return dockerfile + "\nUSER 0:0\nRUN " + command + "\n" + shippedUser(dockerfile) + "\n"
+}
+
+// shippedUser is the Dockerfile's final USER line, and shippedHome the value of
+// its final ENV HOME. Read rather than repeated, so that a derived image cannot
+// quietly restore a different identity from the one the image ships with, and
+// so that "the key goes in HOME" is one fact rather than two.
+func shippedUser(dockerfile string) string { return lastDirective(dockerfile, "USER ") }
+
+func shippedHome(t *testing.T) string {
+	t.Helper()
+
+	home := strings.TrimPrefix(lastDirective(read(t, "Dockerfile"), "ENV HOME="), "ENV HOME=")
+	if home == "" {
+		t.Fatalf("the Dockerfile sets no HOME, and an arbitrary UID has no passwd entry to take " +
+			"one from — so there is nowhere documented for an ssh key to be mounted (§8)")
+	}
+	return home
+}
+
+// lastDirective is the last line of a Dockerfile starting with a prefix, with
+// its spacing collapsed, or "".
+func lastDirective(dockerfile, prefix string) string {
+	last := ""
+	for _, line := range strings.Split(dockerfile, "\n") {
+		if collapsed := strings.Join(strings.Fields(line), " "); strings.HasPrefix(collapsed, prefix) {
+			last = collapsed
+		}
+	}
+	return last
 }
 
 // The credential file is read every time git asks for a credential, so an

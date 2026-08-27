@@ -74,12 +74,23 @@ COPY --from=builder /out/obsync /usr/local/bin/obsync
 COPY --from=builder /src/LICENSE /usr/local/share/obsync/LICENSE
 
 # obsync runs as an arbitrary UID with no `/etc/passwd` entry, so HOME cannot
-# come from that file. It is named here so that the one thing an operator may
-# have to mount into it has a documented place to go: an ssh key and a
-# known_hosts, which is how SSH arrives given SSH needs no knobs (§8). Nothing
-# obsync writes goes here — its private git config is a per-process temporary
-# directory, and everything else it writes is an owned path inside the vault —
-# so the directory is not writable, and does not need to be.
+# come from that file and is named here instead. Nothing obsync writes goes
+# here — its private git config is a per-process temporary directory, and
+# everything else it writes is an owned path inside the vault — so the directory
+# is not writable, and does not need to be.
+#
+# It is also the documented place for the one thing an operator may have to
+# mount in: an ssh key and a known_hosts, which is how SSH arrives given SSH
+# needs no knobs (§8). That mount is necessary and **not sufficient**, and the
+# reference compose is where the whole instruction lives. Measured in this image
+# (alpine 3.23, OpenSSH 10.2, both a runtime that synthesises a passwd entry for
+# an unknown UID and one that does not): ssh resolves `~` from the UID's passwd
+# entry and never from HOME, and with no entry at all it exits before reading
+# any configuration — `No user exists for uid 1000`, which reaches obsync as an
+# unreachable remote and is therefore quiet for a day. So an SSH remote needs a
+# second ordinary mount, a passwd line for the UID whose home field is this
+# directory. obsync's own loop needs no entry, and seam 2 checks that with none
+# at all it still clones, commits and pushes.
 ENV HOME=/home/obsync
 RUN mkdir -p /home/obsync
 

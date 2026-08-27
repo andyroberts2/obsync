@@ -493,7 +493,11 @@ func (r *Repo) killGroup(cmd *exec.Cmd, waited <-chan error) {
 // is obsync reading its own config surface, and it must read the values this
 // obsync resolved rather than the block it resolved them from — which may hold
 // a name obsync warned about or a value it refused. Everything else survives,
-// because ssh reaches a key through HOME and that is how a key arrives (§8).
+// because the container's environment is the operator's: HOME among it, which
+// is where the image documents an ssh key and a known_hosts being mounted (§8).
+// ssh itself expands `~` from the UID's passwd entry rather than from HOME —
+// measured in the image, which is why the reference compose documents a passwd
+// mount beside the key — and nothing here tries to compensate for that.
 func (r *Repo) env() []string {
 	env := append(pinnedEnvironment(), r.isolation.environment()...)
 	return append(env, r.credentialEnvironment...)
