@@ -95,12 +95,12 @@ func ShowsMoreThanIgnoreFloor(dir string) (bool, string, error) {
 			return fs.SkipDir
 		}
 		if info.IsDir() {
-			if matchesIgnoreFloor(relative, true) {
+			if InIgnoreFloor(relative, true) {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if matchesIgnoreFloor(relative, false) {
+		if InIgnoreFloor(relative, false) {
 			return nil
 		}
 		shown = relative
@@ -112,9 +112,9 @@ func ShowsMoreThanIgnoreFloor(dir string) (bool, string, error) {
 	return shown != "", shown, nil
 }
 
-// matchesIgnoreFloor reports whether a path relative to the vault root is
-// covered by the ignore floor, under gitignore's own matching rules for the
-// shapes the floor uses:
+// InIgnoreFloor reports whether a path relative to the vault root is covered by
+// the ignore floor, under gitignore's own matching rules for the shapes the
+// floor uses:
 //
 //   - an entry ending in / matches a directory and everything under it;
 //   - an entry containing no / — before that trailing slash or otherwise —
@@ -133,12 +133,19 @@ func ShowsMoreThanIgnoreFloor(dir string) (bool, string, error) {
 // floor's whole purpose inverted (§5) — and #28 writes this same list into
 // .git/info/exclude, where git is what applies it, so a floor with two readings
 // is a floor that means two things.
-func matchesIgnoreFloor(relative string, isDir bool) bool {
+//
+// Exported for the one caller outside this package that asks about vault
+// *content* rather than about a commit: a conflict copy exists exactly while a
+// file matching the pattern exists (§4), and the floor is obsync's own
+// statement of which files in the vault are not the vault's content — so a copy
+// the human has moved into `.trash/` is one they have already dealt with. One
+// definition, because a second reading of the floor is a second floor.
+func InIgnoreFloor(relative string, isDir bool) bool {
 	return coveredBy(IgnoreFloor, relative, isDir)
 }
 
 // coveredBy reports whether a path relative to the vault root is covered by any
-// of a closed list of gitignore patterns, under the rules matchesIgnoreFloor
+// of a closed list of gitignore patterns, under the rules InIgnoreFloor
 // documents. The ignore floor, the churn subset and the refused-path list are
 // all such lists, and reading all three the same way is what keeps obsync's
 // answer and git's answer one answer.

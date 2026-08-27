@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1384,10 +1385,16 @@ func (e *vaultEnv) conflictCopies() []string {
 		if err != nil {
 			return err
 		}
-		if relative == ".git" {
-			return fs.SkipDir
+		// Only when it is a directory. A `.git` that is a file is a submodule
+		// or a linked worktree, and fs.SkipDir for something that is not a
+		// directory skips the rest of the vault root rather than the repo.
+		if info.IsDir() {
+			if relative == ".git" {
+				return fs.SkipDir
+			}
+			return nil
 		}
-		if !info.IsDir() && strings.Contains(relative, "(obsync conflict ") {
+		if strings.Contains(relative, "(obsync conflict ") {
 			found = append(found, filepath.ToSlash(relative))
 		}
 		return nil
@@ -1784,4 +1791,44 @@ func (e *vaultEnv) remoteRefusesPacksOver(bytes int) {
 	e.t.Helper()
 
 	e.mustGit(e.remote, "config", "receive.maxInputSize", strconv.Itoa(bytes))
+}
+
+// theVaultBecomesASubmoduleCheckout turns the vault's `.git` from a directory
+// into the *file* a submodule or a linked worktree has: the repository moves
+// out of the vault and a `gitdir:` pointer takes its place.
+//
+// It is a shape obsync attaches to deliberately rather than a curiosity —
+// resolveOwnedPaths asks git where the repository is for exactly this reason,
+// and it names the attention note as one of the writers that depends on the
+// answer. Everything obsync does still has to work when the vault root holds
+// `.git` as a file it can neither descend into nor own.
+func (e *vaultEnv) theVaultBecomesASubmoduleCheckout() {
+	e.t.Helper()
+
+	elsewhere := filepath.Join(filepath.Dir(e.vault), "vault.git")
+	if err := os.Rename(filepath.Join(e.vault, ".git"), elsewhere); err != nil {
+		e.t.Fatalf("moving the repository out of the vault: %v", err)
+	}
+	// core.worktree is what points the detached repository back at the vault,
+	// which is how git itself lays a submodule out.
+	e.mustGit(elsewhere, "config", "core.worktree", e.vault)
+	pointer := filepath.Join(e.vault, ".git")
+	if err := os.WriteFile(pointer, []byte("gitdir: "+elsewhere+"\n"), 0o644); err != nil {
+		e.t.Fatalf("writing the vault's gitdir pointer: %v", err)
+	}
+}
+
+// theHumanDeletesInObsidian is a note deleted from inside Obsidian with its own
+// trash rather than the system's: the file moves to the vault's `.trash/`,
+// which is a real folder in the vault and one the ignore floor covers (§5).
+func (e *vaultEnv) theHumanDeletesInObsidian(relative string) {
+	e.t.Helper()
+
+	trashed := filepath.Join(e.vault, ".trash", path.Base(relative))
+	if err := os.MkdirAll(filepath.Dir(trashed), 0o755); err != nil {
+		e.t.Fatalf("creating the vault's trash: %v", err)
+	}
+	if err := os.Rename(filepath.Join(e.vault, relative), trashed); err != nil {
+		e.t.Fatalf("moving %q to the vault's trash: %v", relative, err)
+	}
 }

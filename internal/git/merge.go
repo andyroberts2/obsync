@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/andyroberts2/obsync/internal/config"
+	"github.com/andyroberts2/obsync/internal/vault"
 )
 
 // The out-of-tree merge (§4).
@@ -830,10 +831,26 @@ func conflictCopyName(canonical string, at time.Time, counter int) string {
 // is about — the damage freeze is precisely the state where git cannot answer,
 // and the freeze section is what an operator needs most in that moment.
 //
-// `.git` is skipped, so obsync's own staging directory can never be read as a
-// copy. A name obsync cannot read back as one of its own is left out rather
-// than guessed at: the pattern belongs to obsync, and a note a human happened
-// to name that way is theirs.
+// The ignore floor is skipped along with it, and that is the pattern's own
+// scope rather than a courtesy: the floor is obsync's statement of which files
+// in the vault are not the vault's *content* (§5), and the commonest way a
+// human deletes the copy the note asks them to delete is Obsidian's own trash —
+// which moves it into `.trash/`, a floor entry. A copy still matching the
+// pattern in there is one they have already dealt with, and a section that went
+// on naming it would be a signal that never clears over a conflict that is
+// over.
+//
+// A `.git` *directory* is skipped, so obsync's own staging directory can never
+// be read as a copy. A `.git` that is a **file** is a submodule or a linked
+// worktree — a shape bootstrap attaches to deliberately, which is why
+// resolveOwnedPaths asks git where the repository is — and it is walked past
+// like any other file rather than skipped: `fs.SkipDir` returned for something
+// that is not a directory skips the rest of the *containing* directory, which
+// here is the vault root, and would hide every conflict copy in the vault.
+//
+// A name obsync cannot read back as one of its own is left out rather than
+// guessed at: the pattern belongs to obsync, and a note a human happened to
+// name that way is theirs.
 //
 // The order is the walk's, which is lexical and therefore the same every run —
 // which matters, because a note whose lines reordered themselves would be
@@ -848,13 +865,16 @@ func (r *Repo) OutstandingConflictCopies() ([]ConflictCopy, error) {
 		if err != nil {
 			return err
 		}
-		if relative == ".git" {
-			return fs.SkipDir
-		}
+		relative = filepath.ToSlash(relative)
 		if info.IsDir() {
+			if relative == ".git" || vault.InIgnoreFloor(relative, true) {
+				return fs.SkipDir
+			}
 			return nil
 		}
-		relative = filepath.ToSlash(relative)
+		if vault.InIgnoreFloor(relative, false) {
+			return nil
+		}
 		if canonical, mine := canonicalOf(relative); mine {
 			copies = append(copies, ConflictCopy{Path: relative, Of: canonical})
 		}

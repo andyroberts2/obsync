@@ -205,9 +205,9 @@ func writeUnsettledPaths(note *strings.Builder, unsettled []unsettledFor) {
 		"out of its commits\nand they are not reaching the remote. Everything else in your vault " +
 		"is syncing normally,\nand each of these commits on its own as soon as whatever is " +
 		"writing it stops.\n\n")
-	for _, path := range unsettled {
-		fmt.Fprintf(note, "- %s — moving every time obsync has looked at it, for %s\n",
-			asPath(path.path), path.since)
+	for _, moving := range unsettled {
+		fmt.Fprintf(note, "- %s — moving every time obsync has looked at it since %s\n",
+			asPath(moving.path), moving.since.UTC().Format(unsettledStamp))
 	}
 	note.WriteString("\n")
 }
@@ -241,16 +241,33 @@ func (l *Loop) refusedNow() []vault.Refusal {
 	return refused
 }
 
-// unsettledFor is one path this section names, and how long it has been moving
-// under obsync.
+// unsettledFor is one path this section names, and when obsync first saw it
+// moving.
+//
+// The instant rather than the elapsed time, and that is what lets the section
+// sit still. obsync's own writes are not suppressed from the watcher (§4), so a
+// line counting upwards would differ on every wake-up, defeat
+// ReconcileAttentionNote's byte comparison from inside the note's own content,
+// and make each run's write the wake that starts the next one. On the vault
+// this section is most likely to be about — one whose churn is a writer on
+// another host over NFS or SMB — inotify sees nothing of that writer, so the
+// note's own write is the only event there is, and a 60s tick becomes a
+// permanent quiet-window cycle over a vault nobody local is touching. The fact
+// obsync holds is the instant, and it does not move while the path does not
+// settle.
 type unsettledFor struct {
 	path  string
-	since time.Duration
+	since time.Time
 }
 
+// unsettledStamp is how that instant is written: UTC at minute precision, which
+// is as fine as a stamp a human reads off a note is worth and the same
+// precision a conflict copy's own name carries.
+const unsettledStamp = "2006-01-02 15:04 MST"
+
 // unsettledForLongNow is the paths that have stayed unsettled past the point
-// where exclusion stops being latency and starts being news, with how long each
-// has been that way.
+// where exclusion stops being latency and starts being news, with when obsync
+// first saw each of them move.
 //
 // The threshold is unsettledForLong and the reason for the number lives beside
 // it in cadence.go. It is asked of the elapsed time rather than of whether the
@@ -259,8 +276,8 @@ type unsettledFor struct {
 func (l *Loop) unsettledForLongNow(now time.Time) []unsettledFor {
 	var unsettled []unsettledFor
 	for path, record := range l.unsettled {
-		if moving := now.Sub(record.since); moving >= unsettledForLong {
-			unsettled = append(unsettled, unsettledFor{path: path, since: moving.Round(time.Second)})
+		if now.Sub(record.since) >= unsettledForLong {
+			unsettled = append(unsettled, unsettledFor{path: path, since: record.since})
 		}
 	}
 	slices.SortFunc(unsettled, func(a, b unsettledFor) int { return strings.Compare(a.path, b.path) })
@@ -275,11 +292,18 @@ func (l *Loop) unsettledForLongNow(now time.Time) []unsettledFor {
 // `[[Attachments/diagram.png]]` opens the image. A path holding one of the
 // characters a wikilink cannot carry is written as a plain path instead — a
 // broken link is worse than a name, because it looks like obsync got the name
-// wrong. Conflict copies never hold one, by construction (§4); the note beside
-// one belongs to the human and may.
+// wrong.
+//
+// Both halves of a pair are the human's own name: a conflict copy is the
+// canonical name with a marker in it (§4), so `Notes/[draft] plan.md` and its
+// copy alike fall to a plain path. A newline is on the list for asPath's
+// reason rather than Obsidian's — a vault path may legally hold one (§1), and a
+// newline inside a list item ends the list item, so a link carrying one would
+// break the pair into two lines and lose the half a human is told to edit
+// against.
 func asLink(relative string) string {
 	target := strings.TrimSuffix(relative, ".md")
-	if target == "" || strings.ContainsAny(target, "[]|#^") {
+	if target == "" || strings.ContainsAny(target, "[]|#^\n\r") {
 		return asPath(relative)
 	}
 	return "[[" + target + "]]"
