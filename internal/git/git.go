@@ -76,6 +76,13 @@ type Repo struct {
 	// git asks.
 	credentialEnvironment []string
 
+	// configuredRemote is the normalised (host, path) pair obsync was told to
+	// sync with, and the thing gate 5 compares the repository's own origin
+	// against on every run (§8). It is what obsync was configured with rather
+	// than what the vault holds, which is why it is set at construction and
+	// never written again.
+	configuredRemote config.ConfiguredRemote
+
 	// sizeCeiling is the largest single file obsync will commit, and the
 	// largest blob a merge may invent (§5, §4). It is the one configured value
 	// in that area — a fact about the remote rather than a taste — and it is
@@ -97,6 +104,16 @@ type Repo struct {
 	excludeFile string
 	staging     string
 
+	// gitDir is the repository itself — where git keeps HEAD, the index and
+	// the markers gate 4 reads. Resolved once at bootstrap by asking git,
+	// because a .git that is a file points somewhere else entirely, and
+	// because a linked worktree keeps its own.
+	gitDir string
+
+	// lock is the open file description holding gate 8's advisory flock on
+	// `.git/obsync.lock`, held for the process lifetime and released by Close.
+	lock *os.File
+
 	log   *slog.Logger
 	clock clock.Clock
 
@@ -117,9 +134,14 @@ type Repo struct {
 	stoppingSince time.Time
 }
 
-// Close removes the private git configuration. A Repo is unusable afterwards.
+// Close releases gate 8's lock and removes the private git configuration. A
+// Repo is unusable afterwards.
+//
+// Both are attempted whatever the other does: a lock obsync failed to drop and
+// a configuration file it failed to remove are independent, and neither is a
+// reason to leak the other.
 func (r *Repo) Close() error {
-	return r.isolation.close()
+	return errors.Join(r.unlockTheVault(), r.isolation.close())
 }
 
 // writeConfig writes the per-process GIT_CONFIG_GLOBAL of §1.
@@ -171,17 +193,40 @@ func (r *Repo) TrackedBranch() string { return r.branch }
 // what every later run compares against the branch that came out of that, since
 // HEAD moving off the tracked branch mid-life is a full freeze (§7).
 //
-// A detached HEAD has no answer here; it is gate 3, and a full freeze (#32).
+// A detached HEAD has no answer here, and it is gate 3: `symbolic-ref --quiet`
+// exits 1 for a HEAD that is not a symbolic ref, which is a documented status
+// rather than prose, so the failure comes back as the full freeze §7 asks for
+// rather than as a run that failed. Git's everything-code travels on as an
+// ordinary error, because a repository obsync could not read at all is not the
+// same fact.
 func (r *Repo) HeadBranch() (string, error) {
 	out, err := r.run(invocation{dir: r.vault, args: []string{"symbolic-ref", "--quiet", "--short", "HEAD"}})
 	if err != nil {
+		var command *CommandError
+		if errors.As(err, &command) && command.ExitCode == refDoesNotResolve {
+			return "", r.detachedHead()
+		}
 		return "", fmt.Errorf("the vault's HEAD is not on a branch: %w", err)
 	}
 	branch := strings.TrimSuffix(string(out), "\n")
 	if branch == "" {
-		return "", errors.New("the vault's HEAD names no branch")
+		return "", r.detachedHead()
 	}
 	return branch, nil
+}
+
+// detachedHead is gate 3's refusal. A detached HEAD has no branch to commit to,
+// and obsync never checks one out after bootstrap — checking a branch out
+// rewrites files a human has open — so the remedy is theirs and the gate is
+// what makes their doing it enough (§3, §7).
+func (r *Repo) detachedHead() error {
+	return &GateFailure{
+		Gate: freezeDetachedHead,
+		Fact: "the vault's HEAD is not on a branch",
+		Remedy: "check a branch out in the vault yourself. obsync never runs `git checkout` after " +
+			"bootstrap, because that rewrites files you have open, and it will not commit onto a " +
+			"detached HEAD" + SelfClearing,
+	}
 }
 
 // Changed is every path git reports as changed in the vault — modified,

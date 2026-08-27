@@ -33,12 +33,8 @@ import (
 // and keeps turning, so repairing the cause releases obsync with no restart
 // (§7) — which is why every refusal below names a fact rather than a guess.
 func Bootstrap(ctx context.Context, cfg config.Config, log *slog.Logger, clk clock.Clock) (*Repo, error) {
-	info, err := os.Stat(cfg.VaultPath)
-	if err != nil {
-		return nil, fmt.Errorf("the vault at %q cannot be read: %w", cfg.VaultPath, err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("the vault at %q is not a directory", cfg.VaultPath)
+	if failing := vaultUsable(cfg.VaultPath); failing != nil {
+		return nil, failing
 	}
 
 	credentialIsolation, err := newIsolation()
@@ -50,6 +46,7 @@ func Bootstrap(ctx context.Context, cfg config.Config, log *slog.Logger, clk clo
 		vault:                 cfg.VaultPath,
 		isolation:             credentialIsolation,
 		credentialEnvironment: cfg.CredentialEnvironment(),
+		configuredRemote:      cfg.ConfiguredRemote,
 		sizeCeiling:           cfg.SizeCeiling,
 		log:                   log,
 		clock:                 clk,
@@ -73,6 +70,14 @@ func Bootstrap(ctx context.Context, cfg config.Config, log *slog.Logger, clk clo
 	// alternative is syncing a vault under rules obsync said it applies and
 	// does not — and it is retried on the next run like every other refusal.
 	if err := repo.resolveOwnedPaths(); err != nil {
+		_ = repo.Close()
+		return nil, err
+	}
+	// Gate 8, taken before obsync writes anything into the repository and held
+	// for the process lifetime. It cannot be taken any earlier than this: there
+	// is no `.git` to take it in until the bootstrap above has decided what
+	// this directory is.
+	if err := repo.lockTheVault(); err != nil {
 		_ = repo.Close()
 		return nil, err
 	}
@@ -132,9 +137,14 @@ func (r *Repo) resolveTrackedBranch(ctx context.Context, cfg config.Config) (str
 		return "", fmt.Errorf("the vault at %q cannot be read: %w", r.vault, err)
 	}
 	if shows {
-		return "", fmt.Errorf("the vault at %q is not a git repository and holds %q, so obsync will "+
-			"not adopt it: point obsync at an empty directory to clone into, or make this one a repo "+
-			"with an origin", r.vault, path)
+		return "", &GateFailure{
+			Gate: freezeNoRepository,
+			Fact: "the vault at " + r.vault + " is not a git repository and holds " + path +
+				", so obsync will not adopt it",
+			Remedy: "point obsync at an empty directory to clone into, or make this one a " +
+				"repository with an origin. obsync never adopts a folder it cannot reason about, " +
+				"because somebody else's tool may own it" + SelfClearing,
+		}
 	}
 
 	// Two rules meet here and they do not quite agree, so obsync says which one
@@ -153,10 +163,13 @@ func (r *Repo) resolveTrackedBranch(ctx context.Context, cfg config.Config) (str
 	if entry, notEmpty, err := firstEntry(r.vault); err != nil {
 		return "", fmt.Errorf("the vault at %q cannot be read: %w", r.vault, err)
 	} else if notEmpty {
-		return "", fmt.Errorf("obsync clones into an empty directory and the vault at %q holds %q; "+
-			"obsync would have adopted what is there, and git will not clone into a destination "+
-			"holding anything at all: move or delete it and obsync clones on its next run",
-			r.vault, entry)
+		return "", &GateFailure{
+			Gate: freezeNoRepository,
+			Fact: "the vault at " + r.vault + " is not a git repository and holds " + entry,
+			Remedy: "move or delete it and obsync clones on its next run. obsync would have " +
+				"adopted what is there, and git will not clone into a destination holding " +
+				"anything at all" + SelfClearing,
+		}
 	}
 	return r.clone(ctx, cfg)
 }
@@ -213,9 +226,23 @@ func (r *Repo) branchNamingACommit(branch string) (string, error) {
 		dir:  r.vault,
 		args: []string{"rev-parse", "--verify", "--quiet", "refs/heads/" + branch},
 	}); err != nil {
-		return "", fmt.Errorf("the vault's %q holds no commits, so obsync has no tracked branch to "+
-			"sync: that is what a clone killed halfway leaves behind, and obsync refuses such a repo "+
-			"rather than repairing it: %w", branch, err)
+		var command *CommandError
+		if !errors.As(err, &command) || command.ExitCode != refDoesNotResolve {
+			return "", err
+		}
+		// Gate 6 at bootstrap, and the same refusal the per-run gate makes.
+		// git's own words travel with it rather than being replaced by
+		// obsync's account of them: --quiet leaves nothing on stderr for a ref
+		// that is simply absent, and the exit status is what says this was not
+		// git's everything-code.
+		return "", &GateFailure{
+			Gate: freezeBranchUnresolved,
+			Fact: "the vault's " + branch + " names no commit, so obsync has no tracked branch to sync",
+			Remedy: "obsync refuses such a repository rather than repairing it: that is what a " +
+				"clone killed halfway leaves behind, and obsync cannot tell it apart from a " +
+				"broken HEAD in a repository that holds history. docs/operations.md has the " +
+				"recovery recipe" + SelfClearing,
+		}
 	}
 	return branch, nil
 }

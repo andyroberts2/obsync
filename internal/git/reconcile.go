@@ -248,8 +248,29 @@ func (r *Repo) fetch(ctx context.Context) error {
 		deadline: networkDeadline,
 		shutdown: ctx.Done(),
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrRemoteUnreachable, err)
+	}
+	return nil
 }
+
+// ErrRemoteUnreachable is the remote not answering the one command every run
+// asks it: the fetch that begins the network half.
+//
+// It is an aborted run (§7): this pass gives up, nothing is reported above
+// debug, and the ordinary backoff retries it. That tier is not an inference
+// from what git said — git exits 128 for a host that is down, a repository that
+// is not there and a credential that was refused alike, and the exit status can
+// never classify any of them. It is a fact about *which command* failed: a
+// fetch returns no verdict about anything, so a fetch that failed is obsync
+// having been told nothing, which is precisely the state waiting repairs.
+//
+// A *push* that fails is deliberately not this. A push carries a verdict from
+// the party whose opinion is the whole question, and telling a lost race from a
+// rejection is what §7's push disposition table is for (#35, unbuilt) — so
+// until that lands a failed push stays a reported failure rather than being
+// quietly sorted into the tier that says nothing.
+var ErrRemoteUnreachable = errors.New("the remote did not answer")
 
 // fastForward moves the vault onto the remote's tip, and is the one thing in a
 // sync run that writes files a human owns.

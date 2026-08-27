@@ -1,4 +1,5 @@
-# The PR and main half of the pipeline (§12): vet, lint and the test suite.
+# The PR and main half of the pipeline (§12): vet, lint, and the test suite
+# across the two-point git matrix.
 # The tag half — buildx across amd64+arm64, attestation and the release — is a
 # separate workflow, and lands with the release slice.
 name: CI
@@ -23,7 +24,7 @@ concurrency:
 
 jobs:
   check:
-    name: Vet, lint and test
+    name: Vet and lint
     runs-on: ubuntu-latest
     steps:
       # Third-party actions are SHA-pinned: a tag is a mutable pointer, and this
@@ -59,7 +60,89 @@ jobs:
         with:
           version: v2.13.1
 
+  # The git matrix (§12, #32). Two points, and no third: the **floor**, which is
+  # the oldest git obsync promises to run on and the only thing testing the
+  # *promise*, and the **current** point, which is the git the shipped image
+  # actually carries and the only thing testing the *product*.
+  #
+  # Neither number is written here. The floor is read from `internal/git/
+  # GIT_FLOOR`, which is the same file the binary embeds for gate 7 — one file,
+  # two readers, so drift is structurally impossible rather than merely
+  # detected. The current point is *derived* from the base image by asking the
+  # image what git it has, so it follows a digest bump automatically and nobody
+  # has to remember to move a number.
+  #
+  # Both points are then built from source at the version resolved, because
+  # `go test` has to run *against* that git and not merely know its number. A
+  # prefix install carries its own libexec, so putting `<prefix>/bin` at the
+  # front of PATH swaps the whole git — plumbing, remote helpers and all — which
+  # is the only way a matrix point tests anything.
+  matrix-test:
+    name: Test on git ${{ matrix.point }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Both points always run. A matrix that stops at the first failure hides
+      # which of the two a change broke, which is the one thing the matrix is
+      # for.
+      fail-fast: false
+      matrix:
+        point: [floor, current]
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # The base image is named in exactly one place in this workflow, and it is
+      # the same image §12 pins by digest for the release build. It moves into
+      # the Dockerfile's own FROM when the image lands (#41), and this step
+      # reads it from there rather than gaining a second copy of it.
+      - name: Resolve this point's git version
+        id: git
+        env:
+          BASE_IMAGE: alpine:3.23
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.point }}" = "floor" ]; then
+            version="$(tr -d '[:space:]' < internal/git/GIT_FLOOR)"
+          else
+            base="$BASE_IMAGE"
+            if [ -f Dockerfile ]; then
+              base="$(awk '$1 == "FROM" { print $2; exit }' Dockerfile)"
+            fi
+            # The base image carries no git until the shipped image installs
+            # one, so the version is asked of the package it would install.
+            version="$(docker run --rm "$base" sh -c               'apk add --no-cache git >/dev/null 2>&1 && git --version' | awk '{print $3}')"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "This point is git $version"
+
+      - name: Cache this point's git
+        id: cached
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /opt/git/${{ steps.git.outputs.version }}
+          key: git-${{ runner.os }}-${{ steps.git.outputs.version }}
+
+      - name: Build git ${{ steps.git.outputs.version }}
+        if: steps.cached.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends             build-essential gettext libcurl4-openssl-dev libexpat1-dev libssl-dev libz-dev
+          version="${{ steps.git.outputs.version }}"
+          curl -fsSL "https://github.com/git/git/archive/refs/tags/v$version.tar.gz"             | tar -xz -C "$RUNNER_TEMP"
+          make -C "$RUNNER_TEMP/git-$version" -j"$(nproc)"             prefix="/opt/git/$version" NO_TCLTK=1 all
+          sudo make -C "$RUNNER_TEMP/git-$version"             prefix="/opt/git/$version" NO_TCLTK=1 install
+
       # obsync is one serialized loop and a watcher feeding a channel, so -race
       # should never have anything to say; the day it does, it is right.
       - name: Test
-        run: go test -race ./...
+        run: |
+          set -euo pipefail
+          export PATH="/opt/git/${{ steps.git.outputs.version }}/bin:$PATH"
+          git --version
+          go test -race ./...

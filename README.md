@@ -64,12 +64,22 @@ commit rather than committed in half: obsync samples each changed path twice a
 second apart and leaves out anything that moved, so a note caught mid-save or a
 40MB attachment still copying arrives whole on the next run instead of torn.
 Nothing waives that check, and an incoming change is never applied over a path
-being written at all. The **declared surface** — everything a version number
-will make a promise about — is written down ahead of the code that implements
-it.
+being written at all. Standing between all of that and your vault are nine
+gates and a sentinel, re-checked at the top of every run: obsync will not touch
+a vault whose mount has dropped, whose `.git` has gone, whose HEAD is detached
+or is mid-rebase, whose `origin` is not the remote it was given, whose branch
+names no commit, or that a second obsync already holds. Each one stops obsync,
+says the fact and the remedy, and clears on its own within a tick once the
+cause is repaired — no restart, and obsync never exits, because a crash-looping
+container buries the one message that matters. The gate that matters most is
+`.obsidian/`: its absence means the vault is not there, and any amount of note
+deletion with it intact is you editing your vault, which obsync syncs without
+comment. The **declared surface** — everything a version number will make a
+promise about — is written down ahead of the code that implements it.
 
-Not yet: the rest of the safety interlocks, the attention note, the status
-file and the container image. obsync is not something to point at a vault yet.
+Not yet: write-verify, the damaged-repo freeze, push dispositions, the attention
+note, the status file and the container image. obsync is not something to point
+at a vault yet.
 
 ## What obsync will never do
 

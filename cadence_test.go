@@ -379,9 +379,12 @@ func TestTheNetworkBackoffStopsDoublingAtFifteenMinutes(t *testing.T) {
 	}
 }
 
-// A remote that is down is not a log to fill: the backoff is what stops obsync
-// reporting the same unreachable remote on every wake-up.
-func TestAnUnreachableRemoteIsNotReportedOnEveryWakeUp(t *testing.T) {
+// A remote that is down is not a log to fill. It is §7's abort tier — this pass
+// gives up and the next tick retries — so it is not reported on the first
+// wake-up either, and the backoff is what stops obsync even trying on every
+// one. An unreachable remote is *healthy* until the backoff ceiling (§9), and
+// an ERROR here would be obsync asking for a human it does not need.
+func TestAnUnreachableRemoteIsNotReportedOnAnyWakeUp(t *testing.T) {
 	t.Parallel()
 
 	env := newVault(t)
@@ -396,10 +399,10 @@ func TestAnUnreachableRemoteIsNotReportedOnEveryWakeUp(t *testing.T) {
 	}
 	env.remoteBack()
 
-	if got, want := strings.Count(env.said(), "level=ERROR"), 1; got != want {
+	if got, want := strings.Count(env.said(), "level=ERROR"), 0; got != want {
 		t.Errorf("obsync reported the unreachable remote %d times over three wake-ups, want %d — "+
-			"only the network half backs off, and the wake-ups inside it say nothing (§2, §9)",
-			got, want)
+			"the abort tier reports nothing above debug, and only the network half backs off "+
+			"(§2, §7, §9)", got, want)
 	}
 }
 
