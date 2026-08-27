@@ -197,6 +197,86 @@ jobs:
           git --version
           go test -race ./...
 
+  # The coverage number, and the badge the README carries.
+  #
+  # It runs the suite once more rather than reading a profile out of the matrix
+  # above, and that is deliberate on two counts. The matrix runs `-race` at two
+  # pinned gits, because what it tests is the *promise*; what this job counts is
+  # which lines of obsync a test executed, and that answer does not move with
+  # the git underneath it. And a job that took a profile from a matrix point
+  # would have to name which point, which is a third number to keep in step.
+  #
+  # Only on a push to main. A pull request has nothing it may publish to — a
+  # fork's token cannot write to this repository at all — so a coverage job
+  # that ran there could only ever be a red cross on somebody else's work.
+  coverage:
+    name: Coverage
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # The one write scope in this workflow, and it is here rather than at
+    # workflow level (§12). It reaches the badges branch and nothing else.
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # -coverpkg=./... rather than the default, and it is the difference
+      # between a number and a misleading one. Every test obsync has lives in
+      # the root package and drives the internal packages through it, and by
+      # default Go credits a package's coverage only to that package's own
+      # tests — so internal/vault, internal/git and the rest would each report
+      # 0% and the badge would say the suite touches almost nothing.
+      - name: Measure
+        id: cover
+        run: |
+          set -euo pipefail
+          go test -coverpkg=./... -coverprofile=coverage.out ./...
+          pct="$(go tool cover -func=coverage.out | awk '$1 == "total:" { print $3 }')"
+          if [ -z "$pct" ]; then
+            echo "::error::the coverage profile has no total line"
+            exit 1
+          fi
+          echo "pct=$pct" >> "$GITHUB_OUTPUT"
+          echo "Total coverage: $pct"
+
+      # The badge is a shields.io *endpoint*: this job publishes the number as
+      # JSON and shields renders it. Publishing a rendered SVG instead would
+      # work once and then not — GitHub proxies README images through a cache
+      # that has no idea the file changed, so the badge would show whatever
+      # percentage was true the first time somebody looked.
+      #
+      # It lands on an orphan `badges` branch that is force-pushed to one
+      # commit every time, because the branch is a value rather than a history:
+      # nothing needs last week's number, and a branch that only ever grows is
+      # one somebody has to prune later.
+      - name: Publish the badge
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PCT: ${{ steps.cover.outputs.pct }}
+        run: |
+          set -euo pipefail
+          colour="$(awk -v n="${PCT%\%}" 'BEGIN {
+            print n < 50 ? "red" : n < 70 ? "orange" : n < 80 ? "yellow" :
+                  n < 90 ? "yellowgreen" : "brightgreen"
+          }')"
+          badge="$(mktemp -d)"
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s","color":"%s","cacheSeconds":300}\n' \
+            "$PCT" "$colour" > "$badge/coverage.json"
+          cd "$badge"
+          git init --quiet --initial-branch=badges
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add coverage.json
+          git commit --quiet -m "Coverage: $PCT at ${GITHUB_SHA:0:7}"
+          git push --quiet --force \
+            "https://x-access-token:$GITHUB_TOKEN@github.com/$GITHUB_REPOSITORY.git" badges
+
   # Seam 2 (§12, #41): the container image and the reference compose, which are
   # the two things no in-process test can see — the image running as an
   # arbitrary UID with no `/etc/passwd` entry, the git floor gate firing, the
