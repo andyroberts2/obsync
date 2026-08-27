@@ -17,10 +17,6 @@ import (
 // how a writer gets inside it, and it is the third writer this design assumes
 // and cannot see.
 
-// settleInterval is §6's number, restated here rather than imported: a test
-// that asserts a constant by reading the constant asserts nothing.
-const settleInterval = time.Second
-
 // Someone is mid-save when the loop wakes. Their note is left out of *this*
 // commit rather than committed in half, and the rest of the vault commits
 // around it — because a commit missing a file is a valid state and a commit
@@ -455,5 +451,48 @@ func TestCrashDebrisInObsyncsStagingDirectoryIsSweptAtStartup(t *testing.T) {
 	if got, want := env.remoteFile("Daily/2026-08-24.md"), "an ordinary run\n"; got != want {
 		t.Errorf("the remote holds %q after a startup that swept crash debris, want %q — the sweep "+
 			"clears the debris and leaves the owned path it sits in (§10)", got, want)
+	}
+}
+
+// Stage-verify watches the paths obsync staged, which is §6's own scope — "the
+// staged paths" — and is narrower than the committable set twice over.
+//
+// A change a human staged in full is in the committable set and is never named
+// on obsync's `git add`: git's second status column says the index already
+// holds it, and the bytes the commit will carry come from the index rather
+// than from disk. So a third writer moving that path while the add runs says
+// nothing about what is being committed, and aborting on it would be an abort
+// the run did not earn — in the tier that exists to be rare (§7).
+func TestAChangeAHumanStagedInFullIsNotWhatStageVerifyWatches(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.turn()
+	env.awaitIdle()
+
+	// Staged by the human and untouched since, so git reports `1 A.` — the
+	// index holds it in full and obsync's add is never given the path.
+	env.writeNote("Notes/staged by hand.md", "the bytes the human staged\n")
+	env.mustGit(env.vault, "add", "--", "Notes/staged by hand.md")
+	// And one obsync stages itself, which is what makes the add run at all and
+	// therefore what fires the hook below.
+	env.writeNote("Daily/2026-08-24.md", "an ordinary unstaged note\n")
+
+	// The third writer again, in the one window a test can act in — but this
+	// time on the path obsync did not stage.
+	env.installVaultHook("post-index-change",
+		"#!/bin/sh\nprintf 'and the third writer appended this\\n' >> 'Notes/staged by hand.md'\n")
+	env.watcherWake()
+	env.advance(quietWindow)
+
+	if got, ok := env.remoteContentYet("Daily/2026-08-24.md"); !ok || got != "an ordinary unstaged note\n" {
+		t.Errorf("the remote holds %q at the note obsync staged, want %q — a path obsync did not "+
+			"read from disk moving under it is not a reason to abandon the run (§6)",
+			got, "an ordinary unstaged note\n")
+	}
+	if got, want := env.remoteFile("Notes/staged by hand.md"), "the bytes the human staged\n"; got != want {
+		t.Errorf("the remote holds %q at the note the human staged, want %q — the commit carries "+
+			"what the index held, and stage-verify has no opinion about a path the add never "+
+			"named (§6)", got, want)
 	}
 }

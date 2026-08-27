@@ -561,12 +561,16 @@ var errStageVerify = errors.New("a path moved on disk while obsync was staging i
 // reaches the remote at all, and a silently-skipped file that stays silent for
 // ever is the failure this reports.
 //
-// Ten minutes is 2× the max-wait cap, so a legitimately busy file never trips
-// it. The tracking is in-memory and process-lifetime only, deliberately: a
-// restart restarts the clock, which is acceptable for a warning that is not a
-// gate. A path that settles is forgotten, so the same file going hot again is
-// news again — the same shape reportRefusals has, and the transition out is
-// silent for the same reason.
+// How long is unsettledForLong, and the reason for the number lives there
+// rather than being restated here. The tracking is in-memory and
+// process-lifetime only, deliberately: a restart restarts the clock, which is
+// acceptable for a warning that is not a gate. A path that settles is
+// forgotten, so the same file going hot again is news again — the same shape
+// reportRefusals has, and the transition out is silent for the same reason.
+//
+// Every exclusion is said at debug as it happens, which is §9's DEBUG row —
+// per-path settle-guard outcomes — and is the only place "why is this note not
+// in the commit" has an answer before the ten minutes are up.
 //
 // The standing signal is the attention note's fourth section (#38), which is
 // derived from this state rather than accumulated.
@@ -581,10 +585,12 @@ func (l *Loop) reportUnsettled(unsettled []string, now time.Time) {
 		if !known {
 			record = unsettledPath{since: now}
 		}
+		l.log.Debug("the settle guard left a path out of this commit because it moved on disk while "+
+			"obsync was looking at it", "path", path, "unsettled_for", now.Sub(record.since))
 		if !record.said && now.Sub(record.since) >= unsettledForLong {
 			record.said = true
-			l.log.Warn("this path has moved on disk every time obsync has looked at it for the last "+
-				"ten minutes, so it is not reaching the remote; the rest of your vault is syncing "+
+			l.log.Warn("this path has moved on disk every time obsync has looked at it for a long "+
+				"time now, so it is not reaching the remote; the rest of your vault is syncing "+
 				"normally, and it will commit on its own as soon as whatever is writing it stops",
 				"path", path, "unsettled_for", now.Sub(record.since))
 		}
@@ -631,7 +637,8 @@ func (l *Loop) localHalf() error {
 	// committable set decides whether to commit and the working tree decides
 	// what to add, and a run with nothing to add still commits what a human
 	// staged.
-	if err := l.repo.Stage(toStage(changed, committable.Paths)); err != nil {
+	adding := toStage(changed, committable)
+	if err := l.repo.Stage(adding); err != nil {
 		return err
 	}
 	// Stage-verify: nothing may have moved on disk while obsync was staging it
@@ -639,7 +646,7 @@ func (l *Loop) localHalf() error {
 	// ago, which is what makes aborting safe here — the third writer is the one
 	// whose writes no sampling window can anticipate, and the index now holds
 	// bytes obsync cannot vouch for.
-	if moved := committable.StageVerify(); moved != "" {
+	if moved := committable.StageVerify(adding); moved != "" {
 		return fmt.Errorf("%w: %q", errStageVerify, moved)
 	}
 	// What the index holds is what the commit will carry, and it is not always
@@ -738,18 +745,39 @@ func changedPaths(changed []git.ChangedPath) []string {
 	return paths
 }
 
-// toStage is the committable set narrowed to the paths the working tree holds
-// something to stage for, which is what `git add` is given (git.ChangedPath).
-func toStage(changed []git.ChangedPath, committable []string) []string {
-	keep := make(map[string]bool, len(committable))
-	for _, path := range committable {
+// toStage is the committable set narrowed to what `git add` may actually be
+// given. Two separate facts narrow it, and getting either wrong is fatal to the
+// whole commit rather than to the one path (git.ChangedPath).
+//
+// The committable set still decides whether to commit; this decides only what
+// is named on the add, so a run with nothing to add still commits what a human
+// staged.
+func toStage(changed []git.ChangedPath, committable vault.Committable) []string {
+	keep := make(map[string]bool, len(committable.Paths))
+	for _, path := range committable.Paths {
 		keep[path] = true
 	}
-	paths := make([]string, 0, len(committable))
+	paths := make([]string, 0, len(committable.Paths))
 	for _, change := range changed {
-		if change.InWorkingTree && keep[change.Path] {
-			paths = append(paths, change.Path)
+		// Nothing in the working tree to stage: the index already holds this
+		// change in full, and if git also ignores the path, naming it is fatal.
+		if !change.InWorkingTree || !keep[change.Path] {
+			continue
 		}
+		// And nothing on disk to match: a path git has no index entry for is
+		// matched by the file alone, so once it is gone the pathspec matches
+		// nothing and git refuses the whole add with it. That is the other end
+		// of the window the settle guard narrows (§6) — the guard's second
+		// sample already looked, so this is its answer rather than a stat.
+		// Naming it instead would spend a failed run and an ERROR on a note
+		// that is simply not there any more, which §7 tiers as an aborted run.
+		// A *tracked* path that was deleted is not skipped:
+		// the deletion is the change, and the index entry is what the pathspec
+		// matches.
+		if change.Untracked && !committable.OnDisk(change.Path) {
+			continue
+		}
+		paths = append(paths, change.Path)
 	}
 	return paths
 }

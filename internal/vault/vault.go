@@ -323,20 +323,37 @@ func CommittableSet(clk clock.Clock, root string, changed []string, sizeCeiling 
 	return set
 }
 
-// StageVerify is §6's stage-verify: the first committable path that moved on
-// disk while obsync was staging it, or "" when none did.
+// OnDisk reports whether the settle guard's second sample — the one taken
+// immediately before the `git add` — found this path there.
+//
+// It is the guard's own answer to a question the caller cannot ask git: a path
+// git reported as changed and has no index entry for matches no pathspec once
+// it is gone, and naming it is fatal to the whole add (git.ChangedPath). The
+// fact is already paid for, so asking costs no stat.
+func (c Committable) OnDisk(relative string) bool {
+	return c.sampled[relative].present
+}
+
+// StageVerify is §6's stage-verify: the first of the paths obsync just staged
+// that moved on disk while it was doing so, or "" when none did.
 //
 // It re-stats against the sample the settle guard finished on, which is the one
 // taken immediately before the `git add`. Its constituency is the third writer,
 // whose writes no sampling window can anticipate — a path it touches can be
 // genuinely cold when sampled and hot during the add.
 //
+// The staged paths rather than the whole committable set, which is §6's own
+// scope and is narrower twice over: a committable path whose change the index
+// already holds in full is not read from disk by this run at all, so movement
+// under it says nothing about the bytes the commit will carry, and aborting on
+// it would be an abort the run did not earn.
+//
 // Anything that moved aborts the run, and aborting is safe here in a way it is
 // not on the read side, because these paths were just verified stable across the
 // settle interval. With write-verify (§7), obsync verifies both ends of every
 // tree it touches.
-func (c Committable) StageVerify() string {
-	for _, relative := range c.Paths {
+func (c Committable) StageVerify(staged []string) string {
+	for _, relative := range staged {
 		if !c.sampled[relative].same(sampleOf(c.root, relative)) {
 			return relative
 		}

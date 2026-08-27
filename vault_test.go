@@ -324,8 +324,8 @@ const remoteSeedNote = "the note someone else pushed\n"
 
 // The timing constants a test may not read from obsync, restated here on
 // purpose: a test that asserts 120s by importing the constant that sets it
-// asserts nothing. These are §1's and §2's numbers, and each is written out at
-// the assertion that uses it.
+// asserts nothing. These are §1's, §2's and §6's numbers, and each is written
+// out at the assertion that uses it.
 const (
 	networkDeadline  = 120 * time.Second
 	shutdownDeadline = 30 * time.Second
@@ -333,6 +333,7 @@ const (
 	maxWaitCap       = 5 * time.Minute
 	tick             = 60 * time.Second
 	tickJitter       = 6 * time.Second
+	settleInterval   = time.Second
 )
 
 // wake is one wake-up, and the loop's unit of work: obsync performs exactly one

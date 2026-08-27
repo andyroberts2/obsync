@@ -21,26 +21,37 @@ type Change struct {
 	Kind Kind
 }
 
-// ChangedPath is one path git reports as changed, and whether the working tree
-// holds something for a `git add` to stage.
+// ChangedPath is one path git reports as changed, plus the two facts that
+// decide whether `git add` may be given it.
 //
-// The two are not the same question, and the difference is a run obsync cannot
-// finish. A path a human took out of the index with `git rm --cached` while
-// their .gitignore covers it is reported as changed — the commit carries the
-// deletion, and the index already holds it in full — and there is nothing in
-// the working tree to stage, because to git the file is now untracked and
-// ignored. Naming such a path on an add is fatal: git refuses to add an ignored
-// path and refuses the *whole* add with it, staging nothing (measured at both
-// matrix points, exit 1). One of them would take every note in the vault out of
-// the same commit, on every run from then on, because nothing clears the record
-// until something commits it — which is the same shape as the rename record
-// parseStatus reads the destination of, one column along.
+// Being changed and being addable are not the same question, and the
+// difference is a run obsync cannot finish. A path a human took out of the
+// index with `git rm --cached` while their .gitignore covers it is reported as
+// changed — the commit carries the deletion, and the index already holds it in
+// full — and there is nothing in the working tree to stage, because to git the
+// file is now untracked and ignored. Naming such a path on an add is fatal: git
+// refuses to add an ignored path and refuses the *whole* add with it, staging
+// nothing (measured at both matrix points, exit 1). One of them would take
+// every note in the vault out of the same commit, on every run from then on,
+// because nothing clears the record until something commits it — which is the
+// same shape as the rename record parseStatus reads the destination of, one
+// column along.
 type ChangedPath struct {
 	Path string
 	// InWorkingTree is git's second status column: the working tree against
 	// the index. A "." there is a change the index already holds in full, and
 	// an add naming it is a no-op at best.
 	InWorkingTree bool
+	// Untracked is a path git has no index entry for at all — status's `?`
+	// record. It is the second way an add can be fatal to the whole commit,
+	// and the one the settle guard's own answer settles: a pathspec matches
+	// either a file on disk or an index entry, so a tracked path that was
+	// deleted still stages its deletion (measured at both matrix points, exit
+	// 0), while an untracked path that is no longer there matches nothing —
+	// `fatal: pathspec did not match any files`, exit 128, and the whole add
+	// refused with it (measured at both matrix points; --ignore-errors does
+	// not soften it).
+	Untracked bool
 }
 
 // parseStatus reads `git status --porcelain=v2 -z -uall`.
@@ -114,7 +125,7 @@ func parseStatus(out []byte) ([]ChangedPath, error) {
 			if err != nil {
 				return nil, err
 			}
-			paths = append(paths, ChangedPath{Path: path, InWorkingTree: true})
+			paths = append(paths, ChangedPath{Path: path, InWorkingTree: true, Untracked: true})
 		case '!':
 			// Only ever present with --ignored, which obsync does not pass.
 			continue

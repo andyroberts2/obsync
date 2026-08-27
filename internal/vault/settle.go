@@ -43,6 +43,15 @@ type sample struct {
 // sampleOf reads one path. A path that is not there samples as absent, which is
 // what a deletion looks like and is settled as soon as it stops moving, exactly
 // like everything else.
+//
+// Every Lstat error samples as absent, not only ErrNotExist, and that is safe
+// here for a reason worth stating: obsync runs as the vault's own UID (§8), so
+// a path git has just reported and obsync cannot stat is one something has
+// since moved rather than one obsync may not read — git would not have listed
+// a path it could not reach either. The errors that are left, an EIO on a
+// flaky mount among them, reach git next and fail the command loudly rather
+// than committing bytes nobody read. Treating them as unsettled instead would
+// hand the write side a path it could abandon on, silently, for ever.
 func sampleOf(root, relative string) sample {
 	info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(relative)))
 	if err != nil {
