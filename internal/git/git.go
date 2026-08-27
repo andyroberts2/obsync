@@ -178,13 +178,14 @@ func (r *Repo) HeadBranch() (string, error) {
 }
 
 // Changed is every path git reports as changed in the vault — modified,
-// deleted, staged by a human, or never seen before.
+// deleted, staged by a human, or never seen before — and, for each, whether
+// the working tree holds something for an add to stage.
 //
 // The watcher never contributes to this list, and that split is what keeps
 // obsync correct against dropped inotify events, an exhausted watch budget and
 // the third writer it cannot see: the watcher wakes the loop, and git says what
 // changed (§2).
-func (r *Repo) Changed() ([]string, error) {
+func (r *Repo) Changed() ([]ChangedPath, error) {
 	// -uall rather than the default: an untracked directory is otherwise
 	// reported as one entry, and obsync stages paths rather than directories.
 	out, err := r.run(invocation{
@@ -212,8 +213,8 @@ func (r *Repo) Changed() ([]string, error) {
 //
 // The exclusion is never the only pathspec. `git add --all` with nothing but an
 // exclusion means "everything except this", which is the whole tree — so a
-// caller with an empty committable set gets no git at all rather than one that
-// would sweep in the floor.
+// caller with nothing to stage gets no git at all rather than one that would
+// sweep in the floor.
 func (r *Repo) Stage(paths []string) error {
 	if len(paths) == 0 {
 		return nil

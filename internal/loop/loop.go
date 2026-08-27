@@ -20,6 +20,7 @@ package loop
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -456,6 +457,13 @@ func (l *Loop) untrackChurnSubset() (bool, error) {
 	if err := l.repo.Untrack(churn); err != nil {
 		return false, err
 	}
+	// This commit records the index like any other, so it passes the refusal
+	// layer like any other: a human who staged a credential before the one-shot
+	// fired would otherwise have it carried out by the one commit in obsync
+	// that is not built from the committable set. One diff-index, once ever.
+	if _, err := l.stagedWithoutRefused(); err != nil {
+		return false, err
+	}
 	if err := l.repo.Commit(untrackMessage(churn)); err != nil {
 		return false, err
 	}
@@ -517,12 +525,12 @@ func (l *Loop) localHalf() error {
 		return err
 	}
 
-	// The committable set is what a run would actually stage. The ignore floor
+	// The committable set is what a run would actually commit. The ignore floor
 	// has already come out of it, by git rather than here — status does not
-	// report a path the exclude file covers — which is what leaves the vault's
-	// own .gitignore able to overrule the floor (§5). What obsync subtracts
-	// itself is the refusal layer; unsettled paths join it in #29.
-	committable, refused := vault.CommittableSet(l.config.VaultPath, changed, l.config.SizeCeiling)
+	// report an untracked path the exclude file covers — which is what leaves
+	// the vault's own .gitignore able to overrule the floor (§5). What obsync
+	// subtracts itself is the refusal layer; unsettled paths join it in #29.
+	committable, refused := vault.CommittableSet(l.config.VaultPath, changedPaths(changed), l.config.SizeCeiling)
 	l.reportRefusals(refused)
 
 	// A tree holding nothing but refused paths is quiet: no commit, no push,
@@ -531,14 +539,21 @@ func (l *Loop) localHalf() error {
 		return nil
 	}
 
-	if err := l.repo.Stage(committable); err != nil {
+	// What the add is given is narrower than what the commit will carry: a
+	// path whose change the index already holds in full has nothing in the
+	// working tree to stage, and naming one that git also ignores is fatal to
+	// the whole add rather than to that pathspec (git.ChangedPath). So the
+	// committable set decides whether to commit and the working tree decides
+	// what to add, and a run with nothing to add still commits what a human
+	// staged.
+	if err := l.repo.Stage(toStage(changed, committable)); err != nil {
 		return err
 	}
 	// What the index holds is what the commit will carry, and it is not always
 	// what status reported: an edit that puts a file back the way HEAD has it
 	// is a change to the tree and no change to the commit. Committing anyway
 	// would put an empty commit in a human's history.
-	staged, err := l.repo.Staged()
+	staged, err := l.stagedWithoutRefused()
 	if err != nil {
 		return err
 	}
@@ -555,6 +570,95 @@ func (l *Loop) localHalf() error {
 	}
 	l.log.Info("committed", "paths", len(staged), "subject", subject(staged))
 	return nil
+}
+
+// stagedWithoutRefused is what the index would commit, with any refused path
+// somebody else staged taken back out of it first (§5). Both of obsync's
+// commits go through it, and that is the point of it being one function.
+//
+// The subtraction the committable set makes decides what obsync *stages*, and
+// that is not the whole of what a commit records: `git add` is not the only way
+// a path reaches the index, and `git commit` records the index. A human's own
+// `git add -A` in their vault — muscle memory, and what every plugin that
+// drives git for them does — would otherwise put a refused path in obsync's
+// commit and push it, in the same run whose WARN said obsync was not committing
+// it. That is the one unrecoverable mistake in this design (§5), so it is
+// checked against the list obsync will actually commit rather than against what
+// status happened to report.
+//
+// It costs no extra git in the ordinary case: this is the same diff-index the
+// commit message is written from. The unstaging happens only when something
+// else staged a refused path, and is index-only.
+func (l *Loop) stagedWithoutRefused() ([]git.Change, error) {
+	staged, err := l.repo.Staged()
+	if err != nil {
+		return nil, err
+	}
+	_, refused := l.refusedAmong(staged)
+	if len(refused) == 0 {
+		return staged, nil
+	}
+	if err := l.repo.Unstage(refused); err != nil {
+		return nil, err
+	}
+
+	staged, err = l.repo.Staged()
+	if err != nil {
+		return nil, err
+	}
+	// Fail closed rather than commit one anyway. A refusal never freezes the
+	// loop, but a run that cannot keep this particular promise is a run that
+	// does not commit: the vault is intact either way, and the mistake this
+	// prevents is the one no later commit can undo.
+	if reason, still := l.refusedAmong(staged); len(still) > 0 {
+		return nil, fmt.Errorf("obsync could not take %q back out of the index and will not commit "+
+			"a refused path: %s", still[0], reason)
+	}
+	return staged, nil
+}
+
+// refusedAmong is the paths of these that obsync refuses to commit, and the
+// reason the first of them is refused.
+func (l *Loop) refusedAmong(staged []git.Change) (string, []string) {
+	paths := make([]string, len(staged))
+	for i, change := range staged {
+		paths[i] = change.Path
+	}
+	_, refusals := vault.CommittableSet(l.config.VaultPath, paths, l.config.SizeCeiling)
+	if len(refusals) == 0 {
+		return "", nil
+	}
+	refused := make([]string, len(refusals))
+	for i, refusal := range refusals {
+		refused[i] = refusal.Path
+	}
+	return refusals[0].Reason, refused
+}
+
+// changedPaths is what git reported as changed, by name: the dirty set the
+// committable set is computed from.
+func changedPaths(changed []git.ChangedPath) []string {
+	paths := make([]string, len(changed))
+	for i, change := range changed {
+		paths[i] = change.Path
+	}
+	return paths
+}
+
+// toStage is the committable set narrowed to the paths the working tree holds
+// something to stage for, which is what `git add` is given (git.ChangedPath).
+func toStage(changed []git.ChangedPath, committable []string) []string {
+	keep := make(map[string]bool, len(committable))
+	for _, path := range committable {
+		keep[path] = true
+	}
+	paths := make([]string, 0, len(committable))
+	for _, change := range changed {
+		if change.InWorkingTree && keep[change.Path] {
+			paths = append(paths, change.Path)
+		}
+	}
+	return paths
 }
 
 // networkHalf is the part of a run that talks to the remote: fetch, classify,

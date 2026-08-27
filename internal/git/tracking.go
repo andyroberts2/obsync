@@ -143,6 +143,36 @@ func (r *Repo) Untrack(paths []string) error {
 	return err
 }
 
+// Unstage puts the index back to what HEAD holds for the given paths, and
+// writes nothing to disk.
+//
+// It is how a refused path stays out of a commit obsync did not build the whole
+// index of. `git add` is not the only way a path reaches the index — a human's
+// own `git add -A` in their vault is muscle memory, and so is every plugin that
+// drives git for them — and `git commit` records the index rather than what
+// obsync staged, so without this a refused path somebody else staged rides out
+// in obsync's commit and its push. §5 admits no exception: the list never
+// enters a commit, whatever the vault's state, and the escape hatch is renaming
+// the file rather than staging it.
+//
+// A pathspec-limited reset, which cannot move HEAD and never writes the working
+// tree — measured at both matrix points, exit 0, the file's bytes exactly where
+// the human left them. What the index carries goes back to what the last commit
+// had, which is the stated consequence of a refusal: the remote holds the last
+// version that passed and the vault holds a newer one. There is no --hard here
+// and there is none anywhere.
+func (r *Repo) Unstage(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	_, err := r.run(invocation{
+		dir:   r.vault,
+		stdin: literalPathspecs(paths),
+		args:  []string{"reset", "--quiet", "--pathspec-from-file=-", "--pathspec-file-nul"},
+	})
+	return err
+}
+
 // gitPath is one such answer. One trailing newline is taken off it and nothing
 // else is: this is a single value rather than a listing, and a path is never
 // split on anything.
@@ -157,6 +187,15 @@ func (r *Repo) gitPath(name string) (string, error) {
 	return strings.TrimSuffix(string(out), "\n"), nil
 }
 
+// ownedFileMode is what obsync leaves an owned path readable as: 0644, which is
+// what git itself creates info/exclude as and what an editor creates a note as.
+// A file that arrived at 0600 because it came through a staging directory would
+// make obsync's ignore floor apply to obsync's UID and to nobody else running
+// git in the same vault, and would leave the attention note (#38) unreadable to
+// a human who is not obsync. Nothing written through here is a secret — obsync
+// never reads the credential at all, the helper does (§8).
+const ownedFileMode = 0o644
+
 // writeOwnedFile writes one of obsync's owned paths, write-then-rename through
 // .git/obsync/tmp/ (§6).
 //
@@ -169,6 +208,10 @@ func (r *Repo) gitPath(name string) (string, error) {
 //
 // It is the rule for every file obsync writes, and the status file (#37) and
 // the attention note (#38) are written through it too.
+//
+// The mode is set at ownedFileMode rather than left to os.CreateTemp's 0600,
+// which is the one thing a temporary file's default gets wrong for a
+// destination that is not one.
 func (r *Repo) writeOwnedFile(path string, content []byte) error {
 	if err := os.MkdirAll(r.staging, 0o755); err != nil {
 		return err
@@ -188,6 +231,9 @@ func (r *Repo) writeOwnedFile(path string, content []byte) error {
 
 	if _, err := temporary.Write(content); err != nil {
 		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Chmod(ownedFileMode); err != nil {
 		return err
 	}
 	if err := temporary.Close(); err != nil {

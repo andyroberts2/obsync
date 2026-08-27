@@ -53,6 +53,20 @@ func TestTheIgnoreFloorIsWrittenToTheReposExcludeFileAtEveryStartup(t *testing.T
 			"path, rewritten wholesale rather than merged, and the vault's own .gitignore is where " +
 			"a human's rules live (§10)")
 	}
+
+	// It arrives through a staging directory, and a temporary file's 0600 is
+	// the one thing that default gets wrong for a destination that is not one:
+	// git creates this file 0644, and a floor only obsync's own UID can read
+	// is a floor that applies to obsync and to nobody else running git in the
+	// same vault.
+	info, err := os.Stat(filepath.Join(env.vault, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatalf("reading the repo's exclude file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("the repo's exclude file is mode %v, want 0644 — what git itself creates it as; "+
+			"obsync rewrites this file's contents and never narrows who may read it (§10)", got)
+	}
 }
 
 // The floor exists so that a fresh clone of the vault repo is the same vault
@@ -627,4 +641,228 @@ func untrackingSubjects(subjects []string) []string {
 		}
 	}
 	return found
+}
+
+// The recipe every git user knows for "stop tracking this": ignore it, then
+// take it out of the index. What it leaves behind is a staged deletion of a
+// path git now ignores — and git refuses an `add` that names an ignored path,
+// refusing the *whole* add rather than that one pathspec.
+//
+// So naming it on the add obsync builds from what status reported takes out
+// every other path in the same run, and the record survives until something
+// commits it — which is now never. That is obsync stopping for good over a
+// thing a human is told to do, which is the failure a sync tool gets
+// uninstalled over (§5, §7).
+//
+// obsync's own churn one-shot reaches the same state whenever its `git rm
+// --cached` lands and the commit after it does not.
+func TestAPathAHumanUntrackedAndIgnoredNeverStopsTheVaultSyncing(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.vaultAlreadyTracks("Archive/old note.md")
+
+	// The human's own git, in their own vault, saying what they want.
+	env.writeNote(".gitignore", "Archive/\n")
+	env.mustGit(env.vault, "rm", "--cached", "--quiet", "--", ":(literal)Archive/old note.md")
+
+	env.writeNote("Daily/2026-08-24.md", "the note I wrote afterwards\n")
+
+	env.turn()
+	env.awaitIdle()
+	env.advance(70 * time.Second)
+	env.advance(70 * time.Second)
+
+	if got, ok := env.remoteContentYet("Daily/2026-08-24.md"); !ok || got != "the note I wrote afterwards\n" {
+		t.Errorf("the remote holds %q at the note's path (present: %t), want the note written "+
+			"after a human untracked an ignored path: one such path must not take the vault's "+
+			"notes out of the commit with it (§5). obsync said:\n%s", got, ok, env.saidSoFar())
+	}
+	if env.remoteHoldsYet("Archive/old note.md") {
+		t.Error("the remote still holds Archive/old note.md, which a human took out of the index " +
+			"deliberately; obsync commits what the index holds (§5)")
+	}
+	if !env.vaultHoldsYet("Archive/old note.md") {
+		t.Error("the vault no longer holds Archive/old note.md on disk; nothing here deletes a " +
+			"file a human owns (§5)")
+	}
+	if !env.stillTurning() {
+		t.Fatal("obsync's sync loop stopped over a path a human untracked (§7)")
+	}
+}
+
+// The same act with nothing else in the vault to commit, which is the other
+// half of it: what the add is given is narrower than what the commit carries,
+// so a run whose whole change is one a human already put in the index makes the
+// commit anyway rather than going quiet over an empty `git add`.
+func TestAChangeAHumanAlreadyStagedIsCommittedWithNothingLeftToAdd(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.vaultAlreadyTracks("Archive/old note.md")
+
+	// The human's own git: ignore it, commit that, then take it out of the
+	// index and leave obsync to make the commit.
+	env.writeNote(".gitignore", "Archive/\n")
+	env.mustGit(env.vault, "add", "--", ":(literal).gitignore")
+	env.mustGit(env.vault, env.asAHuman("commit", "--quiet", "-m", "ignore the archive")...)
+	env.mustGit(env.vault, "rm", "--cached", "--quiet", "--", ":(literal)Archive/old note.md")
+
+	env.wake()
+
+	if env.vaultTracks("Archive/old note.md") {
+		t.Errorf("the vault still tracks Archive/old note.md; obsync commits what the index holds, "+
+			"and the index no longer held it (§2). obsync said:\n%s", env.saidSoFar())
+	}
+	if env.remoteHolds("Archive/old note.md") {
+		t.Error("the remote still holds Archive/old note.md, so obsync never committed the change " +
+			"a human had already staged (§2)")
+	}
+	if !env.vaultHoldsYet("Archive/old note.md") {
+		t.Error("the vault no longer holds Archive/old note.md on disk; nothing here deletes a " +
+			"file a human owns (§5)")
+	}
+}
+
+// The one-shot's own way into the same state, and the reason it is worth a row
+// of its own: the `git rm --cached` lands and the commit that was meant to
+// carry it does not.
+//
+// What is left is exactly what a human's `git rm --cached` leaves — a staged
+// deletion of a path git now ignores — except that obsync made it, once, in the
+// vault it is responsible for. It has to be able to finish the job on the next
+// run rather than stopping there for good (§5, §7).
+func TestTheUntrackingIsFinishedByTheNextRunWhenItsCommitWasRefused(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.vaultAlreadyTracks(".obsidian/workspace.json")
+	env.installVaultHook("pre-commit", "#!/bin/sh\nexit 1\n")
+
+	env.turn()
+	env.awaitIdle()
+	// One run to reach the remote, and the one after it is the one-shot: the
+	// untracking lands in the index and the hook refuses the commit.
+	env.advance(70 * time.Second)
+	env.advance(70 * time.Second)
+
+	env.removeVaultHook("pre-commit")
+
+	env.advance(70 * time.Second)
+	env.advance(70 * time.Second)
+
+	if env.vaultTracks(".obsidian/workspace.json") {
+		t.Errorf("the vault still tracks .obsidian/workspace.json; a one-shot whose commit was "+
+			"refused has to be finished by a later run rather than left half done (§5). obsync "+
+			"said:\n%s", env.saidSoFar())
+	}
+	if env.remoteHoldsYet(".obsidian/workspace.json") {
+		t.Errorf("the remote still holds .obsidian/workspace.json, so obsync never got the "+
+			"untracking it had already staged into a commit (§5). obsync said:\n%s", env.saidSoFar())
+	}
+	if !env.vaultHoldsYet(".obsidian/workspace.json") {
+		t.Error("the vault no longer holds .obsidian/workspace.json on disk; obsync untracks and " +
+			"never deletes (§5)")
+	}
+	if !env.stillTurning() {
+		t.Fatal("obsync's sync loop stopped after a refused commit (§7)")
+	}
+}
+
+// `git add` is not the only way a path reaches the index, and `git commit`
+// records the index rather than what obsync staged.
+//
+// A human's own `git add -A` in their own vault is muscle memory, and every
+// plugin that drives git for them does it — so a refused path can be sitting in
+// the index before obsync ever looks. §5 admits no exception: the list never
+// enters a commit, whatever the vault's state. The note staged beside it is
+// committed like any other, because a refusal skips the path and stops nothing.
+func TestARefusedPathAHumanStagedIsTakenBackOutRatherThanCommitted(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.writeNote(".env", "AWS_SECRET_ACCESS_KEY=hunter2\n")
+	env.writeNote("Attachments/deploy.pem", "-----BEGIN PRIVATE KEY-----\n")
+	env.writeNote("Daily/2026-08-24.md", "the note I wrote beside them\n")
+	env.mustGit(env.vault, "add", "-A")
+
+	env.wake()
+
+	if env.remoteHolds(".env") {
+		t.Errorf("the remote holds .env, which a human staged and obsync then committed and "+
+			"pushed: a refused path never enters a commit, whatever the vault's state, and "+
+			"obsync said in the same run that it was not committing it (§5). It said:\n%s",
+			env.saidSoFar())
+	}
+	if env.remoteHolds("Attachments/deploy.pem") {
+		t.Error("the remote holds Attachments/deploy.pem, which a human staged (§5)")
+	}
+	if got := env.remoteFile("Daily/2026-08-24.md"); got != "the note I wrote beside them\n" {
+		t.Errorf("the remote holds %q at the note's path, want the note: a refusal skips the path "+
+			"and never stops the rest of the vault syncing (§5)", got)
+	}
+
+	// Index-only, always: the bytes are exactly where the human left them.
+	if got := env.vaultFile(".env"); got != "AWS_SECRET_ACCESS_KEY=hunter2\n" {
+		t.Errorf("the vault holds %q at .env, want the bytes the human wrote: obsync takes a "+
+			"refused path out of the index and never off the disk (§5)", got)
+	}
+}
+
+// The same promise for a path that is over the size ceiling rather than named
+// on the list, because the refusal layer is one layer and a 200MB attachment
+// somebody staged is a push that the remote rejects and a run that keeps
+// rejecting.
+func TestAnOversizedFileAHumanStagedIsTakenBackOutRatherThanCommitted(t *testing.T) {
+	t.Parallel()
+
+	env := newVaultWith(t, "OBSYNC_SIZE_CEILING=1KB")
+	env.writeAttachment("Attachments/the video I dragged in.mp4", 4096)
+	env.writeNote("Daily/2026-08-24.md", "and everything else still syncs\n")
+	env.mustGit(env.vault, "add", "-A")
+
+	env.wake()
+
+	if env.remoteHolds("Attachments/the video I dragged in.mp4") {
+		t.Errorf("the remote holds an attachment over the configured size ceiling, which a human "+
+			"staged (§5). obsync said:\n%s", env.saidSoFar())
+	}
+	if !env.remoteHolds("Daily/2026-08-24.md") {
+		t.Error("the remote holds no Daily/2026-08-24.md: one oversized attachment must not stop " +
+			"the notes reaching the remote (§5)")
+	}
+	if !env.vaultHoldsYet("Attachments/the video I dragged in.mp4") {
+		t.Error("the vault no longer holds the attachment on disk; obsync unstages and never " +
+			"deletes (§5)")
+	}
+}
+
+// The untracking one-shot's commit records the index like every other commit,
+// so it passes the refusal layer like every other commit. It is the one commit
+// obsync makes that is not built from the committable set, which is exactly why
+// it is the one worth checking.
+func TestTheUntrackingCommitDoesNotCarryARefusedPathAHumanStaged(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.vaultAlreadyTracks(".obsidian/workspace.json")
+	env.writeNote(".env", "AWS_SECRET_ACCESS_KEY=hunter2\n")
+	env.mustGit(env.vault, "add", "-A")
+
+	env.turn()
+	env.awaitIdle()
+	env.advance(70 * time.Second)
+	env.advance(70 * time.Second)
+
+	if env.vaultTracks(".obsidian/workspace.json") {
+		t.Fatalf("the vault still tracks .obsidian/workspace.json, so the one-shot did not run and "+
+			"nothing below is being asserted. obsync said:\n%s", env.saidSoFar())
+	}
+	if env.remoteHoldsYet(".env") {
+		t.Errorf("the remote holds .env, carried out by the one commit obsync makes that is not "+
+			"built from the committable set (§5). obsync said:\n%s", env.saidSoFar())
+	}
+	if got := env.vaultFile(".env"); got != "AWS_SECRET_ACCESS_KEY=hunter2\n" {
+		t.Errorf("the vault holds %q at .env, want the bytes the human wrote (§5)", got)
+	}
 }

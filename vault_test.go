@@ -783,6 +783,28 @@ func (e *vaultEnv) removeHook(name string) {
 	}
 }
 
+// installVaultHook writes an executable hook into the vault's own repo, and
+// removeVaultHook takes it away again. A hook is the human's file in the
+// human's repo, and obsync sets no core.hooksPath, so this is how a test
+// arranges the one thing that fails a local git obsync had every reason to
+// expect to succeed.
+func (e *vaultEnv) installVaultHook(name, script string) {
+	e.t.Helper()
+
+	path := filepath.Join(e.vault, ".git", "hooks", name)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		e.t.Fatalf("installing the vault's %s hook: %v", name, err)
+	}
+}
+
+func (e *vaultEnv) removeVaultHook(name string) {
+	e.t.Helper()
+
+	if err := os.Remove(filepath.Join(e.vault, ".git", "hooks", name)); err != nil {
+		e.t.Fatalf("removing the vault's %s hook: %v", name, err)
+	}
+}
+
 // lockedBuffer is what obsync logs into. The loop writes from its own
 // goroutine, so the buffer is locked rather than left to -race to find.
 type lockedBuffer struct {

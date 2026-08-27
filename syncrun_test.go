@@ -483,6 +483,13 @@ func TestTheNextRunPushesWhatTheLastOneCouldNot(t *testing.T) {
 // already tracks. An ordinary run gained no git, and neither did the network
 // half, which is what this test is actually about.
 //
+// Re-measured after the refusal layer moved to the index rather than adjusted,
+// and still twenty-one: the diff-index the refusal check reads is the one the
+// commit message was already written from, and the `git reset` that takes a
+// refused path back out runs only when something else staged one. The two runs
+// that do cost a git more than this one are the churn one-shot's, which happens
+// once ever, and any run that finds a refused path in the index.
+//
 // The loop waits on the same clock for its own cadence, and those waits are not
 // timeouts: nothing is killed when one expires. So the assertion is both halves
 // — one git was timed out, and every other wait obsync took out was it waiting
