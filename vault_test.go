@@ -324,8 +324,8 @@ const remoteSeedNote = "the note someone else pushed\n"
 
 // The timing constants a test may not read from obsync, restated here on
 // purpose: a test that asserts 120s by importing the constant that sets it
-// asserts nothing. These are §1's and §2's numbers, and each is written out at
-// the assertion that uses it.
+// asserts nothing. These are §1's, §2's and §6's numbers, and each is written
+// out at the assertion that uses it.
 const (
 	networkDeadline  = 120 * time.Second
 	shutdownDeadline = 30 * time.Second
@@ -333,6 +333,7 @@ const (
 	maxWaitCap       = 5 * time.Minute
 	tick             = 60 * time.Second
 	tickJitter       = 6 * time.Second
+	settleInterval   = time.Second
 )
 
 // wake is one wake-up, and the loop's unit of work: obsync performs exactly one
@@ -838,6 +839,11 @@ type fakeClock struct {
 	waiting []*sleeper
 	taken   []time.Duration
 
+	// spent is every settle interval obsync has spent, as against taken, which
+	// is every deadline it has waited on. The two are different acts (§6,
+	// internal/clock).
+	spent []time.Duration
+
 	// live is the deadline obsync is currently waiting on, which is the last
 	// one it took out: the sync loop takes out exactly one at a time, and when
 	// a wake-up shortens it the shorter one is the one it now listens to. The
@@ -849,6 +855,17 @@ type fakeClock struct {
 	// waits carries one value per deadline taken out, in order, so a test can
 	// wait for obsync to be waiting rather than sleeping until it probably is.
 	waits chan time.Duration
+
+	// duringSettle is what happens in the vault while obsync is inside a
+	// settle interval — the third writer, or a human still typing. It is the
+	// one window a test cannot reach through the clock, because obsync spends
+	// it inside a run rather than waiting on it between two, so it is reached
+	// through the Sleep that opens it instead.
+	//
+	// It stays registered until a test replaces it, which is what "still being
+	// written" means across more than one run; a test whose writer finishes
+	// clears it.
+	duringSettle func()
 }
 
 type sleeper struct {
@@ -881,6 +898,50 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	default:
 	}
 	return waiter.ch
+}
+
+// Sleep is the settle interval, and it is the one wait this clock services
+// itself rather than leaving for a test to drive: obsync spends it in the
+// middle of a sync run, so nothing outside that run is in a position to move
+// the clock past it.
+//
+// Time does not move here, and that is deliberate rather than a shortcut. What
+// the settle guard compares is two readings of the *filesystem's* clock, never
+// this one, so a path can move across the interval without a nanosecond
+// passing here — and leaving this clock where it was keeps every cadence
+// deadline a run is measured against exactly where the test put it.
+//
+// It is kept apart from the deadlines rather than among them, because those are
+// the ones a test drives and this is not one — and keeping it apart is also
+// what lets a test assert the interval's own number.
+func (c *fakeClock) Sleep(d time.Duration) {
+	c.mu.Lock()
+	c.spent = append(c.spent, d)
+	during := c.duringSettle
+	c.mu.Unlock()
+
+	if during != nil {
+		during()
+	}
+}
+
+// settleIntervalsSpent is every gap obsync has put between two readings of the
+// filesystem, in order.
+func (c *fakeClock) settleIntervalsSpent() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]time.Duration{}, c.spent...)
+}
+
+// duringSettle registers what the vault does while obsync is inside its settle
+// interval, which is how a test puts a writer in the one window the guard
+// exists to see across. Passing nil is the writer having finished.
+func (e *vaultEnv) duringSettle(during func()) {
+	e.t.Helper()
+
+	e.clock.mu.Lock()
+	defer e.clock.mu.Unlock()
+	e.clock.duringSettle = during
 }
 
 // drainDeadlines discards every deadline obsync has taken out so far, so that a
@@ -1006,6 +1067,18 @@ func (e *vaultEnv) vaultHoldsYet(path string) bool {
 
 	_, err := os.Lstat(filepath.Join(e.vault, path))
 	return err == nil
+}
+
+// vaultFileYet is vaultFile without stopping obsync: what the vault holds at a
+// path, for a test that has more clock to drive afterwards.
+func (e *vaultEnv) vaultFileYet(path string) string {
+	e.t.Helper()
+
+	content, err := os.ReadFile(filepath.Join(e.vault, path))
+	if err != nil {
+		e.t.Fatalf("the vault holds no %q: %v. obsync said:\n%s", path, err, e.log.String())
+	}
+	return string(content)
 }
 
 // saidSoFar is everything obsync has logged without stopping it, so that a test

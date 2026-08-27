@@ -1,7 +1,9 @@
 package git
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +68,35 @@ func (r *Repo) resolveOwnedPaths() error {
 	}
 	r.excludeFile, r.staging = exclude, staging
 	return nil
+}
+
+// sweepStagingDebris removes whatever a crash left in obsync's staging
+// directory (§6).
+//
+// Every file obsync writes goes write-then-rename through there, so a SIGKILL
+// between the write and the rename leaves a temporary file behind. Nothing ever
+// reads one — the name is unique per write and the destination is only ever the
+// renamed file — so this is tidiness rather than correctness, which is why a
+// sweep that fails is a debug line and not a refusal to sync a vault that is
+// otherwise sound.
+//
+// The directory itself stays: it is an owned path obsync declared (§10), and
+// what is swept is what is inside it.
+func (r *Repo) sweepStagingDebris() {
+	entries, err := os.ReadDir(r.staging)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			r.log.Debug("obsync could not read its own staging directory", "problem", err,
+				"path", r.staging)
+		}
+		return
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(r.staging, entry.Name())); err != nil {
+			r.log.Debug("obsync could not sweep what a crashed write left behind", "problem", err,
+				"path", filepath.Join(r.staging, entry.Name()))
+		}
+	}
 }
 
 // TrackedPluginData is every plugin data file the vault's history already

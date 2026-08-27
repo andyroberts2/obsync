@@ -28,6 +28,18 @@ const (
 	// can waive correctness is a bug with a timer.
 	maxWaitCap = 5 * time.Minute
 
+	// unsettledForLong is how long a path must stay continuously unsettled
+	// before obsync stops treating its exclusion as transient and says so
+	// (§6). Ten minutes is 2× the max-wait cap, which is what makes it safe:
+	// a legitimately busy file — one a human types into without a ten-second
+	// pause for a whole working stretch — is committed by the cap long before
+	// this, so what is left past it is a file something is rewriting faster
+	// than obsync can ever see it still.
+	//
+	// It is a threshold on a warning rather than on a behaviour: the path is
+	// excluded from the first second and this changes nothing about that.
+	unsettledForLong = 10 * time.Minute
+
 	// tick is the periodic wake-up that starts a sync run when nothing else
 	// has, and the upper bound on both "someone pushed from their laptop" and
 	// "the watcher dropped an event". One timer, not two — the tick subsumes

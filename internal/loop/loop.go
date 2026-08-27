@@ -7,10 +7,10 @@
 // go wrong under load.
 //
 // What a run does in this build: ask git what changed, take out the paths it
-// refuses to commit, commit the rest as one commit, fetch, classify,
-// fast-forward what is only behind, and push what is only ahead (#24, #27,
-// #28). Everything that will later stand between those steps — the gates
-// (#32), the settle guard (#29), and the out-of-tree merge a real divergence
+// refuses to commit and the ones still being written, commit the rest as one
+// commit, fetch, classify, fast-forward what is only behind, and push what is
+// only ahead (#24, #27, #28, #29). Everything that will later stand between
+// those steps — the gates (#32) and the out-of-tree merge a real divergence
 // needs (#30) — is a rule added to a loop that already turns.
 //
 // When it turns is cadence.go: the quiet window, the max-wait cap, the jittered
@@ -99,6 +99,22 @@ type Loop struct {
 	// commit it cannot push.
 	remoteInStep   bool
 	churnUntracked bool
+
+	// unsettled is every path obsync is currently leaving out of the commit
+	// because it is still being written, when each first looked that way, and
+	// which of them obsync has said so about (§6).
+	//
+	// In-memory and process-lifetime only, deliberately: a restart restarts the
+	// clock, which is acceptable for a warning that is not a gate.
+	unsettled map[string]unsettledPath
+}
+
+// unsettledPath is one path the settle guard is excluding: when obsync first
+// saw it move, and whether it has stopped looking transient loudly enough to
+// have been said.
+type unsettledPath struct {
+	since time.Time
+	said  bool
 }
 
 func New(cfg config.Config, log *slog.Logger, clk clock.Clock, wakes <-chan struct{}) *Loop {
@@ -408,6 +424,18 @@ func (l *Loop) perform(ctx context.Context, committing bool) error {
 
 	if committing {
 		if err := l.localHalf(); err != nil {
+			// An aborted run, and the abort tier reports nothing above debug:
+			// a path moved while obsync was staging it, so the index holds
+			// bytes obsync cannot vouch for and this pass gives up rather than
+			// committing them. The whole run gives up rather than pushing on
+			// with the network half — an aborted run is a pass, not a half —
+			// and the next wake-up starts fresh against a vault that has since
+			// stopped moving (§6, §7).
+			if errors.Is(err, errStageVerify) {
+				l.log.Debug("the sync run was abandoned rather than committing a path that moved "+
+					"while obsync was staging it", "problem", err)
+				return nil
+			}
 			return err
 		}
 	}
@@ -513,6 +541,68 @@ func (l *Loop) reportRefusals(refused []vault.Refusal) {
 	}
 }
 
+// errStageVerify is a path that moved on disk between the settle guard's second
+// sample and obsync's `git add` — the third writer, whose writes no sampling
+// window can anticipate (§6).
+//
+// It is an aborted run (§7): this pass gives up, nothing is reported above
+// debug, and the next tick retries against a vault that has stopped moving. The
+// index is left holding what the add captured, which the next run re-stages from
+// disk the moment the working tree and the index differ.
+var errStageVerify = errors.New("a path moved on disk while obsync was staging it")
+
+// reportUnsettled says which paths have stayed unsettled long enough to stop
+// looking transient, once each (§6, §9's WARN row).
+//
+// Transient exclusion is silent, because it is latency rather than news: a note
+// somebody is typing into is excluded from run after run and arrives the moment
+// they pause, and a WARN a tick for that is how a signal becomes noise.
+// Persistent exclusion is news — a note a plugin rewrites every 500ms never
+// reaches the remote at all, and a silently-skipped file that stays silent for
+// ever is the failure this reports.
+//
+// How long is unsettledForLong, and the reason for the number lives there
+// rather than being restated here. The tracking is in-memory and
+// process-lifetime only, deliberately: a restart restarts the clock, which is
+// acceptable for a warning that is not a gate. A path that settles is
+// forgotten, so the same file going hot again is news again — the same shape
+// reportRefusals has, and the transition out is silent for the same reason.
+//
+// Every exclusion is said at debug as it happens, which is §9's DEBUG row —
+// per-path settle-guard outcomes — and is the only place "why is this note not
+// in the commit" has an answer before the ten minutes are up.
+//
+// The standing signal is the attention note's fourth section (#38), which is
+// derived from this state rather than accumulated.
+func (l *Loop) reportUnsettled(unsettled []string, now time.Time) {
+	if l.unsettled == nil {
+		l.unsettled = map[string]unsettledPath{}
+	}
+	still := make(map[string]bool, len(unsettled))
+	for _, path := range unsettled {
+		still[path] = true
+		record, known := l.unsettled[path]
+		if !known {
+			record = unsettledPath{since: now}
+		}
+		l.log.Debug("the settle guard left a path out of this commit because it moved on disk while "+
+			"obsync was looking at it", "path", path, "unsettled_for", now.Sub(record.since))
+		if !record.said && now.Sub(record.since) >= unsettledForLong {
+			record.said = true
+			l.log.Warn("this path has moved on disk every time obsync has looked at it for a long "+
+				"time now, so it is not reaching the remote; the rest of your vault is syncing "+
+				"normally, and it will commit on its own as soon as whatever is writing it stops",
+				"path", path, "unsettled_for", now.Sub(record.since))
+		}
+		l.unsettled[path] = record
+	}
+	for path := range l.unsettled {
+		if !still[path] {
+			delete(l.unsettled, path)
+		}
+	}
+}
+
 // localHalf is status and commit: the part of a run that touches only the vault
 // and its .git.
 func (l *Loop) localHalf() error {
@@ -529,13 +619,14 @@ func (l *Loop) localHalf() error {
 	// has already come out of it, by git rather than here — status does not
 	// report an untracked path the exclude file covers — which is what leaves
 	// the vault's own .gitignore able to overrule the floor (§5). What obsync
-	// subtracts itself is the refusal layer; unsettled paths join it in #29.
-	committable, refused := vault.CommittableSet(l.config.VaultPath, changedPaths(changed), l.config.SizeCeiling)
-	l.reportRefusals(refused)
+	// subtracts itself is the refusal layer and the settle guard (§6).
+	committable := vault.CommittableSet(l.clock, l.config.VaultPath, changedPaths(changed), l.config.SizeCeiling)
+	l.reportRefusals(committable.Refused)
+	l.reportUnsettled(committable.Unsettled, l.clock.Now())
 
-	// A tree holding nothing but refused paths is quiet: no commit, no push,
-	// and no repeated warning (§5).
-	if len(committable) == 0 {
+	// A tree holding nothing but refused and unsettled paths is quiet: no
+	// commit, no push, and no repeated warning (§5).
+	if len(committable.Paths) == 0 {
 		return nil
 	}
 
@@ -546,8 +637,17 @@ func (l *Loop) localHalf() error {
 	// committable set decides whether to commit and the working tree decides
 	// what to add, and a run with nothing to add still commits what a human
 	// staged.
-	if err := l.repo.Stage(toStage(changed, committable)); err != nil {
+	adding := toStage(changed, committable)
+	if err := l.repo.Stage(adding); err != nil {
 		return err
+	}
+	// Stage-verify: nothing may have moved on disk while obsync was staging it
+	// (§6). The paths were verified stable across the settle interval a moment
+	// ago, which is what makes aborting safe here — the third writer is the one
+	// whose writes no sampling window can anticipate, and the index now holds
+	// bytes obsync cannot vouch for.
+	if moved := committable.StageVerify(adding); moved != "" {
+		return fmt.Errorf("%w: %q", errStageVerify, moved)
 	}
 	// What the index holds is what the commit will carry, and it is not always
 	// what status reported: an edit that puts a file back the way HEAD has it
@@ -624,7 +724,7 @@ func (l *Loop) refusedAmong(staged []git.Change) (string, []string) {
 	for i, change := range staged {
 		paths[i] = change.Path
 	}
-	_, refusals := vault.CommittableSet(l.config.VaultPath, paths, l.config.SizeCeiling)
+	refusals := vault.Refusals(l.config.VaultPath, paths, l.config.SizeCeiling)
 	if len(refusals) == 0 {
 		return "", nil
 	}
@@ -645,18 +745,39 @@ func changedPaths(changed []git.ChangedPath) []string {
 	return paths
 }
 
-// toStage is the committable set narrowed to the paths the working tree holds
-// something to stage for, which is what `git add` is given (git.ChangedPath).
-func toStage(changed []git.ChangedPath, committable []string) []string {
-	keep := make(map[string]bool, len(committable))
-	for _, path := range committable {
+// toStage is the committable set narrowed to what `git add` may actually be
+// given. Two separate facts narrow it, and getting either wrong is fatal to the
+// whole commit rather than to the one path (git.ChangedPath).
+//
+// The committable set still decides whether to commit; this decides only what
+// is named on the add, so a run with nothing to add still commits what a human
+// staged.
+func toStage(changed []git.ChangedPath, committable vault.Committable) []string {
+	keep := make(map[string]bool, len(committable.Paths))
+	for _, path := range committable.Paths {
 		keep[path] = true
 	}
-	paths := make([]string, 0, len(committable))
+	paths := make([]string, 0, len(committable.Paths))
 	for _, change := range changed {
-		if change.InWorkingTree && keep[change.Path] {
-			paths = append(paths, change.Path)
+		// Nothing in the working tree to stage: the index already holds this
+		// change in full, and if git also ignores the path, naming it is fatal.
+		if !change.InWorkingTree || !keep[change.Path] {
+			continue
 		}
+		// And nothing on disk to match: a path git has no index entry for is
+		// matched by the file alone, so once it is gone the pathspec matches
+		// nothing and git refuses the whole add with it. That is the other end
+		// of the window the settle guard narrows (§6) — the guard's second
+		// sample already looked, so this is its answer rather than a stat.
+		// Naming it instead would spend a failed run and an ERROR on a note
+		// that is simply not there any more, which §7 tiers as an aborted run.
+		// A *tracked* path that was deleted is not skipped:
+		// the deletion is the change, and the index entry is what the pathspec
+		// matches.
+		if change.Untracked && !committable.OnDisk(change.Path) {
+			continue
+		}
+		paths = append(paths, change.Path)
 	}
 	return paths
 }
@@ -688,6 +809,14 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 				"remote. obsync will do neither itself — merging would resurrect what the rewrite "+
 				"removed and pushing would restore it. This clears on its own once fixed; no "+
 				"restart needed")
+		return nil
+	case errors.Is(err, git.ErrUnsettledOnWriteSide):
+		// The other aborted run the incoming change can produce, and the same
+		// tier: a path it overwrites is still being written, so nothing is
+		// applied at all. All-or-nothing, because a partial apply is not a
+		// valid state the way a partial commit is (§6).
+		l.log.Debug("the sync run was abandoned rather than applying over a file still being written",
+			"problem", err)
 		return nil
 	case errors.Is(err, git.ErrVaultWrittenMidRun):
 		// An aborted run, and the abort tier reports nothing above debug: the

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/andyroberts2/obsync/internal/config"
+	"github.com/andyroberts2/obsync/internal/vault"
 )
 
 // SyncState is how the tracked branch stands against its upstream counterpart
@@ -243,15 +244,30 @@ func (r *Repo) fastForward(tip string) error {
 	if err != nil {
 		return err
 	}
+	overwrites := make(map[string]bool, len(touched))
+	for _, path := range touched {
+		overwrites[path] = true
+	}
 	changed, err := r.Changed()
 	if err != nil {
 		return err
 	}
 	for _, change := range changed {
-		if touched[change.Path] {
+		if overwrites[change.Path] {
 			return fmt.Errorf("%w: the vault holds a change to %q, which the incoming commits "+
 				"overwrite", ErrVaultWrittenMidRun, change.Path)
 		}
+	}
+
+	// And the settle guard, over the same scope and immediately before the
+	// apply (§6). It catches what the check above cannot: a write that started
+	// after that status, into a path the incoming commits land on. The apply is
+	// all-or-nothing — there is no skipping a path here, because a partial
+	// apply leaves the vault holding a tree obsync never computed — so one
+	// unsettled path abandons the run, and recomputing costs nothing.
+	if moving := vault.Unsettled(r.clock, r.vault, touched); moving != "" {
+		return fmt.Errorf("%w: %q is still being written and the incoming commits overwrite it",
+			ErrUnsettledOnWriteSide, moving)
 	}
 
 	// The tip by object name rather than by ref, so that what is applied is
@@ -267,8 +283,10 @@ func (r *Repo) fastForward(tip string) error {
 	return err
 }
 
-// pathsBetween is every path whose content differs between two commits.
-func (r *Repo) pathsBetween(from, to string) (map[string]bool, error) {
+// pathsBetween is every path whose content differs between two commits, in
+// git's own order — which is what makes the path an abandoned run names the
+// same one on every run rather than whichever a map handed back first.
+func (r *Repo) pathsBetween(from, to string) ([]string, error) {
 	out, err := r.run(invocation{
 		dir:  r.vault,
 		args: []string{"diff-tree", "-r", "-z", "--name-only", from, to},
@@ -276,11 +294,7 @@ func (r *Repo) pathsBetween(from, to string) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	paths := map[string]bool{}
-	for _, path := range splitNUL(out) {
-		paths[path] = true
-	}
-	return paths, nil
+	return splitNUL(out), nil
 }
 
 // remoteTip is the commit the upstream counterpart names, or "" when obsync has
@@ -428,3 +442,13 @@ var ErrNoUpstreamCounterpart = errors.New("the remote does not hold the tracked 
 // it would revert the working tree to HEAD, so the human's most recent edits
 // would vanish from their open vault for the duration.
 var ErrVaultWrittenMidRun = errors.New("the vault was written where the incoming change lands")
+
+// ErrUnsettledOnWriteSide is a path the incoming change overwrites that was
+// still being written when obsync looked, across the settle interval (§6).
+//
+// It is an aborted run (§7), and the write side is all-or-nothing: skipping the
+// path would leave the vault holding a tree obsync never computed, which
+// write-verify then turns into a full freeze, and applying anyway would eat the
+// user's keystrokes silently — write-verify would not catch that either,
+// because obsync wrote exactly what it intended.
+var ErrUnsettledOnWriteSide = errors.New("a path the incoming change overwrites is still being written")

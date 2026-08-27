@@ -490,10 +490,16 @@ func TestTheNextRunPushesWhatTheLastOneCouldNot(t *testing.T) {
 // that do cost a git more than this one are the churn one-shot's, which happens
 // once ever, and any run that finds a refused path in the index.
 //
+// Re-measured again after the settle guard (#29) and still twenty-one, which is
+// the point of it being stat-driven: two samples and a gap, and not one git
+// between them.
+//
 // The loop waits on the same clock for its own cadence, and those waits are not
 // timeouts: nothing is killed when one expires. So the assertion is both halves
 // — one git was timed out, and every other wait obsync took out was it waiting
-// for its next run.
+// for its next run. The settle interval is neither, and is not in this list: it
+// is a gap obsync spends rather than a deadline it waits on, and it has its own
+// row (TestTheSettleIntervalIsOneSecond).
 func TestOnlyTheNetworkGitIsEverTimedOut(t *testing.T) {
 	t.Parallel()
 
