@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1735,4 +1736,39 @@ func (e *vaultEnv) writeAttachment(path string, size int) {
 	e.t.Helper()
 
 	e.writeNote(path, strings.Repeat("a", size))
+}
+
+// theOtherDevicePushesInsideTheRun is the race a push can lose: somebody else
+// lands a commit on the remote between obsync's fetch and obsync's push.
+//
+// It is reached through the settle interval, which is the one window a test can
+// act inside a sync run at all (duringSettle) — and it is the right window
+// rather than a convenient one. The write side spends it immediately before
+// obsync applies the tree it computed against the tip it fetched, so a commit
+// landing there is one obsync's push was never going to be a fast-forward of,
+// which is exactly what losing a race means.
+//
+// Each firing is its own commit, because a run spends the guard more than once
+// and a second push of the same bytes would be no push at all. It goes on
+// firing until a test clears it with duringSettle(nil), which is the other
+// device stopping.
+func (e *vaultEnv) theOtherDevicePushesInsideTheRun() {
+	e.t.Helper()
+
+	landed := 0
+	e.duringSettle(func() {
+		landed++
+		e.remoteCommit("Laptop/note "+strconv.Itoa(landed)+".md", "written on the laptop\n")
+	})
+}
+
+// remoteRefusesPacksOver is a real receive.maxInputSize on the bare remote: the
+// limit git enforces incrementally inside index-pack, which is why a client
+// uploads the whole doomed pack every time and why waiting to be sure costs
+// real bytes (§7). It is the remote's own setting; obsync neither reads nor
+// writes it.
+func (e *vaultEnv) remoteRefusesPacksOver(bytes int) {
+	e.t.Helper()
+
+	e.mustGit(e.remote, "config", "receive.maxInputSize", strconv.Itoa(bytes))
 }

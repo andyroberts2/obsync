@@ -88,12 +88,21 @@ holds no history, `.git/index`, and builds it again from HEAD. If the run after
 that fails too it stops, tells you the command that failed, git's own words, and
 how much room is left on the disk when there is almost none, and then retries
 one read-only `git status` a tick until the repository reads again. It repairs
-nothing else and never re-clones. The **declared surface** — everything a
-version number will make a promise about — is written down ahead of the code
-that implements it.
+nothing else and never re-clones. And when a push does not land, obsync reads
+what the remote actually did with it out of git's own machine field rather than
+guessing: a push that lost a race to another device is retried on the next run
+and nobody is told, a remote that was unreachable is waited out, and a push the
+remote *rejected* — a hook, a branch protection, a quota, a pack over a limit —
+stops the network half at once and tells you, because no amount of waiting
+repairs a verdict. It relays the remote's own words verbatim and never guesses
+at which file or which rule is the problem; your vault keeps being committed
+meanwhile, the whole network half is retried once an hour so other people's
+changes still arrive, and the commit the remote refused is never rewound and
+never capped. The **declared surface** — everything a version number will make a
+promise about — is written down ahead of the code that implements it.
 
-Not yet: push dispositions, the attention note, the status file and the
-container image. obsync is not something to point at a vault yet.
+Not yet: the attention note, the status file and the container image. obsync is
+not something to point at a vault yet.
 
 ## What obsync will never do
 

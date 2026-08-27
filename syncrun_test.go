@@ -444,20 +444,26 @@ func TestAPushTheRemoteDeclinesStillLeavesTheCommitInTheVault(t *testing.T) {
 // ordinary run: the commit is still there, still unpushed, and goes as soon as
 // the remote takes it (§2).
 //
-// The run that takes it is the next tick past the 60s the failed push bought
-// itself, because only the network half backs off and the tick is what retries
-// it — a rate limit on the loop obsync already turns rather than a schedule of
-// its own.
+// The run that takes it is the next tick past the 60s the failed network half
+// bought itself, because only the network half backs off and the tick is what
+// retries it — a rate limit on the loop obsync already turns rather than a
+// schedule of its own.
+//
+// The failure is a remote that was not there, which is the disposition table's
+// last row: exit 128 with no ref line at all, so no verdict was ever returned
+// and waiting is exactly what repairs it (§7). It used to be a `pre-receive`
+// hook declining, which since #35 is a *verdict* rather than a failure and
+// waits an hour rather than sixty seconds — push_test.go carries that row.
 func TestTheNextRunPushesWhatTheLastOneCouldNot(t *testing.T) {
 	t.Parallel()
 
 	env := newVault(t)
-	env.installHook("pre-receive", "#!/bin/sh\nexit 1\n")
 	env.writeNote("Daily/2026-08-24.md", "eventually\n")
 
+	env.remoteAway()
 	env.turn()
 	env.awaitIdle()
-	env.removeHook("pre-receive")
+	env.remoteBack()
 	env.advance(70 * time.Second)
 
 	if got := env.remoteFile("Daily/2026-08-24.md"); got != "eventually\n" {
