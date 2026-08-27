@@ -140,10 +140,18 @@ type Loop struct {
 	// is also what a bad revision and a locked index exit.
 	//
 	// Runs, not commands: one run failing three commands over the same damaged
-	// object is one piece of evidence. It is reset by any run whose local half
-	// completes, and a run that never ran its local half is neither — the
-	// command that would have found the damage was not run, so that run is
-	// evidence of nothing.
+	// object is one piece of evidence. It is counted at each of the sites in
+	// perform that touch only the vault and its `.git`, and reset only by a run
+	// whose local half completed.
+	//
+	// Those two sets are deliberately not the same one, which is worth saying
+	// because it looks like an oversight and is not. A run the quiet window
+	// stopped from committing still asks the interlocks, the index lock, the
+	// index and HEAD, so it can count; what it cannot do is reset, because the
+	// commit that would have found the damage was never attempted and a run
+	// that did not do the work is evidence that nothing is wrong with it.
+	// Resetting on it would keep the streak from ever reaching five on a vault
+	// somebody is typing into, which is the vault this matters most on.
 	//
 	// In-memory and process-lifetime only, like the two records above. A
 	// restart restarts the count, which is right rather than merely tolerable:
@@ -810,11 +818,23 @@ func (l *Loop) whatItLooksLike(err error) string {
 // so the recipe is the human's — and it opens by telling them not to delete the
 // thing their unpushed commits are still in, because that is the reflex this
 // costs the most.
+//
+// What it says about the index is what obsync *discarded*, never what it
+// managed to put back. The freeze is reached by a run that failed after the
+// rebuild, and the commonest way to reach it is a rebuild that could not run at
+// all — `read-tree` reads the object HEAD names, which is the damage itself —
+// so the vault most often has no index when this is read. Claiming one had been
+// rebuilt would contradict the fact in the same log line, and it would leave an
+// operator reading the `git status` that follows — every tracked path reported
+// deleted, measured at both matrix points — as a lost vault rather than as a
+// missing index.
 const damagedRepoRemedy = "keep the old .git rather than deleting it: the commits obsync had not " +
 	"pushed yet are in it and may still be recoverable, which is exactly why obsync never " +
 	"re-clones or repairs a repository by replacing it. Clone the remote beside the vault, move " +
-	"its .git into place, and check what git says. obsync has already rebuilt the index, which " +
-	"is the only repository state it may discard; everything else is history and is yours. " +
+	"its .git into place, and check what git says. obsync has already discarded the vault's " +
+	".git/index, which is the only repository state it may discard, and it builds one back from " +
+	"HEAD before it commits anything — so a `git status` that reports every file as deleted is a " +
+	"missing index rather than a lost vault. Everything else is history and is yours. " +
 	"docs/operations.md has the recipe. While this stands obsync runs one read-only `git status` " +
 	"a tick and nothing else, and starts syncing again the moment that succeeds" + git.SelfClearing
 

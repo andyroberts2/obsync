@@ -1693,6 +1693,23 @@ func (e *vaultEnv) theVaultsIndexIsTruncated() {
 	}
 }
 
+// aThirdWriterRemovesTheVaultsIndex is the state obsync's own index rebuild can
+// leave, reached by the writer obsync cannot see: a human or a script that ran
+// `rm .git/index` in the vault, on a repository with nothing else wrong with it
+// and no failure streak behind it.
+//
+// Measured at both matrix points: a missing index is one git reads as *empty*,
+// so `git status` exits 0 and reports every tracked path twice — as a staged
+// deletion and as untracked. Nothing about that is a failure, which is exactly
+// why it is the dangerous one.
+func (e *vaultEnv) aThirdWriterRemovesTheVaultsIndex() {
+	e.t.Helper()
+
+	if err := os.Remove(filepath.Join(e.vault, ".git", "index")); err != nil {
+		e.t.Fatalf("removing the vault's index: %v", err)
+	}
+}
+
 // vaultStages reports whether the vault's index holds a path staged for a
 // commit that HEAD does not have — a human's own `git add`, which the index
 // rebuild is what discards.

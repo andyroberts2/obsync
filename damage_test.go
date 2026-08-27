@@ -215,6 +215,28 @@ func TestADamagedRepositoryFreezesOnceRebuildingTheIndexHasNotHelped(t *testing.
 				"git's own words and what they look like (§9). obsync said:\n%s", wanted, said)
 		}
 	}
+	// And what the freeze may not say. The rebuild at five could not run here —
+	// `read-tree` reads the object HEAD names, which is the damage — so the
+	// discard left no index at all, and this is the state an operator reads the
+	// freeze in. A remedy claiming obsync had rebuilt the index would
+	// contradict the fact in the same log line, and would leave them reading
+	// the `git status` they run next — every tracked path reported deleted,
+	// measured at both matrix points — as a lost vault rather than as a missing
+	// index.
+	if env.vaultHasAnIndex() {
+		t.Fatal("the vault has an index after a rebuild that could not read HEAD, so this test is " +
+			"no longer standing on the state it is about")
+	}
+	if strings.Contains(said, "rebuilt the index") {
+		t.Errorf("the damage freeze says obsync rebuilt the index while the vault has none, want "+
+			"it to say only what obsync discarded: a remedy that contradicts the fact beside it "+
+			"is the one thing a log that exists to be believed may not do (§9). obsync said:\n%s", said)
+	}
+	if !strings.Contains(said, "reports every file as deleted is a missing index") {
+		t.Errorf("the damage freeze does not say what a missing index makes `git status` look "+
+			"like, want it to: that is the next thing the operator runs, and obsync is the only "+
+			"one that knows it deleted the index (§9). obsync said:\n%s", said)
+	}
 	if !env.stillTurning() {
 		t.Error("obsync's sync loop returned over a damaged repository, want it parked alive: " +
 			"obsync never exits on a sync failure, because a crash-looping container buries the " +
@@ -572,6 +594,137 @@ func TestObsyncShipsNoRecoverSubcommand(t *testing.T) {
 			t.Errorf("obsync %s exited 0, want it refused: obsync never self-repairs a damaged "+
 				"repo and ships no subcommand that does (§7). It said: %s", name, stderr)
 		}
+	}
+}
+
+// The state obsync's own rebuild leaves, reached by the one writer obsync
+// cannot see and with no failure streak behind it: a third writer's `rm
+// .git/index` on a repository with nothing else wrong with it.
+//
+// Nothing here fails, which is what makes it the sharp case. A missing index is
+// one git reads as empty, `git status` exits 0, and every tracked path is
+// reported twice — as a staged deletion and as untracked. A run that took that
+// at face value would stage back what it was allowed to and carry the staged
+// *deletion* of what it was not, which is any path the settle guard is holding
+// out of this commit (§6): obsync publishing the deletion of a note somebody is
+// mid-way through typing, on a repository that was never damaged.
+//
+// It is asked before either half of every run rather than where obsync's own
+// rebuild leaves it, and this is the row that says why.
+func TestAThirdWritersRemovedIndexDoesNotPublishTheDeletionOfAPathLeftOut(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.writeNote("Daily/2026-08-24.md", "the version the remote holds\n")
+	env.turn()
+	env.awaitIdle()
+	if !env.remoteHoldsYet("Daily/2026-08-24.md") {
+		t.Fatal("the remote does not hold the note this test is about, so it is measuring nothing")
+	}
+
+	// Somebody is typing into that note and does not stop, so every run from
+	// here finds it moving across the settle interval and leaves it out.
+	env.writeNote("Daily/2026-08-24.md", "a version being typed")
+	typed := 0
+	env.duringSettle(func() {
+		typed++
+		env.writeNote("Daily/2026-08-24.md", strings.Repeat("still typing ", typed))
+	})
+	env.aThirdWriterRemovesTheVaultsIndex()
+
+	env.advance(70 * time.Second)
+
+	if got, held := env.remoteContentYet("Daily/2026-08-24.md"); !held || got != "the version the remote holds\n" {
+		t.Errorf("the remote holds %q (present: %t) after a third writer removed the vault's "+
+			"index, want the version it already had: the settle guard was holding that path out "+
+			"of the commit, and an empty index would have obsync publish its deletion (§6, §7)",
+			got, held)
+	}
+	if said := env.saidSoFar(); strings.Contains(said, "Delete") {
+		t.Errorf("obsync composed a deletion after a third writer removed the vault's index, want "+
+			"none at all: nothing was deleted from the vault. It said:\n%s", said)
+	}
+	if !env.vaultHasAnIndex() {
+		t.Error("the vault still has no index after a run, want one built from HEAD: obsync asks " +
+			"before either half of every run, because a third writer's own `rm .git/index` " +
+			"reaches the state obsync's rebuild does and deserves the same answer (§7)")
+	}
+	if said := env.said(); strings.Contains(said, indexRebuilt) {
+		t.Errorf("obsync said it had discarded the vault's index, want it to say nothing: it "+
+			"discarded nothing — there was nothing there — and the rebuild's WARN is about a "+
+			"cost that was not paid here (§9). It said:\n%s", said)
+	}
+}
+
+// The commonest local failure that is not damage at all, and the one the streak
+// is obliged to count anyway: a stale `index.lock` a SIGKILLed git left behind,
+// which never repairs itself.
+//
+// It is here because it is the harshest test of "whatever the stated reason".
+// The lock has a tier row of its own — an aborted run, reported at debug and
+// nothing more — and six runs of it is still six runs of obsync unable to work
+// in the vault, so it escalates like anything else. What the freeze must not do
+// is guess: the fact it carries names the lock rather than an object, and the
+// vault comes back on its own the moment a human deletes the file.
+func TestAStaleIndexLockEscalatesLikeAnythingElseAndRecoversWhenItGoes(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.turn()
+	env.awaitIdle()
+	soundAt := env.vaultTip()
+
+	env.someoneElseHoldsTheIndexLock()
+	env.writeNote("Daily/2026-08-24.md", "a note written while a stale lock sat in the vault\n")
+
+	// Five runs is not yet a conclusion, and every one of them is an aborted
+	// run: the abort tier reports nothing above debug (§7).
+	for range 5 {
+		env.advance(70 * time.Second)
+	}
+	if said := env.saidSoFar(); strings.Contains(said, frozenAndTouchingNothing) {
+		t.Errorf("obsync froze before it had tried the run that follows the index rebuild, want it "+
+			"to attempt one more first (§7). It said:\n%s", said)
+	}
+
+	env.advance(70 * time.Second)
+
+	said := env.saidSoFar()
+	if !strings.Contains(said, frozenAndTouchingNothing) {
+		t.Errorf("obsync said %q after six runs it could not work in the vault, want the full "+
+			"freeze the streak reaches whatever the stated reason: an `index.lock` somebody else "+
+			"holds has a tier row and is still six runs of obsync unable to work (§7)", said)
+	}
+	if !strings.Contains(said, "index.lock") {
+		t.Errorf("the freeze does not name the lock that caused it, want the last failure's own "+
+			"words: the fact a freeze carries is evidence rather than a diagnosis, and obsync "+
+			"never guesses at damage it has not seen (§9). It said:\n%s", said)
+	}
+	if got := env.vaultTip(); got != soundAt {
+		t.Errorf("the vault's branch moved to %q while obsync could not stage, want it left at "+
+			"%q: a run that cannot stage changes nothing (§7)", got, soundAt)
+	}
+
+	// The human deletes the file. Nothing tells obsync so, and nothing has to.
+	env.theIndexLockIsReleased()
+	for range 3 {
+		env.advance(70 * time.Second)
+	}
+
+	if got, held := env.remoteContentYet("Daily/2026-08-24.md"); !held || got != "a note written while a stale lock sat in the vault\n" {
+		t.Errorf("the remote holds %q once the stale lock was gone, want the note obsync had been "+
+			"unable to commit: every freeze self-clears when its cause is repaired, with no "+
+			"restart (§7)", got)
+	}
+	if !env.vaultHasAnIndex() {
+		t.Error("the vault has no index after obsync went back to work, want one built from HEAD: " +
+			"the rebuild at five could not write one back while the lock was held, and a run " +
+			"against a missing index would commit the deletion of every path obsync did not " +
+			"stage (§6, §7)")
+	}
+	if got := env.vaultFileYet("Daily/2026-08-24.md"); got != "a note written while a stale lock sat in the vault\n" {
+		t.Errorf("the vault holds %q, want the human's bytes untouched throughout: obsync may "+
+			"discard derived state and never history, and nothing here was damaged (§7)", got)
 	}
 }
 
