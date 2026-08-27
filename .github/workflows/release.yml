@@ -60,8 +60,11 @@ jobs:
     steps:
       # Third-party actions are SHA-pinned: a tag is a mutable pointer.
       #
-      # The whole history, because the gate diffs this tag against the previous
-      # one and a shallow checkout has neither.
+      # The whole history *and* every tag, because the gate reads both: it diffs
+      # this tag against the previous release, and it decides which floating
+      # names this release is the newest under. A shallow checkout has neither,
+      # and the second one fails towards publishing `latest` from an older
+      # build, so this line is load-bearing rather than a performance setting.
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

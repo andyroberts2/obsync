@@ -211,6 +211,72 @@ fi
 # once, at the most dangerous release there is, is worse than a tag nothing
 # points at. `latest` is here for the same reason: people expect it, and no
 # document quotes it.
+#
+# **A floating name is published only by the release that is newest under it**,
+# which is that same rejected alternative arriving from the other side. A
+# release is not always the newest one: a backport — `v1.3.5` cut from a
+# maintenance branch while 1.4.2 is out — is a real release, owed its own
+# immutable tag and owed the `1.3` its own line has just advanced. It does not
+# own `1` or `latest`, and taking them is worse than the scheduled rebuild §12
+# rejects, because the page tells an operator to *pin the floating major*: a `1`
+# that moved backwards downgrades every unattended sidecar following it to older
+# code on its next pull, with nobody acting and nothing to read about it.
+newest_minor=yes   # nothing higher in this MAJOR.MINOR line
+newest_major=yes   # nothing higher in this MAJOR
+newest_overall=yes # nothing higher anywhere
+while IFS= read -r other; do
+	other="${other#v}"
+	# Only a plain MAJOR.MINOR.PATCH is a release, so only one can hold a
+	# floating name away from this tag. A `v1.5.0-rc1` publishes nothing and
+	# therefore withholds nothing — the same rule read the other way round.
+	case "$other" in
+	*[!0-9.]* | *..* | .* | *. | *.*.*.*) continue ;;
+	*.*.*) ;;
+	*) continue ;;
+	esac
+
+	other_major="${other%%.*}"
+	other_minor="${other#*.}"
+	other_patch="${other_minor##*.}"
+	other_minor="${other_minor%%.*}"
+
+	# Numerically throughout: compared as strings, 0.10.0 is older than 0.9.0,
+	# and the tenth minor is exactly where a project that has been running
+	# unattended for a year finds itself.
+	if [ "$other_major" -gt "$major" ]; then
+		newest_overall=no
+	elif [ "$other_major" -eq "$major" ]; then
+		if [ "$other_minor" -gt "$minor" ]; then
+			newest_overall=no
+			newest_major=no
+		elif [ "$other_minor" -eq "$minor" ] && [ "$other_patch" -gt "$patch" ]; then
+			newest_overall=no
+			newest_major=no
+			newest_minor=no
+		fi
+	fi
+done <<EOF
+$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*')
+EOF
+
+tags="$IMAGE:$version"
+held=""
+if [ "$newest_minor" = yes ]; then
+	tags="$tags,$IMAGE:$major.$minor"
+else
+	held="$held $major.$minor"
+fi
+if [ "$newest_major" = yes ]; then
+	tags="$tags,$IMAGE:$major"
+else
+	held="$held $major"
+fi
+if [ "$newest_overall" = yes ]; then
+	tags="$tags,$IMAGE:latest"
+else
+	held="$held latest"
+fi
+
 # stdout is the workflow's `$GITHUB_OUTPUT` and nothing reads it in the log, so
 # what was decided is said on stderr too. A release is a thing somebody reads
 # the log of exactly once, when it went wrong.
@@ -218,10 +284,11 @@ printf 'release: cutting %s from %s; %s since %s\n' "$version" "$tag" \
 	"$([ "$moved" = yes ] && printf '%s moved' "$SURFACE_PAGE" || printf '%s did not move' "$SURFACE_PAGE")" \
 	"${previous:-the beginning of the repository}" >&2
 
+if [ -n "$held" ]; then
+	printf 'release: %s is not the newest release under%s, so those names stay where they are\n' \
+		"$version" "$held" >&2
+fi
+
 printf 'version=%s\n' "$version"
 printf 'moved=%s\n' "$moved"
-printf 'tags=%s:%s,%s:%s.%s,%s:%s,%s:latest\n' \
-	"$IMAGE" "$version" \
-	"$IMAGE" "$major" "$minor" \
-	"$IMAGE" "$major" \
-	"$IMAGE"
+printf 'tags=%s\n' "$tags"

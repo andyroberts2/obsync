@@ -245,6 +245,127 @@ func valueOf(t *testing.T, said, key string) string {
 	return ""
 }
 
+// A release is not always the newest one, and that is where a floating name can
+// move *backwards* — §12's rejected scheduled rebuild arriving from the other
+// side, in its most dangerous clothes. A backport is a real release: `v1.3.5`
+// cut from a maintenance branch while 1.4.2 is out owes its own immutable tag,
+// and owes `1.3` the line it has just advanced. What it does not own is `1` and
+// `latest`, which belong to a newer build — and `docs/interface.md` tells an
+// operator to **pin the floating major**, so a `1` that moved backwards
+// downgrades every unattended sidecar following it to older code on its next
+// pull, with nobody acting and nothing to read about it.
+func TestABackportDoesNotTakeTheFloatingNamesFromANewerRelease(t *testing.T) {
+	t.Parallel()
+
+	r := newReleaseRepo(t)
+	r.write("docs/interface.md", "# The declared surface\n\nNine variables.\n", "the surface page")
+	r.tag("v1.3.0", tagMessage("obsync v1.3.0", "- the surface, stated for the first time"))
+
+	r.write("docs/interface.md", "# The declared surface\n\nTen variables.\n", "a tenth variable")
+	r.tag("v1.4.2", tagMessage("obsync v1.4.2", "- a tenth variable"))
+
+	// The maintenance branch is the shape that makes this a backport rather
+	// than a mis-typed tag: it forks from the older release and never sees the
+	// newer one.
+	r.mustGit("checkout", "--quiet", "-b", "maintenance", "v1.3.0")
+	r.write("internal/loop/loop.go", "package loop\n", "the fix, backported")
+	r.tag("v1.3.5", tagMessage("obsync v1.3.5"))
+
+	said, _, code := r.cut("v1.3.5")
+	if code != 0 {
+		t.Fatalf("%s refused v1.3.5, which moves nothing on the surface its own line already "+
+			"stated:\n\n%s", releaseGate, said)
+	}
+
+	want := releaseImage + ":1.3.5," + releaseImage + ":1.3"
+	if got := valueOf(t, said, "tags"); got != want {
+		t.Errorf("%s publishes the backport v1.3.5 at %q, want %q. `1` and `latest` belong to "+
+			"1.4.2: the reference compose pins the floating major, so a floating name that moves "+
+			"backwards silently downgrades an unattended vault sidecar (§12)", releaseGate, got, want)
+	}
+}
+
+// Which floating names a release is the newest under, decided by comparing
+// versions **numerically**. As strings 0.10.0 is older than 0.9.0, which would
+// hand `latest` to the older build on the tenth minor of every major — and the
+// tenth minor is exactly where a project that has been running unattended for a
+// year finds itself.
+//
+// The decision reads which release tags exist, not how the commits are shaped;
+// the branch shape a backport really has is the test above.
+func TestAReleaseTakesOnlyTheFloatingNamesItIsTheNewestUnder(t *testing.T) {
+	t.Parallel()
+
+	for _, row := range []struct {
+		name     string
+		releases []string
+		cut      string
+		want     []string
+	}{{
+		name:     "the newest release still takes all four",
+		releases: []string{"v1.3.0", "v1.3.9", "v1.4.2"},
+		cut:      "v1.4.2",
+		want:     []string{"1.4.2", "1.4", "1", "latest"},
+	}, {
+		name:     "a patch inside an older minor takes only its own name",
+		releases: []string{"v1.3.9", "v1.4.2", "v1.3.5"},
+		cut:      "v1.3.5",
+		want:     []string{"1.3.5"},
+	}, {
+		name:     "a minor older than the tenth one takes its own line and no more",
+		releases: []string{"v0.10.0", "v0.9.1"},
+		cut:      "v0.9.1",
+		want:     []string{"0.9.1", "0.9"},
+	}, {
+		name:     "the tenth minor is newer than the ninth",
+		releases: []string{"v0.9.1", "v0.10.0"},
+		cut:      "v0.10.0",
+		want:     []string{"0.10.0", "0.10", "0", "latest"},
+	}, {
+		// The three names are decided separately, and this is the row that
+		// proves it: a maintenance release on the older major still moves `1`
+		// forward, because it is the newest thing under it, while `latest`
+		// stays on 2.0.0.
+		name:     "an older major still owns its own floating major",
+		releases: []string{"v2.0.0", "v1.9.9"},
+		cut:      "v1.9.9",
+		want:     []string{"1.9.9", "1.9", "1"},
+	}, {
+		// A tag the pipeline would refuse to publish is not a release, so it
+		// cannot hold a floating name away from one that is.
+		name:     "a release candidate holds nothing back",
+		releases: []string{"v1.4.2", "v1.5.0-rc1"},
+		cut:      "v1.4.2",
+		want:     []string{"1.4.2", "1.4", "1", "latest"},
+	}} {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := newReleaseRepo(t)
+			r.write("docs/interface.md", "# The declared surface\n", "the surface page")
+			for _, release := range row.releases {
+				r.write(release+".txt", "a release\n", "the work in "+release)
+				r.tag(release, tagMessage("obsync "+release, "- what moved"))
+			}
+
+			said, _, code := r.cut(row.cut)
+			if code != 0 {
+				t.Fatalf("%s refused %s, which says what moved:\n\n%s", releaseGate, row.cut, said)
+			}
+
+			var wanted []string
+			for _, tag := range row.want {
+				wanted = append(wanted, releaseImage+":"+tag)
+			}
+			if got := valueOf(t, said, "tags"); got != strings.Join(wanted, ",") {
+				t.Errorf("%s publishes %s at %q, want %q. A floating name belongs to the release "+
+					"that is newest under it, and nothing else may take it (§12)",
+					releaseGate, row.cut, got, strings.Join(wanted, ","))
+			}
+		})
+	}
+}
+
 // The other half of the rule, and the reason the section is *mandatory* rather
 // than *required when something moved*: a release that touched nothing an
 // operator set or pinned still has to say so, and an empty section is how it
@@ -571,6 +692,28 @@ func TestNothingIsPublishedBeforeTheGateHasRun(t *testing.T) {
 	if gate > push || gate > login {
 		t.Errorf("%s pushes before it runs %s. A gate that runs after the image is in the registry "+
 			"is a report rather than a gate (§12)", releaseWorkflow, releaseGate)
+	}
+}
+
+// The gate reads this repository's tag namespace twice — once for the previous
+// release, to diff the surface page against it, and once for every other
+// release, to decide which floating names this one is the newest under — so the
+// whole history is a precondition rather than a convenience.
+//
+// A shallow checkout brings no tags, and the two readers then fail in opposite
+// directions. The first finds no previous release and demands a surface change
+// sentence for every release, which is merely noisy. The second finds nothing
+// newer than this tag and hands `1` and `latest` to whatever was pushed — which
+// is the silent downgrade of an unattended sidecar, arriving through the one
+// line that looks like a performance setting.
+func TestTheReleaseChecksOutTheTagsTheGateReads(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(read(t, releaseWorkflow), "fetch-depth: 0") {
+		t.Errorf("%s does not check out the whole history, and %s reads this repository's tags to "+
+			"find the previous release and to decide which floating names this one may take. With "+
+			"no tags it demands a sentence every time and publishes `latest` every time (§12)",
+			releaseWorkflow, releaseGate)
 	}
 }
 

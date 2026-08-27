@@ -46,6 +46,11 @@ floating major, so [`compose.yaml`](../compose.yaml) pins `0.3` and changes to
 `1` at 1.0. `latest` is published because people expect it to exist; nothing
 here points at it, and neither should anything you run unattended.
 
+**A floating name only ever moves forward.** A release publishes the floating
+names it is the newest under and no others, so a backport cut from an older line
+takes `1.3.5` and `1.3` and leaves `1` and `latest` on the newer build. What you
+pinned never becomes older code.
+
 **A base image bump is a `patch` release.** The base and the builder are pinned
 by digest rather than by tag, because Alpine repoints a release tag on every
 patch and git comes with it — so a CVE in the base is not something that arrives

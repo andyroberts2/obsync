@@ -533,14 +533,15 @@ surface change section. The tag is the whole of the automation's input — there
 is one contributor, and a release button earns its keep at a different scale.
 Note the word is the *act*, never the artifact, which is why **supported
 artifact** avoids it.
-_Avoid_: deployment, rollout, cut, ship
+_Avoid_: deployment, rollout, ship
 
 **Tag set**:
-The four names one released image is pushed under — `1.4.2`, `1.4`, `1` and
-`latest`. One build, one digest, four names, pushed together: anything that
-republishes a floating name on its own makes `1` and `1.4.2` two images sharing
-a name, which is what the immutable tag and the attestation both stand on not
-happening.
+The names one released image is pushed under — `1.4.2`, `1.4`, `1` and
+`latest`. One build, one digest, pushed together: anything that republishes a
+floating name on its own makes `1` and `1.4.2` two images sharing a name, which
+is what the immutable tag and the attestation both stand on not happening. A
+release takes only the floating names it is the newest under, so a floating name
+never moves backwards either.
 _Avoid_: image tags, version tags, labels
 
 **Declared surface**:
