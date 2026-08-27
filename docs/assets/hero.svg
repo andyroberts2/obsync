@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" role="img" aria-labelledby="t d">
+  <title id="t">obsync</title>
+  <desc id="d">A schematic of the seam obsync sits in: a vault above, a git remote below, and two counter-flowing arcs between them — push rising out of the vault, pull descending into it.</desc>
+
+  <style>
+    /* The plate is dark by default and swaps to paper when the reader's theme
+       asks for it. Dark is the base rather than the override so that a viewer
+       whose colour-scheme preference never reaches this file still gets a
+       surface that was designed, not one that happens to be white. */
+    svg {
+      --paper:   #0F141C;
+      --edge:    #1E2735;
+      --grid:    #1A2331;
+      --surface: #151C27;
+      --edge2:   #26313F;
+      --pipe:    #2C3849;
+      --ink:     #E6EDF6;
+      --muted:   #9AA7B8;
+      --faint:   #7C8BA1;
+      --violet:  #9B8CFA;
+      --rust:    #EA8A5B;
+    }
+    @media (prefers-color-scheme: light) {
+      svg {
+        --paper:   #FBFCFD;
+        --edge:    #E3E8EF;
+        --grid:    #EBEFF5;
+        --surface: #FFFFFF;
+        --edge2:   #DDE3EB;
+        --pipe:    #D6DEE8;
+        --ink:     #111A24;
+        --muted:   #4A5769;
+        --faint:   #6E7C8E;
+        --violet:  #5B4BD6;
+        --rust:    #C2571F;
+      }
+    }
+
+    .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace; }
+    .sans { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+
+    .wordmark { font-size: 64px; font-weight: 700; letter-spacing: -1.5px; fill: var(--ink); }
+    .tagline  { font-size: 21px; fill: var(--muted); }
+    .cycle    { font-size: 13px; letter-spacing: 2.4px; fill: var(--faint); }
+    .node     { font-size: 20px; font-weight: 600; letter-spacing: -0.2px; fill: var(--ink); }
+    .sub      { font-size: 13px; letter-spacing: 0.6px; fill: var(--faint); }
+    .arclabel { font-size: 12px; letter-spacing: 2px; fill: var(--faint); }
+
+    /* The one moving part, and it is the product: dashes marching along each
+       arc in the direction that arc actually carries work. */
+    .flow { animation: flow 2.6s linear infinite; }
+    @keyframes flow { to { stroke-dashoffset: -32px; } }
+    @media (prefers-reduced-motion: reduce) { .flow { animation: none; } }
+  </style>
+
+  <defs>
+    <pattern id="dots" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="16" cy="16" r="1" fill="var(--grid)"/>
+    </pattern>
+    <clipPath id="plate">
+      <rect x="1" y="1" width="1278" height="358" rx="12"/>
+    </clipPath>
+    <linearGradient id="push" gradientUnits="userSpaceOnUse" x1="1050" y1="106" x2="1062" y2="254">
+      <stop offset="0" stop-color="var(--violet)"/>
+      <stop offset="1" stop-color="var(--rust)"/>
+    </linearGradient>
+    <linearGradient id="pull" gradientUnits="userSpaceOnUse" x1="830" y1="254" x2="818" y2="106">
+      <stop offset="0" stop-color="var(--rust)"/>
+      <stop offset="1" stop-color="var(--violet)"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1279" height="359" rx="12" fill="var(--paper)" stroke="var(--edge)"/>
+  <rect width="1280" height="360" fill="url(#dots)" clip-path="url(#plate)"/>
+
+  <!-- The wordmark, and under it the seam: violet up to where `ob` ends, rust
+       from there on, with a tick on the join. The two colours are the two ends
+       of the diagram on the right, so the mark says what the mechanism does. -->
+  <text class="mono wordmark" x="72" y="128">obsync</text>
+  <line x1="72"  y1="156" x2="148" y2="156" stroke="var(--violet)" stroke-width="3"/>
+  <line x1="148" y1="156" x2="308" y2="156" stroke="var(--rust)"   stroke-width="3"/>
+  <line x1="148" y1="147" x2="148" y2="165" stroke="var(--ink)"    stroke-width="1.5"/>
+
+  <text class="sans tagline" x="72" y="200">Two-way git sync for a self-hosted Obsidian vault,</text>
+  <text class="sans tagline" x="72" y="228">as a Docker sidecar.</text>
+
+  <text class="mono cycle" x="72" y="296">WATCH · SETTLE · COMMIT · PUSH · PULL</text>
+
+  <!-- The vault, and what proves it is one. -->
+  <rect x="830" y="72" width="220" height="68" rx="8" fill="var(--surface)" stroke="var(--edge2)" stroke-width="1.25"/>
+  <circle cx="852" cy="106" r="4" fill="var(--violet)"/>
+  <text class="mono node" x="870" y="100">vault</text>
+  <text class="mono sub"  x="870" y="122">.obsidian/</text>
+
+  <!-- The remote, and the one ref obsync moves. -->
+  <rect x="830" y="220" width="220" height="68" rx="8" fill="var(--surface)" stroke="var(--edge2)" stroke-width="1.25"/>
+  <circle cx="852" cy="254" r="4" fill="var(--rust)"/>
+  <text class="mono node" x="870" y="248">remote</text>
+  <text class="mono sub"  x="870" y="270">origin/main</text>
+
+  <!-- Push: out of the vault's right edge, down into the remote. -->
+  <path d="M 1050 106 C 1166 106 1166 254 1062 254" fill="none" stroke="var(--pipe)" stroke-width="2.5"/>
+  <path d="M 1050 106 C 1166 106 1166 254 1062 254" fill="none" stroke="url(#push)" stroke-width="2.5"
+        stroke-linecap="round" stroke-dasharray="5 11" class="flow"/>
+  <polygon points="1050,254 1063,248.5 1063,259.5" fill="var(--rust)"/>
+  <text class="mono arclabel" x="1156" y="184">PUSH</text>
+
+  <!-- Pull: out of the remote's left edge, up into the vault. -->
+  <path d="M 830 254 C 714 254 714 106 818 106" fill="none" stroke="var(--pipe)" stroke-width="2.5"/>
+  <path d="M 830 254 C 714 254 714 106 818 106" fill="none" stroke="url(#pull)" stroke-width="2.5"
+        stroke-linecap="round" stroke-dasharray="5 11" class="flow"/>
+  <polygon points="830,106 817,100.5 817,111.5" fill="var(--violet)"/>
+  <text class="mono arclabel" x="723" y="184" text-anchor="end">PULL</text>
+</svg>

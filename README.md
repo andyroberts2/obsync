@@ -1,3 +1,17 @@
+<p align="center">
+  <img src="docs/assets/hero.svg" width="100%"
+       alt="obsync — two-way git sync for a self-hosted Obsidian vault, as a Docker sidecar">
+</p>
+
+<p align="center">
+  <a href="https://github.com/andyroberts2/obsync/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/andyroberts2/obsync/ci.yml?branch=main&label=CI&style=flat-square&labelColor=1B2230"></a>
+  <a href="https://github.com/andyroberts2/obsync/actions/workflows/ci.yml"><img alt="Coverage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fandyroberts2%2Fobsync%2Fbadges%2Fcoverage.json&style=flat-square&labelColor=1B2230"></a>
+  <a href="go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/andyroberts2/obsync?label=go&style=flat-square&labelColor=1B2230"></a>
+  <a href="https://github.com/andyroberts2/obsync/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/andyroberts2/obsync?label=release&style=flat-square&labelColor=1B2230"></a>
+  <a href="https://github.com/andyroberts2/obsync/pkgs/container/obsync"><img alt="Container image" src="https://img.shields.io/badge/ghcr.io-andyroberts2%2Fobsync-2496ED?logo=docker&logoColor=white&style=flat-square&labelColor=1B2230"></a>
+  <a href="LICENSE"><img alt="Licence" src="https://img.shields.io/github/license/andyroberts2/obsync?label=licence&style=flat-square&labelColor=1B2230"></a>
+</p>
+
 # obsync
 
 Two-way git sync for a self-hosted Obsidian vault, as a Docker sidecar.
