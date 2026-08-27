@@ -144,6 +144,56 @@ func TestAFolderMovedIntoTheVaultIsWatchedAllTheWayDown(t *testing.T) {
 	}
 }
 
+// A folder renamed inside the vault is still watched afterwards, and so is
+// everything made inside it after the rename. This is the same maintenance rule
+// as the three tests above and the one act that takes a watch away without
+// taking the directory away, which is why it is the row that was missing.
+//
+// Measured, and the reason the walk alone is not enough: inotify reports a
+// watched directory moving but never says where to, so fsnotify gives that
+// watch back rather than hold one whose path it can no longer state — and it
+// does so *after* delivering the Create for the new name, so the walk that
+// Create starts is undone a moment later. Without maintain answering the
+// rename, `Work` ends up watched by nothing, silently and for the rest of the
+// process's life.
+//
+// Renaming a folder is the most ordinary thing a person does to one, and the
+// cost of getting it wrong is the state §1 refuses by name: a vault syncing at
+// two speeds with nothing to tell them apart. The two writes below are the two
+// halves of that — a note in the renamed folder, and a folder made inside it
+// afterwards, which is the compounding half because with no watch on `Work`
+// there is no Create for obsync to walk from either.
+func TestAFolderRenamedInTheVaultIsStillWatchedAfterwards(t *testing.T) {
+	t.Parallel()
+
+	env := newWatchedVault(t)
+	env.turn()
+	env.awaitIdle()
+
+	env.writeNote("Projects/plan.md", "written before the folder was renamed\n")
+	env.awaitNoticedWithoutATick("Projects/plan.md", "written before the folder was renamed\n")
+
+	env.settle()
+	if err := os.Rename(filepath.Join(env.vault, "Projects"), filepath.Join(env.vault, "Work")); err != nil {
+		t.Fatalf("renaming the folder: %v", err)
+	}
+	env.awaitNoticedWithoutATick("Work/plan.md", "written before the folder was renamed\n")
+
+	env.settle()
+	env.writeNote("Work/plan.md", "and now a note in the renamed folder changes\n")
+	env.awaitNoticedWithoutATick("Work/plan.md", "and now a note in the renamed folder changes\n")
+
+	env.settle()
+	env.writeNote("Work/2026/deep.md", "a folder made inside the renamed one\n")
+	env.awaitNoticedWithoutATick("Work/2026/deep.md", "a folder made inside the renamed one\n")
+
+	if got := env.remoteFile("Work/2026/deep.md"); got != "a folder made inside the renamed one\n" {
+		t.Errorf("the remote holds %q, want the note inside a folder made after its parent was "+
+			"renamed — a renamed folder keeps its watch, because inotify hands the old one back "+
+			"and says nothing about where the folder went (§1)", got)
+	}
+}
+
 // The vault's `.git` is not vault content and is not watched. It is outside the
 // working tree by construction — which is exactly why §6 stages obsync's own
 // writes inside it — so nothing that happens in there is ever a change git will

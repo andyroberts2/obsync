@@ -94,6 +94,19 @@ type Watcher struct {
 	done     chan struct{}
 	finished chan struct{}
 
+	// watched is every path obsync has ever handed to the kernel, and it is
+	// what tells a directory obsync was watching apart from an ordinary file
+	// when one of them is renamed (see maintain). It is written by the walk
+	// and read by maintain, both on deliver's goroutine and neither before it
+	// starts, so it needs no lock.
+	//
+	// It is append-only deliberately: a renamed directory keeps being reported
+	// under the name it was registered with, so the name obsync has to
+	// recognise is the old one, and forgetting it is forgetting the only thing
+	// that identifies the event. The set is bounded by the number of distinct
+	// directory names a vault has held.
+	watched map[string]struct{}
+
 	closeOne sync.Once
 	stopOne  sync.Once
 }
@@ -112,6 +125,7 @@ func Watch(vault string, log *slog.Logger) *Watcher {
 		wakes:    make(chan struct{}, 1),
 		done:     make(chan struct{}),
 		finished: make(chan struct{}),
+		watched:  map[string]struct{}{},
 	}
 
 	if err := w.open(); err != nil {
@@ -194,7 +208,15 @@ func (w *Watcher) deliver() {
 				return
 			}
 			if err := w.maintain(event); err != nil {
-				w.standDown(err)
+				// A watcher obsync has already closed is not a watcher that
+				// cannot watch. ErrClosed here is Close racing an event on
+				// the way out, and standing down would put a WARN saying
+				// obsync cannot watch the vault in the log of a process that
+				// is stopping — a level that means true but self-healing, on
+				// a sentence that is neither (§9).
+				if !errors.Is(err, fsnotify.ErrClosed) {
+					w.standDown(err)
+				}
 				return
 			}
 			if holding {
@@ -245,20 +267,68 @@ func (w *Watcher) deliver() {
 // link itself as a blob — so watching its target would be watching something
 // that is not vault content, and a link pointing back into the vault would be
 // a loop.
+//
+// # A renamed folder is a folder that lost its watch
+//
+// Renaming a folder is the most ordinary thing a person does to one, and it is
+// the one act that takes a watch away without taking the directory away.
+// Measured against fsnotify v1.10.1 and the kernel below it, `mv Projects Work`
+// inside the vault delivers three events in this order:
+//
+//	Rename  <vault>/Projects   IN_MOVED_FROM, from the parent's watch
+//	Create  <vault>/Work       IN_MOVED_TO,   from the parent's watch
+//	Rename  <vault>/Projects   IN_MOVE_SELF,  from the folder's own watch
+//
+// and the third one is where the watch goes: inotify reports a watched
+// directory moving but never says where to, so fsnotify gives the watch back
+// rather than hold one whose path it can no longer state. That happens *after*
+// the Create, so the walk the Create starts is undone a moment later and the
+// folder ends up watched by nothing — silently, and for as long as the process
+// lives. Everything created inside it afterwards is unwatched too, because the
+// only event that would have said so was the one the missing watch would have
+// carried. That is a vault syncing at two speeds with nothing to tell them
+// apart, which is the state §1 refuses.
+//
+// So a Rename naming a directory obsync watched is answered by walking the
+// vault again, which re-registers whatever lost its watch under whatever name
+// it has now. It is the same act as startup, and the third event is the one
+// that lands: the first two arrive before the watch is given back, so the walks
+// they start find it still held and change nothing. Costing two extra walks to
+// be sure of the one that matters is the right way round for something that
+// happens when a person renames a folder.
+//
+// The name is the discriminator, and it has to be. inotify appends a filename
+// to a parent's event and appends nothing to a watch's own, so an IN_MOVE_SELF
+// arrives named exactly as obsync registered it — which is why watched holds
+// the names obsync handed over rather than the names on disk now. A note being
+// renamed, which happens constantly, costs a map lookup and no more, and the
+// worst a name that once belonged to a folder and now belongs to a note can
+// cost is one walk that finds nothing to do.
 func (w *Watcher) maintain(event fsnotify.Event) error {
-	if !event.Has(fsnotify.Create) {
-		return nil
+	switch {
+	case event.Has(fsnotify.Create):
+		info, err := os.Lstat(event.Name)
+		if err != nil || !info.IsDir() {
+			return nil
+		}
+		return w.rewatch(event.Name)
+	case event.Has(fsnotify.Rename):
+		if _, ours := w.watched[event.Name]; !ours {
+			return nil
+		}
+		return w.rewatch(w.vault)
 	}
-	info, err := os.Lstat(event.Name)
-	if err != nil || !info.IsDir() {
-		return nil
-	}
-	if err := w.watchTree(event.Name); err != nil && !gone(err) {
+	return nil
+}
+
+// rewatch walks a directory back into the set of watches, and forgives the one
+// failure that leaves no gap behind it: a folder made and unmade before obsync
+// could watch it is the ordinary shape of a temporary directory, and there is
+// nothing left there to be unwatched.
+func (w *Watcher) rewatch(root string) error {
+	if err := w.watchTree(root); err != nil && !gone(err) {
 		return err
 	}
-	// A folder made and unmade before obsync could watch it is not a gap in the
-	// watches — there is nothing left to watch — and it is the ordinary shape
-	// of a temporary directory.
 	return nil
 }
 
@@ -302,6 +372,7 @@ func (w *Watcher) watchTree(root string) error {
 			}
 			return nil
 		}
+		w.watched[path] = struct{}{}
 		return nil
 	})
 }
