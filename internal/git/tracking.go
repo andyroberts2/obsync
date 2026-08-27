@@ -151,11 +151,21 @@ func StatusFilePath(vaultPath string) (string, error) {
 
 	cmd := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-path", statusFileName)
 	cmd.Dir = vaultPath
-	// The same pins every other git obsync runs takes, plus the one this needs
-	// of its own: no system configuration. The private GIT_CONFIG_GLOBAL is
-	// deliberately absent — there is no Repo here to have written one, and a
-	// path lookup needs none of what it carries.
-	cmd.Env = append(pinnedEnvironment(), "GIT_CONFIG_NOSYSTEM=1")
+	// The same pins every other git obsync runs takes, plus the two that stand
+	// in for the isolation a Repo carries and this has none of: no system
+	// configuration, and no ambient `~/.gitconfig` either.
+	//
+	// `/dev/null` rather than a file of obsync's own, because a path lookup
+	// needs nothing a private configuration would hold — what it needs is to
+	// not read a configuration obsync did not write. Every other git obsync
+	// runs is already deaf to `~/.gitconfig`, because a Repo pins
+	// GIT_CONFIG_GLOBAL at its own private file; leaving it unset here would
+	// make this the one git that reads one. Measured at both matrix points
+	// (2.38.5 and 2.52.0): a `~/.gitconfig` git cannot parse fails
+	// `rev-parse --git-path` with exit 128, so `obsync healthcheck` would call
+	// a perfectly healthy vault unreadable — and HOME is not hypothetical
+	// here, it is exactly where §8 says an ssh key arrives.
+	cmd.Env = append(pinnedEnvironment(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	var stdout, stderr bytes.Buffer
@@ -170,6 +180,13 @@ func StatusFilePath(vaultPath string) (string, error) {
 		}
 		return "", fmt.Errorf("obsync could not find a git repository in %s: %w", vaultPath, err)
 	}
+	// One path and a trailing newline, taken whole rather than split. Measured
+	// at both matrix points (2.38.5 and 2.52.0) against a vault path holding a
+	// space, a newline and a non-ASCII character: `rev-parse --git-path` writes
+	// the path raw and C-quotes nothing, so the only newline in this answer is
+	// the one git ends it with. That is what makes the trim safe rather than a
+	// guess — the rule this design keeps everywhere is that a path is the one
+	// thing in git's output that can hold a newline (§1).
 	return strings.TrimSuffix(stdout.String(), "\n"), nil
 }
 

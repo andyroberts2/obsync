@@ -115,26 +115,29 @@ func run(args []string, environ []string, stdin io.Reader, stdout, stderr io.Wri
 //
 // Every way of failing to get to that record is unhealthy rather than an error
 // to report: the question was never "did this read succeed", it was "does this
-// need a human", and a configuration obsync cannot use, a vault that is not
-// mounted, a directory that is not a repository and a container that has not
-// finished a run yet are all a yes. That is the whole reason the file lives
-// under `.git/obsync/` — the failure modes fall out rather than needing to be
-// coded (§9).
+// need a human", and a vault that is not mounted, a directory that is not a
+// repository and a container that has not finished a run yet are all a yes.
+// That is the whole reason the file lives under `.git/obsync/` — the failure
+// modes fall out rather than needing to be coded (§9).
 //
-// The config surface is resolved with its own output discarded. healthcheck is
-// silent, and status prints a report rather than the startup line the loop
-// echoes: neither is the process that resolved this configuration for real.
+// The vault path is the only thing it takes from the configuration, and
+// deliberately so: the rest of the surface is the loop's business, and
+// resolving it here would make the verdict wait on questions this subcommand is
+// not asking. Resolve stats the credential file, which §8 says is a config
+// error only *at startup* — later it is the self-healing bad-credential tier —
+// so a healthcheck built on it would call a running, healthy obsync unhealthy
+// for the length of a token rotation and invite the restart that turns it into
+// a crash loop. A configuration obsync could not use needs no help from here
+// either: obsync exited on it, so it wrote no status file, and the absent file
+// already says so.
 func look(environ []string, now time.Time) (vaultPath string, file status.File, health status.Health) {
-	cfg, _, err := config.Resolve(environ, io.Discard)
+	vaultPath = config.VaultPath(environ)
+	path, err := git.StatusFilePath(vaultPath)
 	if err != nil {
-		return cfg.VaultPath, status.File{}, status.Unavailable(err)
-	}
-	path, err := git.StatusFilePath(cfg.VaultPath)
-	if err != nil {
-		return cfg.VaultPath, status.File{}, status.Unavailable(err)
+		return vaultPath, status.File{}, status.Unavailable(err)
 	}
 	file, health = status.Of(path, now)
-	return cfg.VaultPath, file, health
+	return vaultPath, file, health
 }
 
 func usage(w io.Writer) {

@@ -346,6 +346,51 @@ func TestARemoteObsyncHasHadNothingToPushToIsNeverAFailure(t *testing.T) {
 	}
 }
 
+// The one place §9's two remote rows could collide, and the boundary is the
+// word *attempted*: a deployment that has never pushed, has something to push,
+// and whose remote is merely down. "A push attempted but never once succeeded"
+// is unhealthy at once and "an unreachable remote inside 24h" is healthy, and
+// which applies is decided by the fetch — a remote that is not there fails it,
+// so the push is never reached and nothing was ever attempted.
+//
+// Getting this wrong is expensive in the direction §7 names: an unhealthy
+// container invites a restart, and a restart during a remote outage is a loop
+// of them.
+func TestAVaultWaitingOnADownRemoteHasNotAttemptedAPush(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.clockAnchoredToNow()
+	env.remoteAway()
+	env.writeNote("Daily/2026-08-24.md", "written for a remote that was not there\n")
+
+	env.turn()
+	env.awaitIdle()
+	env.advance(70 * time.Second)
+	env.advance(10 * time.Minute)
+
+	if got := env.healthcheck(); got != 0 {
+		t.Errorf("obsync healthcheck exited %d over a vault holding a commit for a remote that is "+
+			"merely down, want 0 — an unreachable remote is healthy inside the ceiling, and a "+
+			"push the fetch never got as far as is not one that was attempted (§9); it said:\n%s",
+			got, env.saidSoFar())
+	}
+	if report := env.statusReport(); !strings.Contains(report, "never — obsync has had nothing to push") {
+		t.Errorf("obsync status printed %q, want *never attempted* rather than the state that "+
+			"needs a human — the two are told apart by whether obsync ever got to try (§9)", report)
+	}
+
+	// And it publishes the moment the remote is back, which is what says the
+	// quiet was obsync waiting rather than obsync having given up.
+	env.remoteBack()
+	env.advance(20 * time.Minute)
+
+	if got, _ := env.remoteContentYet("Daily/2026-08-24.md"); got != "written for a remote that was not there\n" {
+		t.Errorf("the remote holds %q once it came back, want the note obsync had been holding; "+
+			"obsync said:\n%s", got, env.saidSoFar())
+	}
+}
+
 // Liveness is a fact about the loop rather than about the outcome, so every
 // wake-up refreshes it whatever the run turned out to be. A run that keeps
 // losing to a third writer's `index.lock` is aborting, which is not news — but
@@ -590,6 +635,201 @@ func TestDebugCarriesEveryGitInvocationAndTheTierOfEveryFailure(t *testing.T) {
 	}
 }
 
+// The status file is written at the end of every wake-up, from inside a freeze
+// included — and the one place that has to stop is a vault that is no longer a
+// repository. The write creates the directories it needs, so a `.git` that has
+// gone would otherwise be put *back*: an empty `.git/obsync/` in a directory
+// obsync has just frozen over, which is a trace left somewhere obsync promised
+// to stop and a directory gate 2 would then have to reason about.
+func TestAVaultThatStoppedBeingARepositoryGetsNoGitDirectoryBack(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.clockAnchoredToNow()
+	env.turn()
+	env.awaitIdle()
+
+	env.theRepositoryGoes()
+	env.advance(70 * time.Second)
+
+	if _, err := os.Stat(filepath.Join(env.vault, ".git")); !os.IsNotExist(err) {
+		left, _ := os.ReadDir(filepath.Join(env.vault, ".git"))
+		names := make([]string, len(left))
+		for i, entry := range left {
+			names[i] = entry.Name()
+		}
+		t.Errorf("obsync put a `.git` back into a vault that had stopped being a repository, "+
+			"holding %v (stat: %v) — a freeze stops obsync touching the repository, and writing "+
+			"its own record may not be the one thing that recreates one (§7, §9)", names, err)
+	}
+	if got := env.healthcheck(); got != 1 {
+		t.Errorf("obsync healthcheck exited %d over a vault that stopped being a repository, "+
+			"want 1 — there is nothing to read, and the absent file is the signal (§9); it "+
+			"said:\n%s", got, env.saidSoFar())
+	}
+
+	// And the freeze self-clears, which is what says the refusal to write was a
+	// refusal rather than a failure obsync never recovered from.
+	env.theRepositoryComesBack()
+	env.advance(70 * time.Second)
+
+	if got := env.healthcheck(); got != 0 {
+		t.Errorf("obsync healthcheck exited %d a tick after the repository came back, want 0 — "+
+			"every freeze clears when its cause is repaired, with no restart (§7); it said:\n%s",
+			got, env.saidSoFar())
+	}
+}
+
+// The other half of the middle state, and the one that is easy to miss because
+// the deployment *did* work once: an operator narrows the token's scope, or the
+// remote's owner does, and from then on every fetch succeeds and every push is
+// refused. The vault has permanently stopped being backed up.
+//
+// The ceiling is what catches it, so the clock it is measured against may not be
+// cleared by the half of the network that still works — a run whose fetch got
+// through and whose push did not is a failing network half, and treating the
+// fetch as evidence would leave this reading healthy for ever and saying
+// nothing above debug (§9). Nor may the remote be said to have answered again
+// while it is still refusing.
+func TestADeploymentThatCanNoLongerPublishStopsBeingHealthyAtTheCeiling(t *testing.T) {
+	t.Parallel()
+
+	const credential = "ghp_the_token_that_was_narrowed"
+	env, remote := newAuthenticatedVault(t, writeCredential(t, credential+"\n"), credential)
+	env.clockAnchoredToNow()
+	env.writeNote("Daily/2026-08-24.md", "written while the token could still write\n")
+	env.turn()
+	env.awaitIdle()
+
+	if got, _ := env.remoteContentYet("Daily/2026-08-24.md"); got == "" {
+		t.Fatalf("the deployment never worked, so this is the other row; obsync said:\n%s",
+			env.saidSoFar())
+	}
+
+	// The scope is narrowed under a running obsync. Fetching goes on working,
+	// which is exactly what makes this quiet.
+	remote.takesNoWrites()
+	env.writeNote("Daily/2026-08-25.md", "written after the token was narrowed\n")
+	env.advance(70 * time.Second)
+
+	if got := env.healthcheck(); got != 0 {
+		t.Errorf("obsync healthcheck exited %d one tick after the first refused push, want 0 — "+
+			"an established deployment gets the day's grace, and one failed push is not a "+
+			"verdict (§9); it said:\n%s", got, env.saidSoFar())
+	}
+
+	quietFrom := len(env.saidSoFar())
+	env.advance(backoffCeiling + 2*time.Hour)
+
+	if got := env.healthcheck(); got != 1 {
+		t.Errorf("obsync healthcheck exited %d after a day of a vault it cannot publish, want 1 — "+
+			"the fetch still working is not obsync working, and a vault that has stopped being "+
+			"backed up may not read as healthy for ever (§9); it said:\n%s", got, env.saidSoFar())
+	}
+	if said := env.saidSoFar()[quietFrom:]; !strings.Contains(said, "level=ERROR") {
+		t.Errorf("obsync said %q over a day of pushes the remote refused, want a human told — "+
+			"`docker logs --since 1h` is never empty while something is wrong (§9)", said)
+	}
+	if said := env.saidSoFar(); strings.Contains(said, `msg="the remote answered again"`) {
+		t.Errorf("obsync said the remote answered again while every push was still being "+
+			"refused; it said:\n%s", said)
+	}
+
+	// And it is a health verdict rather than a retry limit here too: obsync
+	// has gone on pushing throughout, so widening the scope is enough.
+	remote.takesWritesAgain()
+	env.advance(20 * time.Minute)
+
+	if got, _ := env.remoteContentYet("Daily/2026-08-25.md"); got != "written after the token was narrowed\n" {
+		t.Errorf("the remote holds %q once the token could write again, want the note obsync had "+
+			"been holding; obsync said:\n%s", got, env.saidSoFar())
+	}
+	if got := env.healthcheck(); got != 0 {
+		t.Errorf("obsync healthcheck exited %d once a push landed again, want 0; it said:\n%s",
+			got, env.saidSoFar())
+	}
+	if said := env.said(); !strings.Contains(said, `msg="the remote answered again"`) {
+		t.Errorf("obsync said %q, want the recovery said once, and only now that it is true (§9)", said)
+	}
+}
+
+// The two signal subcommands answer *does this need a human?* out of obsync's
+// own record of itself, and they may not answer it out of anything else. A
+// credential file that turns unreadable is §8's self-healing tier rather than a
+// config error — PATs get rotated, and a rotation that unlinks before it writes
+// leaves a window — so a healthcheck that stats it would call a running,
+// healthy obsync unhealthy and invite the restart that turns the rotation into
+// a crash loop, since a *restarted* obsync exits 1 on the same file.
+func TestARotatingCredentialFileIsNeverAnUnhealthyCheck(t *testing.T) {
+	t.Parallel()
+
+	const credential = "ghp_the_token_being_rotated"
+	tokenFile := writeCredential(t, credential+"\n")
+	env, _ := newAuthenticatedVault(t, tokenFile, credential)
+	env.clockAnchoredToNow()
+	env.writeNote("Daily/2026-08-24.md", "a deployment that is working\n")
+	env.turn()
+	env.awaitIdle()
+
+	if got := env.healthcheck(); got != 0 {
+		t.Fatalf("obsync healthcheck exited %d on a working deployment, want 0; it said:\n%s",
+			got, env.saidSoFar())
+	}
+
+	if err := os.Remove(tokenFile); err != nil {
+		t.Fatalf("taking the credential file away mid-rotation: %v", err)
+	}
+	env.advance(70 * time.Second)
+
+	if got := env.healthcheck(); got != 0 {
+		t.Errorf("obsync healthcheck exited %d while the credential file was mid-rotation, want "+
+			"0 — the loop is turning and its record of itself is fresh, and a credential turning "+
+			"unreadable later is the self-healing tier rather than a config error (§7, §8)", got)
+	}
+	if report := env.statusReport(); !strings.Contains(report, "needs a human: no") {
+		t.Errorf("obsync status printed %q mid-rotation, want the verdict derived from obsync's "+
+			"own record rather than from a surface this subcommand is not asking about (§9)", report)
+	}
+}
+
+// The subcommands run in a process of their own, holding none of the isolation
+// a Repo carries — so the one git they run has to be pinned as deaf to an
+// ambient configuration as every git the loop runs already is. HOME is not
+// hypothetical: it is exactly where §8 says an ssh key arrives, so a
+// `~/.gitconfig` beside one is an ordinary mount rather than an exotic one.
+func TestAnAmbientGitconfigCannotChangeWhatASubcommandsGitMeans(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.clockAnchoredToNow()
+	env.wake()
+
+	if got := env.healthcheck(); got != 0 {
+		t.Fatalf("obsync healthcheck exited %d after a run that worked, want 0; it said:\n%s",
+			got, env.saidSoFar())
+	}
+
+	// A `.gitconfig` git cannot parse, in the HOME the subcommand inherits.
+	// The loop is unaffected by construction — a Repo pins GIT_CONFIG_GLOBAL
+	// at its own private file — so this is only ever a question about the
+	// subcommand's git.
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[core\nbroken =\n"), 0o600); err != nil {
+		t.Fatalf("writing the ambient gitconfig: %v", err)
+	}
+	env.home = home
+
+	if got := env.healthcheck(); got != 0 {
+		t.Errorf("obsync healthcheck exited %d with a `~/.gitconfig` git cannot parse, want 0 — "+
+			"the vault is healthy and obsync's record of it is fresh; measured at both matrix "+
+			"points, an unparseable global config fails `rev-parse --git-path` with exit 128", got)
+	}
+	if report := env.statusReport(); !strings.Contains(report, "needs a human: no") {
+		t.Errorf("obsync status printed %q with an ambient `~/.gitconfig`, want the verdict it "+
+			"gives without one", report)
+	}
+}
+
 // clockAnchoredToNow puts obsync's injected clock at the instant this test
 // began, which is what makes §9's two processes comparable.
 //
@@ -667,8 +907,12 @@ func (e *vaultEnv) statusReport() string {
 // loop is driving, which at the matrix's floor point is not the same git as the
 // one first on a developer's path.
 func (e *vaultEnv) containerEnviron() []string {
+	home := e.home
+	if home == "" {
+		home = os.Getenv("HOME")
+	}
 	return append(append([]string{}, e.environ...),
 		"PATH="+os.Getenv("PATH"),
-		"HOME="+os.Getenv("HOME"),
+		"HOME="+home,
 	)
 }

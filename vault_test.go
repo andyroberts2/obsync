@@ -74,6 +74,12 @@ type vaultEnv struct {
 	// get, since both inherit the container's environment.
 	environ []string
 
+	// home is the HOME a subcommand of this obsync is started with, empty for
+	// the test runner's own. It is settable because HOME is how a key arrives
+	// (§8), so what else is mounted beside one is a property of a real
+	// deployment rather than of a test harness.
+	home string
+
 	// cfg and logger are what the loop is built from, held for two reasons: so
 	// that the loop can be built after the vault rather than with it — the
 	// production watcher needs the vault to exist before it can watch it — and

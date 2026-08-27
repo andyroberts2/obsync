@@ -177,7 +177,7 @@ func Resolve(environ []string, stderr io.Writer) (Config, *slog.Logger, error) {
 	}
 
 	cfg := Config{
-		VaultPath:      valueOr(set, vaultPathVar, defaultVaultPath),
+		VaultPath:      vaultPathIn(set),
 		Branch:         set[branchVar],
 		CredentialFile: set[tokenFileVar],
 		Username:       valueOr(set, usernameVar, defaultUsername),
@@ -331,6 +331,33 @@ func known(name string) bool {
 	}
 	_, isRetired := retired[name]
 	return isRetired
+}
+
+// VaultPath is where the vault is, read out of an environment block on its own
+// and without resolving anything else.
+//
+// It exists for the two signal subcommands (§9), which need the vault and
+// nothing else about the configuration: they answer *does this need a human?*
+// out of obsync's own record of itself, and Resolve would make that answer wait
+// on a question it is not asking. Specifically, Resolve stats the credential
+// file, and §8 is explicit that a token file turning unreadable *later* is not
+// a config error but the self-healing bad-credential tier — so a healthcheck
+// built on Resolve would report a running, healthy obsync as unhealthy for the
+// length of a token rotation, and invite the restart that turns it into a crash
+// loop.
+//
+// Nothing is lost by not checking: a configuration obsync could not use is one
+// obsync exited on, so it wrote no status file, and the absent-or-stale file
+// says so already (§9).
+//
+// It shares vaultPathIn with Resolve rather than restating the default, because
+// two spellings of where the vault is are two answers waiting to drift.
+func VaultPath(environ []string) string {
+	return vaultPathIn(block(environ))
+}
+
+func vaultPathIn(set map[string]string) string {
+	return valueOr(set, vaultPathVar, defaultVaultPath)
 }
 
 func valueOr(set map[string]string, name, fallback string) string {

@@ -175,11 +175,11 @@ func (f File) Health(now time.Time) Health {
 	case f.unreachablePastTheCeiling():
 		return Health{
 			NeedsHuman: true,
-			State:      stateRemoteGoneForLong,
+			State:      stateNetworkFailingPastTheCeiling,
 			Fact: "obsync's network half has been failing for " + plainly(f.NetworkFailingFor) +
 				", which is past the " + plainly(f.BackoffCeiling) + " a remote that is merely " +
 				"down stays healthy for",
-			Remedy: unreachableRemedy,
+			Remedy: pastTheCeilingRemedy,
 		}
 	}
 	return Health{}
@@ -189,10 +189,15 @@ func (f File) Health(now time.Time) Health {
 // carries the name it was entered under, because the log line, the report and
 // the attention note (#38) should all name one thing.
 const (
-	stateLoopStopped       = "the sync loop has stopped turning"
-	stateNeverPushed       = "a push has been attempted and has never once succeeded"
-	stateRemoteGoneForLong = "the remote has been unreachable past the backoff ceiling"
-	stateNoRecord          = "obsync cannot read its own record of itself"
+	stateLoopStopped = "the sync loop has stopped turning"
+	stateNeverPushed = "a push has been attempted and has never once succeeded"
+	// Named after what obsync observed rather than after the commonest cause of
+	// it. Everything on the ordinary backoff arrives here, and §7 puts more than
+	// a dead host on that tier: a credential the remote will not take fails the
+	// same way, and calling that "unreachable" would send an operator to look at
+	// a network with nothing wrong with it.
+	stateNetworkFailingPastTheCeiling = "the network half has been failing past the backoff ceiling"
+	stateNoRecord                     = "obsync cannot read its own record of itself"
 )
 
 // neverPushedRemedy is the middle of §9's three states, and it is the reason
@@ -206,10 +211,19 @@ const neverPushedRemedy = "check what the credential is allowed to do. A token t
 	"scope for each remote. Nothing is lost meanwhile: the vault goes on being committed locally, " +
 	"and the first push that lands clears this" + git.SelfClearing
 
-// unreachableRemedy is the backoff ceiling, and the first thing it says is that
-// obsync has not given up — the ceiling is a health verdict rather than a retry
-// limit (§9).
-const unreachableRemedy = "look at the remote and at this container's network. obsync has not " +
+// pastTheCeilingRemedy is the backoff ceiling, and the first thing it says is
+// that obsync has not given up — the ceiling is a health verdict rather than a
+// retry limit (§9).
+//
+// It names three places to look rather than one, because everything on the
+// ordinary backoff arrives here and obsync cannot tell which: a day of a
+// network half that never got an answer it could act on is a dead host, a
+// container that cannot reach it, or a credential the far end will not take.
+// That is where to look, not what is wrong — obsync relays and never diagnoses
+// (§7).
+const pastTheCeilingRemedy = "look at the remote, at this container's network, and at what the " +
+	"credential is allowed to do — a day of getting no answer obsync could act on is any of the " +
+	"three, and obsync cannot tell them apart from here. obsync has not " +
 	"stopped trying and will not: it keeps backing off and retrying past this point, and only the " +
 	"health verdict changed, because waiting is the correct behaviour and stays correct. Nothing " +
 	"is lost meanwhile — the vault goes on being committed locally, and everything obsync has " +
@@ -247,9 +261,10 @@ func (f File) branchName() string {
 // §9's failure modes fall out rather than need coding: the mount drops and the
 // file goes with it, gate 2 refuses a directory that is not a repository and
 // there is no `.git` to write into, and a fresh container has not run yet. All
-// of them read as unhealthy, correctly, with no special case — as does the one
-// case that is not about the vault at all, a configuration obsync could not
-// use, because an obsync that never started is not one that is working.
+// of them read as unhealthy, correctly, with no special case — as does an
+// obsync that exited on a configuration it could not use, which is why the
+// reader checks none of that surface itself (main.look): it never started, so
+// it never wrote one.
 func Unavailable(problem error) Health {
 	return Health{
 		NeedsHuman: true,
@@ -324,7 +339,8 @@ func Report(version, vaultPath string, file File, health Health, now time.Time) 
 	}
 	if !file.WrittenAt.IsZero() {
 		fmt.Fprintf(&report, "     last run: %s\n", at(file.WrittenAt, now))
-		fmt.Fprintf(&report, "  last commit: %s\n", never(file.LastCommit, now, "obsync has committed nothing yet"))
+		fmt.Fprintf(&report, "  last commit: %s\n",
+			atOrNever(file.LastCommit, now, "obsync has committed nothing yet"))
 		fmt.Fprintf(&report, "    last push: %s\n", lastPush(file, now))
 	}
 	// The freezes are printed even when they are not what the verdict named,
@@ -359,7 +375,9 @@ func lastPush(file File, now time.Time) string {
 	}
 }
 
-func never(moment, now time.Time, nothing string) string {
+// atOrNever is a moment that may not have happened yet: when it was, or the
+// word an operator reads instead, which says which kind of never this is.
+func atOrNever(moment, now time.Time, nothing string) string {
 	if moment.IsZero() {
 		return "never — " + nothing
 	}

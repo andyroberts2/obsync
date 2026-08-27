@@ -122,6 +122,10 @@ type Loop struct {
 	// measured against, and it is set where the backoff is rather than where a
 	// failure is classified: a verdict the remote returned is not a remote that
 	// has gone quiet, and neither is a race this run lost.
+	//
+	// It is cleared by a network half that got all the way through
+	// (networkHalfGotThrough) rather than by any command the remote answered,
+	// which is what separates it from the backoff beside it.
 	networkFailingSince time.Time
 
 	// lastCommit is when the local half last captured the vault, carried for
@@ -1522,8 +1526,11 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 			"branch", l.repo.TrackedBranch(), "conflict_copies", len(reconciled.ConflictCopies))
 		return l.push(ctx, now)
 	}
-	// Equal, or reconciled: a run that changed nothing says nothing, because
-	// docker logs --since 1h being empty is a designed signal (§9).
+	// Equal or Behind: there was nothing to publish, so the fetch and the
+	// reconcile are the whole half and it got through.
+	l.networkHalfGotThrough()
+	// A run that changed nothing says nothing, because docker logs --since 1h
+	// being empty is a designed signal (§9).
 	return nil
 }
 
@@ -1584,6 +1591,9 @@ func (l *Loop) push(ctx context.Context, now time.Time) error {
 	l.lastPush = now
 	l.remoteInStep = true
 	l.networkSucceeded()
+	// The network half got all the way through, which is the one thing that
+	// clears the ceiling's clock on a run that had something to publish.
+	l.networkHalfGotThrough()
 	// The one thing that is evidence against a rejection: the remote taking
 	// the push it had refused.
 	l.networkThawed(freezeRemoteRejection)
@@ -1658,16 +1668,38 @@ func (l *Loop) backOff(now time.Time) {
 // remote came back, and the next failure is a fresh one rather than the
 // continuation of an old one.
 func (l *Loop) networkSucceeded() {
-	// A remote that was gone long enough to stop being healthy and has come
-	// back is a recovery, and §9 puts every recovery at INFO. It is said only
-	// past the ceiling because that is the only point at which its absence was
-	// ever news: inside the day, a remote coming back is obsync working, and a
-	// line about it on every recovered tick is how a quiet log stops being a
-	// signal.
-	if now := l.clock.Now(); !l.networkFailingSince.IsZero() &&
-		now.Sub(l.networkFailingSince) > backoffCeiling {
+	l.backoff, l.retryNetworkAt = 0, time.Time{}
+}
+
+// networkHalfGotThrough clears the clock §9's backoff ceiling is measured
+// against, and says once that the remote came back when it had been gone long
+// enough to stop being healthy.
+//
+// It is deliberately not networkSucceeded's job, and the split is the whole of
+// what the ceiling measures. The **backoff** is reset by any command the remote
+// answered, because the next failure is then a fresh one rather than the
+// continuation of an old one. The **ceiling** is about whether obsync is
+// publishing at all, so only a network half that got all the way through clears
+// it — a fetch that works while every push is refused is a vault that has
+// stopped being backed up, and clearing the ceiling's clock on the half that
+// still works would leave that reading healthy for ever and saying nothing,
+// which is the exact harm §9 exists to prevent. That is not hypothetical: a
+// token narrowed to read-only on a deployment that had been working fetches
+// perfectly and fails only at the push, for ever.
+//
+// The recovery line is said only past the ceiling, because that is the only
+// point at which the remote's absence was ever news: inside the day a remote
+// coming back is obsync working, and a line about it on every recovered tick is
+// how a quiet log stops being a signal (§9). Saying it here rather than off a
+// successful fetch is what keeps it true — the remote has answered every
+// question this run asked it, including the one that publishes.
+func (l *Loop) networkHalfGotThrough() {
+	if l.networkFailingSince.IsZero() {
+		return
+	}
+	if now := l.clock.Now(); now.Sub(l.networkFailingSince) > backoffCeiling {
 		l.log.Info("the remote answered again", "gone_for",
 			now.Sub(l.networkFailingSince).Round(time.Second), "branch", l.repo.TrackedBranch())
 	}
-	l.backoff, l.retryNetworkAt, l.networkFailingSince = 0, time.Time{}, time.Time{}
+	l.networkFailingSince = time.Time{}
 }
