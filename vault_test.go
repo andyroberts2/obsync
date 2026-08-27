@@ -37,8 +37,13 @@ import (
 var humanIdentity = []string{"-c", "user.name=A Human", "-c", "user.email=human@example.invalid"}
 
 // vaultEnv is a vault, its remote, and one obsync driving them.
+//
+// testing.TB rather than *testing.T, so that a benchmark reaches seam 1 through
+// the same harness a test does. Sizing (#44) measures obsync's own cost against
+// a real vault and a real bare remote, and a second builder for it would be a
+// second definition of what a vault is.
 type vaultEnv struct {
-	t *testing.T
+	t testing.TB
 
 	// vault is the working tree obsync syncs; remote is the bare repo its
 	// origin points at, reached over file:// like every other remote obsync
@@ -91,7 +96,7 @@ type vaultEnv struct {
 // The loop is not turning yet. A test drives it one run at a time with wake, or
 // leaves it turning in the background with turn — either way, nothing obsync
 // does happens while a test is still building the vault it will look at.
-func newVault(t *testing.T) *vaultEnv {
+func newVault(t testing.TB) *vaultEnv {
 	t.Helper()
 	return newVaultReachedBy(t, nil)
 }
@@ -125,7 +130,7 @@ func newWatchedVault(t *testing.T) *vaultEnv {
 // credential can go wrong in it. The credential path's own tests hand back an
 // http:// URL in front of the same bare repo, because file:// is exactly the
 // route that cannot see any of what they assert.
-func newVaultReachedBy(t *testing.T, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
+func newVaultReachedBy(t testing.TB, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
 	t.Helper()
 
 	env := buildAttachedVault(t, reach)
@@ -166,7 +171,7 @@ func (e *vaultEnv) pushVaultTo(branch string) {
 // an operator already has, its remote and the configuration, and no loop. The
 // production watcher has to be pointed at a vault that already exists, so the
 // two are built in that order and driveWith joins them.
-func buildAttachedVault(t *testing.T, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
+func buildAttachedVault(t testing.TB, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
 	t.Helper()
 
 	env := buildVault(t, reach)
@@ -194,7 +199,7 @@ func newVaultToBootstrap(t *testing.T, reach func(*vaultEnv) (repoURL string, ex
 
 // buildVault is newVaultToBootstrap with nothing turning yet: the two
 // directories bootstrap decides about, and the configuration, and no loop.
-func buildVault(t *testing.T, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
+func buildVault(t testing.TB, reach func(*vaultEnv) (repoURL string, extra []string)) *vaultEnv {
 	t.Helper()
 
 	base := t.TempDir()
@@ -726,7 +731,7 @@ func (e *vaultEnv) mustGit(dir string, args ...string) string {
 	return out
 }
 
-func runGit(t *testing.T, dir string, args ...string) (string, int) {
+func runGit(t testing.TB, dir string, args ...string) (string, int) {
 	t.Helper()
 
 	cmd := exec.Command("git", args...)

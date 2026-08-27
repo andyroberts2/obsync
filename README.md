@@ -129,6 +129,32 @@ recommends for git sync ([ignis#14](https://github.com/Nystik-gh/ignis/issues/14
 obsync is not coupled to ignis, though — it assumes an Obsidian vault on a
 mounted volume, and ignis is the documented reference stack.
 
+## Sizing
+
+What obsync costs is a fact about the vault rather than something to configure,
+so it is stated here rather than left to be found out. The method and the
+numbers are in [`docs/research/sizing.md`](docs/research/sizing.md), and the
+benchmarks that produced them are in the repository, so they can be re-run on
+your own hardware.
+
+**CPU is milliseconds a run.** Every sync run asks git what changed, and that is
+the one cost that grows with the vault: about 5ms at a thousand notes, 12ms at
+ten thousand and 43ms at fifty thousand. obsync ticks every 60 seconds, so a
+vault far larger than most spends well under a tenth of a percent of one core on
+it, and there is no vault size in that range at which it is worth thinking
+about. A merge — computed outside the working tree every time the vault and the
+remote have both moved — costs about 68ms at a thousand notes and under a
+quarter of a second at fifty thousand.
+
+**Plan disk headroom on the vault volume, and plan it for the attachments.**
+When both sides changed the same file, obsync keeps both: your version stays
+where it is and the other side's lands beside it as a conflict copy. The remote
+pays nothing for that copy — it is a blob it already holds, at a second path —
+but the vault volume carries the file **twice**, until you resolve the conflict
+and delete the copy. For notes that is kilobytes. For a 90MB video edited in two
+places it is 90MB, once for every such file in the merge. obsync does not check
+free space before it writes, and there is no setting for a disk threshold.
+
 ## Documentation
 
 - [`docs/interface.md`](docs/interface.md) — the declared surface: the nine
@@ -147,6 +173,12 @@ Prior art and constraints, gathered before any design decisions were made:
   — the sync algorithm, and its safety gates, which are the valuable part.
 - [`docs/research/ignis-and-obsidian-vaults.md`](docs/research/ignis-and-obsidian-vaults.md)
   — how ignis touches the filesystem, and Obsidian vault git conventions.
+
+And one measured against the code rather than before it:
+
+- [`docs/research/sizing.md`](docs/research/sizing.md) — what a sync run and a
+  merge cost as the vault grows, and what keeping both sides of a conflicted
+  attachment costs the vault volume.
 
 ## Licence
 
