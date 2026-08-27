@@ -92,6 +92,12 @@ type vaultEnv struct {
 	// aside is where theVaultGoesEmpty put the vault, so that
 	// theVaultComesBack can put it back.
 	aside string
+
+	// rotted is the loose object theDiskRotsTheObjectGitNeedsMost damaged and
+	// the bytes it held, so that theRottedObjectIsRestored can put the disk
+	// back the way a human recovering their repository would.
+	rotted      string
+	rottedBytes []byte
 }
 
 // newVault builds a vault that is already a git repo with one commit, a bare
@@ -1622,6 +1628,104 @@ func (e *vaultEnv) remoteSubjects() []string {
 
 	out := e.mustGit(e.remote, "log", "--format=%s", "refs/heads/main")
 	return strings.Split(strings.TrimRight(out, "\n"), "\n")
+}
+
+// theDiskRotsTheObjectGitNeedsMost damages one loose object in the vault's own
+// object store — the tree at HEAD, which every `git status` has to read — and
+// remembers what it held so that a test can put it back.
+//
+// It is the damage this design was measured against, and it is real rather than
+// simulated: the bytes on disk stop being a valid object, and what git does
+// about that is git's business. Measured at both matrix points, 2.38.5 and
+// 2.52.0: `git status` exits 128, and rebuilding the index does not help,
+// because the object the rebuild reads is the damaged one.
+func (e *vaultEnv) theDiskRotsTheObjectGitNeedsMost() {
+	e.t.Helper()
+
+	oid := strings.TrimSpace(e.mustGit(e.vault, "rev-parse", "HEAD^{tree}"))
+	path := filepath.Join(e.vault, ".git", "objects", oid[:2], oid[2:])
+	sound, err := os.ReadFile(path)
+	if err != nil {
+		e.t.Fatalf("reading the vault's HEAD tree at %s to rot it: %v — this test needs a loose "+
+			"object, and a packed one is a different kind of damage", path, err)
+	}
+	e.rotted, e.rottedBytes = path, sound
+	// Loose objects are written read-only, which is git saying they are
+	// immutable rather than protecting them from a failing disk.
+	if err := os.Chmod(path, 0o644); err != nil {
+		e.t.Fatalf("making %s writable to rot it: %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte("bytes that are not an object any more"), 0o644); err != nil {
+		e.t.Fatalf("rotting %s: %v", path, err)
+	}
+}
+
+// theRottedObjectIsRestored is the human's own recovery: the object is sound
+// again and nothing else about the repository has changed. It is the whole of
+// what a damage freeze needs in order to clear, because obsync clears it by
+// retrying the work rather than by being told anything.
+func (e *vaultEnv) theRottedObjectIsRestored() {
+	e.t.Helper()
+
+	if e.rotted == "" {
+		e.t.Fatal("nothing has rotted, so there is nothing to restore")
+	}
+	if err := os.WriteFile(e.rotted, e.rottedBytes, 0o444); err != nil {
+		e.t.Fatalf("restoring %s: %v", e.rotted, err)
+	}
+}
+
+// theVaultsIndexIsTruncated is the damage an unclean shutdown leaves: the index
+// is still there and is no longer an index. It is the one kind of damage obsync
+// repairs, because the index is derived state — a cache of HEAD, holding no
+// history — and it is the reason the rebuild is unconditional rather than
+// triggered by matching git's prose.
+//
+// Measured at both matrix points: `git status` exits 128 with `fatal:
+// .git/index: index file smaller than expected`, which is git's everything-code
+// and therefore tells obsync nothing on its own.
+func (e *vaultEnv) theVaultsIndexIsTruncated() {
+	e.t.Helper()
+
+	path := filepath.Join(e.vault, ".git", "index")
+	if err := os.WriteFile(path, []byte("DIRC-and-then-nothing"), 0o644); err != nil {
+		e.t.Fatalf("truncating %s: %v", path, err)
+	}
+}
+
+// aThirdWriterRemovesTheVaultsIndex is the state obsync's own index rebuild can
+// leave, reached by the writer obsync cannot see: a human or a script that ran
+// `rm .git/index` in the vault, on a repository with nothing else wrong with it
+// and no failure streak behind it.
+//
+// Measured at both matrix points: a missing index is one git reads as *empty*,
+// so `git status` exits 0 and reports every tracked path twice — as a staged
+// deletion and as untracked. Nothing about that is a failure, which is exactly
+// why it is the dangerous one.
+func (e *vaultEnv) aThirdWriterRemovesTheVaultsIndex() {
+	e.t.Helper()
+
+	if err := os.Remove(filepath.Join(e.vault, ".git", "index")); err != nil {
+		e.t.Fatalf("removing the vault's index: %v", err)
+	}
+}
+
+// vaultStages reports whether the vault's index holds a path staged for a
+// commit that HEAD does not have — a human's own `git add`, which the index
+// rebuild is what discards.
+func (e *vaultEnv) vaultStages(path string) bool {
+	e.t.Helper()
+
+	out, code := e.git(e.vault, "diff-index", "--cached", "--name-only", "-z", "HEAD")
+	if code != 0 {
+		return false
+	}
+	for _, staged := range strings.Split(strings.TrimSuffix(out, "\x00"), "\x00") {
+		if staged == path {
+			return true
+		}
+	}
+	return false
 }
 
 // writeAttachment writes a file of exactly size bytes in the vault: an
