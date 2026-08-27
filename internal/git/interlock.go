@@ -13,8 +13,12 @@ import (
 	"github.com/andyroberts2/obsync/internal/config"
 )
 
-// GateFailure is an interlock that is not holding: which one, the conclusive
-// fact behind it, and what a human does about it (§7).
+// InterlockFailure is an interlock that is not holding: which one, the
+// conclusive fact behind it, and what a human does about it (§7).
+//
+// It is named for the wider word rather than for the gates, because the vault
+// sentinel travels in it too and the sentinel is not a gate — it is a fact
+// about the vault rather than about the repository (CONTEXT.md).
 //
 // Every one of them is a full freeze. They are values rather than sentinel
 // errors because the loop does not branch on which: it says the fact and the
@@ -22,14 +26,14 @@ import (
 // is the words, and the words are here beside the check that establishes them
 // rather than in a table one file away from the fact it describes.
 //
-// It is an error as well as a value so that bootstrap — which answers with the
-// three interlocks obsync cannot re-check its way out of — can return one
-// through the ordinary error path.
-type GateFailure struct {
-	// Gate is the freeze's name, and the one an operator sees in the log and
-	// in the attention note (#38).
-	Gate string
-	// Fact is the conclusive thing obsync observed. Every gate is a fact
+// It is an error as well as a value so that bootstrap — which answers the four
+// interlocks obsync cannot re-check its way out of — can return one through the
+// ordinary error path.
+type InterlockFailure struct {
+	// Interlock is the freeze's name, and the one an operator sees in the log
+	// and in the attention note (#38).
+	Interlock string
+	// Fact is the conclusive thing obsync observed. Every interlock is a fact
 	// rather than a judgement, which is what makes it safe to act on.
 	Fact string
 	// Remedy is what a human does, closing with the sentence that is the whole
@@ -37,7 +41,7 @@ type GateFailure struct {
 	Remedy string
 }
 
-func (g *GateFailure) Error() string { return g.Gate + ": " + g.Fact }
+func (g *InterlockFailure) Error() string { return g.Interlock + ": " + g.Fact }
 
 // SelfClearing is the last sentence of every remedy obsync writes, and it is
 // **load-bearing documentation** in the strictest sense (§11, #16): every
@@ -167,7 +171,7 @@ const vaultSentinel = ".obsidian"
 // A path that is there but is not a directory is the sentinel missing: what
 // obsync is looking for is the folder Obsidian keeps its configuration in, and
 // a file of that name is not it.
-func (r *Repo) sentinelHolds() (*GateFailure, error) {
+func (r *Repo) sentinelHolds() (*InterlockFailure, error) {
 	path := filepath.Join(r.vault, vaultSentinel)
 	info, err := os.Lstat(path)
 	switch {
@@ -177,8 +181,8 @@ func (r *Repo) sentinelHolds() (*GateFailure, error) {
 	case info.IsDir():
 		return nil, nil
 	}
-	return &GateFailure{
-		Gate: freezeVaultSentinel,
+	return &InterlockFailure{
+		Interlock: freezeVaultSentinel,
 		Fact: "the vault at " + r.vault + " holds no " + vaultSentinel + "/ folder, so obsync is " +
 			"not looking at the vault",
 		Remedy: "check the mount: an Obsidian vault always has a " + vaultSentinel + "/ folder, so " +
@@ -200,7 +204,7 @@ func (r *Repo) sentinelHolds() (*GateFailure, error) {
 // A `.git` that is a file rather than a directory is a worktree or a submodule
 // and is the case bootstrap attached to, so the question is asked with Lstat
 // and answered by existence.
-func (r *Repo) repositoryHolds() (*GateFailure, error) {
+func (r *Repo) repositoryHolds() (*InterlockFailure, error) {
 	_, err := os.Lstat(filepath.Join(r.vault, ".git"))
 	switch {
 	case err == nil:
@@ -208,9 +212,9 @@ func (r *Repo) repositoryHolds() (*GateFailure, error) {
 	case !errors.Is(err, fs.ErrNotExist):
 		return nil, err
 	}
-	return &GateFailure{
-		Gate: freezeNoRepository,
-		Fact: "the vault at " + r.vault + " no longer holds a .git",
+	return &InterlockFailure{
+		Interlock: freezeNoRepository,
+		Fact:      "the vault at " + r.vault + " no longer holds a .git",
 		Remedy: "obsync never re-clones and never repairs a repository by replacing it, because a " +
 			"re-clone discards exactly the commits obsync exists to have made. Check the mount " +
 			"first; if the repository is genuinely gone, docs/operations.md has the recovery " +
@@ -237,8 +241,8 @@ func (r *Repo) repositoryHolds() (*GateFailure, error) {
 // is — what survives a bootstrap is only that the repository is still there.
 // Gate 3 is HeadBranch's, because the branch it answers with is what the run's
 // next question is about and one symbolic-ref answers both.
-func (r *Repo) Refusing() (*GateFailure, error) {
-	for _, holds := range []func() (*GateFailure, error){
+func (r *Repo) Refusing() (*InterlockFailure, error) {
+	for _, holds := range []func() (*InterlockFailure, error){
 		r.repositoryHolds,
 		r.sentinelHolds,
 		r.noInterruptedOperation,
@@ -289,7 +293,7 @@ var interruptedOperations = []string{
 // The lock guards against a second obsync; it cannot guard against a human
 // running git in their own vault, and this is the gate that catches that on the
 // next run (§7).
-func (r *Repo) noInterruptedOperation() (*GateFailure, error) {
+func (r *Repo) noInterruptedOperation() (*InterlockFailure, error) {
 	for _, name := range interruptedOperations {
 		_, err := os.Lstat(filepath.Join(r.gitDir, name))
 		if errors.Is(err, fs.ErrNotExist) {
@@ -298,8 +302,8 @@ func (r *Repo) noInterruptedOperation() (*GateFailure, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &GateFailure{
-			Gate: freezeInterruptedOperation,
+		return &InterlockFailure{
+			Interlock: freezeInterruptedOperation,
 			Fact: "the repository holds " + name + ", so a rebase, merge, cherry-pick or bisect " +
 				"was started in the vault and has not finished",
 			Remedy: "finish it or abort it in the vault yourself — obsync will not commit into a " +
@@ -316,7 +320,7 @@ func (r *Repo) noInterruptedOperation() (*GateFailure, error) {
 // `.git` with a config and a HEAD and no commit — and obsync cannot tell that
 // from a human having broken HEAD in a repo that holds history, so the safe
 // reading of the pair is the one that touches nothing (§7).
-func (r *Repo) trackedBranchResolves() (*GateFailure, error) {
+func (r *Repo) trackedBranchResolves() (*InterlockFailure, error) {
 	if _, err := r.run(invocation{
 		dir:  r.vault,
 		args: []string{"rev-parse", "--verify", "--quiet", "refs/heads/" + r.branch},
@@ -325,9 +329,9 @@ func (r *Repo) trackedBranchResolves() (*GateFailure, error) {
 		if !errors.As(err, &command) || command.ExitCode != refDoesNotResolve {
 			return nil, err
 		}
-		return &GateFailure{
-			Gate: freezeBranchUnresolved,
-			Fact: "the vault's " + r.branch + " names no commit",
+		return &InterlockFailure{
+			Interlock: freezeBranchUnresolved,
+			Fact:      "the vault's " + r.branch + " names no commit",
 			Remedy: "obsync refuses such a repository rather than repairing it: that is what a " +
 				"clone killed halfway leaves behind, and obsync cannot tell it apart from a " +
 				"broken HEAD in a repository that holds history. docs/operations.md has the " +
@@ -348,7 +352,7 @@ func (r *Repo) trackedBranchResolves() (*GateFailure, error) {
 // obsync attempts no corrective action: a tool that has just proved it cannot
 // apply a tree correctly is the last thing that should try again unsupervised.
 // Nothing here writes the ref; that is write-verify's, and it is #33's.
-func (r *Repo) noFailedApplyAnchor() (*GateFailure, error) {
+func (r *Repo) noFailedApplyAnchor() (*InterlockFailure, error) {
 	if _, err := r.run(invocation{
 		dir:  r.vault,
 		args: []string{"rev-parse", "--verify", "--quiet", FailedApplyAnchor},
@@ -359,8 +363,8 @@ func (r *Repo) noFailedApplyAnchor() (*GateFailure, error) {
 		}
 		return nil, err
 	}
-	return &GateFailure{
-		Gate: freezeFailedApplyAnchor,
+	return &InterlockFailure{
+		Interlock: freezeFailedApplyAnchor,
 		Fact: "the repository holds " + FailedApplyAnchor + ", so a tree obsync applied to the " +
 			"vault was not the tree it had computed",
 		Remedy: "this is the one freeze a restart cannot clear, and the one you clear yourself. " +
@@ -376,10 +380,18 @@ func (r *Repo) noFailedApplyAnchor() (*GateFailure, error) {
 // path obsync declared (§10, docs/interface.md).
 const FailedApplyAnchor = "refs/obsync/failed-apply"
 
-// refDoesNotResolve is the status `rev-parse --verify --quiet` gives for a ref
-// that is simply not there, as against 128, which is git's everything-code and
-// here means the repository could not be read at all. It is a documented status
-// rather than prose, which is what makes it a fact obsync may branch on.
+// refDoesNotResolve is the status a ref that is simply not there gives, as
+// against 128, which is git's everything-code and here means the repository
+// could not be read at all. It is a documented status rather than prose, which
+// is what makes it a fact obsync may branch on.
+//
+// Two commands answer with it and both are asked for the same kind of fact:
+// `rev-parse --verify --quiet` for a ref that does not resolve, and
+// `symbolic-ref --quiet` for a HEAD that is not a symbolic ref at all. Measured
+// at both matrix points, 2.38.5 and 2.52.0, and the two agree on 1 for each —
+// git-symbolic-ref(1) promises only "non-zero", so it is measured rather than
+// read off the page, and a different non-zero would travel on as an ordinary
+// error rather than be mistaken for gate 3.
 const refDoesNotResolve = 1
 
 // originMatches is gate 5: the repository's own `origin` is the remote obsync
@@ -410,7 +422,7 @@ const refDoesNotResolve = 1
 // obsync never does, and a fact written into a log line and an attention note
 // is the last place a secret should be reconstructable from — so what is said
 // is the normalised pair, which has no credentials in it by construction.
-func (r *Repo) originMatches() (*GateFailure, error) {
+func (r *Repo) originMatches() (*InterlockFailure, error) {
 	out, err := r.run(invocation{
 		dir:  r.vault,
 		args: []string{"config", "-z", "--get-all", "remote." + config.RemoteName + ".url"},
@@ -420,8 +432,8 @@ func (r *Repo) originMatches() (*GateFailure, error) {
 		if !errors.As(err, &command) || command.ExitCode != configKeyUnset {
 			return nil, err
 		}
-		return &GateFailure{
-			Gate: freezeRemoteMismatch,
+		return &InterlockFailure{
+			Interlock: freezeRemoteMismatch,
 			Fact: "the vault's repository has no " + config.RemoteName + " remote, and obsync was " +
 				"given " + r.configuredRemote.String(),
 			Remedy: "set it yourself with `git remote add " + config.RemoteName + " <url>` in the " +
@@ -434,8 +446,8 @@ func (r *Repo) originMatches() (*GateFailure, error) {
 	first, _, _ := strings.Cut(string(out), "\x00")
 	origin, err := config.ParseRemote(first)
 	if err != nil {
-		return &GateFailure{
-			Gate: freezeRemoteMismatch,
+		return &InterlockFailure{
+			Interlock: freezeRemoteMismatch,
 			Fact: "the vault's " + config.RemoteName + " is a URL obsync cannot read, and obsync " +
 				"was given " + r.configuredRemote.String(),
 			Remedy: "check `git remote -v` in the vault against OBSYNC_REPO. obsync does not " +
@@ -446,8 +458,8 @@ func (r *Repo) originMatches() (*GateFailure, error) {
 	if origin == r.configuredRemote {
 		return nil, nil
 	}
-	return &GateFailure{
-		Gate: freezeRemoteMismatch,
+	return &InterlockFailure{
+		Interlock: freezeRemoteMismatch,
 		Fact: "the vault's " + config.RemoteName + " is " + origin.String() + " and obsync was " +
 			"given " + r.configuredRemote.String(),
 		Remedy: "point one of them at the other yourself — OBSYNC_REPO, or `git remote set-url` in " +
@@ -478,11 +490,11 @@ const configKeyUnset = 1
 // It writes nothing to find out. Creating a probe file to test a directory
 // would be obsync writing outside its owned paths, in the one place it is least
 // entitled to: a directory it has just been told it may not be in.
-func vaultUsable(path string) *GateFailure {
-	refuse := func(fact string) *GateFailure {
-		return &GateFailure{
-			Gate: freezeVaultUnusable,
-			Fact: fact,
+func vaultUsable(path string) *InterlockFailure {
+	refuse := func(fact string) *InterlockFailure {
+		return &InterlockFailure{
+			Interlock: freezeVaultUnusable,
+			Fact:      fact,
 			Remedy: "check the mount and the `user:` the container runs as — obsync runs as the UID " +
 				"it was given and never changes it, so it has to be the UID that owns the vault. " +
 				"This is the one refusal obsync cannot write an attention note about, because it " +

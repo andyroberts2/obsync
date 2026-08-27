@@ -51,11 +51,11 @@ const (
 // ceiling. The remaining member is a remote rejection (#35).
 //
 // **Full freeze.** Any of the nine gates and the vault sentinel, which arrive
-// as a `*git.GateFailure` and are matched by type rather than by row — there
-// are ten of them, they are one kind of fact, and a table listing them twice is
-// a table that can disagree with itself. Plus HEAD moving off the tracked
-// branch, a merge state appearing mid-run (gate 4), `.git` disappearing (gate
-// 2), and the remote holding refs but not the tracked branch. Write-verify
+// as a `*git.InterlockFailure` and are matched by type rather than by row —
+// there are ten of them, they are one kind of fact, and a table listing them
+// twice is a table that can disagree with itself. Plus HEAD moving off the
+// tracked branch, a merge state appearing mid-run (gate 4), `.git` disappearing
+// (gate 2), and the remote holding refs but not the tracked branch. Write-verify
 // failing and the local failure streak reaching five are §7's last two members
 // and are #33's and #34's.
 var tiers = []struct {
@@ -81,7 +81,7 @@ var tiers = []struct {
 // is — a run that failed — rather than being quietly sorted into the tier that
 // says nothing.
 func tierOf(err error) (tier, bool) {
-	var failing *git.GateFailure
+	var failing *git.InterlockFailure
 	if errors.As(err, &failing) {
 		return fullFreeze, true
 	}

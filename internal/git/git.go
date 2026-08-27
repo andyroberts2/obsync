@@ -220,9 +220,9 @@ func (r *Repo) HeadBranch() (string, error) {
 // rewrites files a human has open — so the remedy is theirs and the gate is
 // what makes their doing it enough (§3, §7).
 func (r *Repo) detachedHead() error {
-	return &GateFailure{
-		Gate: freezeDetachedHead,
-		Fact: "the vault's HEAD is not on a branch",
+	return &InterlockFailure{
+		Interlock: freezeDetachedHead,
+		Fact:      "the vault's HEAD is not on a branch",
 		Remedy: "check a branch out in the vault yourself. obsync never runs `git checkout` after " +
 			"bootstrap, because that rewrites files you have open, and it will not commit onto a " +
 			"detached HEAD" + SelfClearing,

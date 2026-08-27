@@ -71,7 +71,7 @@ or is mid-rebase, whose `origin` is not the remote it was given, whose branch
 names no commit, or that a second obsync already holds. Each one stops obsync,
 says the fact and the remedy, and clears on its own within a tick once the
 cause is repaired — no restart, and obsync never exits, because a crash-looping
-container buries the one message that matters. The gate that matters most is
+container buries the one message that matters. The one that matters most is
 `.obsidian/`: its absence means the vault is not there, and any amount of note
 deletion with it intact is you editing your vault, which obsync syncs without
 comment. The **declared surface** — everything a version number will make a

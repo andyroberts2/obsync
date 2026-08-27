@@ -241,14 +241,15 @@ func (l *Loop) syncRun(ctx context.Context) {
 	committing := l.cadence.mayCommit(l.clock.Now())
 	defer func() { l.cadence.ran(l.clock.Now(), committing) }()
 
-	if err := l.bootstrap(ctx); err != nil {
+	bootstrapped, err := l.bootstrap(ctx)
+	if err != nil {
 		// Gates 1, 2, 6 and 8 are what bootstrap decides, and each is a full
 		// freeze named after the fact behind it: said once on entry, said once
 		// when it clears, and re-established from scratch by every run for as
 		// long as obsync has no repository (§7, §9).
-		var failing *git.GateFailure
+		var failing *git.InterlockFailure
 		if errors.As(err, &failing) {
-			l.report(l.freeze(failing.Gate, failing.Fact, failing.Remedy))
+			l.report(l.freeze(failing.Interlock, failing.Fact, failing.Remedy))
 			return
 		}
 		// Everything else bootstrap can fail at is a clone that did not
@@ -261,11 +262,24 @@ func (l *Loop) syncRun(ctx context.Context) {
 			"vault_path", l.config.VaultPath)
 		return
 	}
-	// A bootstrap that got through is gates 1, 2, 6 and 8 all holding, so the
-	// freeze one of them was holding clears here rather than a run later — and
-	// only those four, because nothing has yet looked at the interlocks the
-	// run below re-checks.
-	l.interlocksHold(git.BootstrapFreezes)
+	// A bootstrap that *ran* and got through is gates 1, 2, 6 and 8 all
+	// holding, so the freeze one of them was holding clears here rather than a
+	// run later — and only those four, because nothing has yet looked at the
+	// interlocks the run below re-checks.
+	//
+	// Only a bootstrap that ran, because two of those four names are also
+	// per-run interlocks: gate 2 is `.git` still being there and gate 6 is the
+	// tracked branch still naming a commit, and Refusing below enters a freeze
+	// under each of those same names. A bootstrap that returned early because
+	// obsync already has a repository has established nothing since the last
+	// run, so clearing on it would announce a freeze cleared and re-enter it
+	// one line later, once a tick, for as long as the cause stands — which is
+	// both the noise §9's "state exit is said once" forbids and a log telling
+	// an operator obsync recovered when it did not. Those two clear where they
+	// are re-checked, in InterlockFreezes below.
+	if bootstrapped {
+		l.interlocksHold(git.BootstrapFreezes)
+	}
 	if err := l.perform(ctx, committing); err != nil {
 		l.report(err)
 	}
@@ -280,17 +294,21 @@ func (l *Loop) syncRun(ctx context.Context) {
 // refusal in this design has: the cause is repaired — the remote gains a vault
 // to clone, the stray folder is emptied, the human checks their branch out —
 // and obsync recovers on its own, with no restart (§7).
-func (l *Loop) bootstrap(ctx context.Context) error {
+//
+// It reports whether this run is the one that did it, because that is the run
+// on which the interlocks bootstrap answers are established. Every run after it
+// establishes nothing, and a fact nothing looked at is not a fact that cleared.
+func (l *Loop) bootstrap(ctx context.Context) (bool, error) {
 	if l.repo != nil {
-		return nil
+		return false, nil
 	}
 
 	repo, err := git.Bootstrap(ctx, l.config, l.log, l.clock)
 	if err != nil {
-		return err
+		return false, err
 	}
 	l.repo = repo
-	return nil
+	return true, nil
 }
 
 // stillWithheld reports whether the remote still holds refs but not the tracked
@@ -362,13 +380,21 @@ func (l *Loop) stillRewritten(ctx context.Context, now time.Time) (bool, error) 
 // each log exactly one line (§9); the hourly repeat that keeps a broken obsync
 // from going quiet in between is #37's.
 //
-// One full freeze is held at a time and the first fact wins: they stop obsync
-// doing the same nothing, so a second one arriving changes no behaviour, and
-// re-announcing a freeze obsync is already in would make the log say a state
-// changed when it did not. The ordering that matters — full over network — is
-// in the order these are asked (#32).
+// One full freeze is held at a time, and which one is the *current* fact rather
+// than the first one ever seen. They stop obsync doing the same nothing, so a
+// second freeze arriving changes no behaviour — but it changes what an operator
+// is looking at, and that is the whole of what a freeze is for. Holding the
+// first name would leave obsync naming a fact the human has already repaired,
+// silently, for as long as a second one stood: they would do exactly what the
+// log asked and be told nothing, which is the failure §7's self-clearing rule
+// exists to make impossible.
+//
+// So the guard is the name, which is the same guard networkFreeze has always
+// had: a freeze obsync is already in is not re-announced, and a different fact
+// is. The ordering that matters — full over network, and the first *failing*
+// interlock within a run — is in the order these are asked (#32).
 func (l *Loop) freeze(name, fact, remedy string) error {
-	if l.frozen != "" {
+	if l.frozen == name {
 		return errFullFrozen
 	}
 	l.frozen = name
@@ -497,7 +523,7 @@ func (l *Loop) perform(ctx context.Context, committing bool) error {
 		return err
 	}
 	if failing != nil {
-		return l.freeze(failing.Gate, failing.Fact, failing.Remedy)
+		return l.freeze(failing.Interlock, failing.Fact, failing.Remedy)
 	}
 
 	// The index lock is asked next: it is not a gate — nothing is wrong with
@@ -521,9 +547,9 @@ func (l *Loop) perform(ctx context.Context, committing bool) error {
 		// run: HEAD is not on a branch at all. It is asked here rather than in
 		// Refusing because the branch it answers with is the thing the next
 		// question is about, and one symbolic-ref answers both.
-		var detached *git.GateFailure
+		var detached *git.InterlockFailure
 		if errors.As(err, &detached) {
-			return l.freeze(detached.Gate, detached.Fact, detached.Remedy)
+			return l.freeze(detached.Interlock, detached.Fact, detached.Remedy)
 		}
 		return err
 	}

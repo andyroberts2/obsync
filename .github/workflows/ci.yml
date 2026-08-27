@@ -152,11 +152,9 @@ jobs:
       # obsync is one serialized loop and a watcher feeding a channel, so -race
       # should never have anything to say; the day it does, it is right.
       #
-      # A prefix install carries its own libexec, so putting `<prefix>/bin` at
-      # the front of PATH swaps the whole git — plumbing, remote helpers and all
-      # — which is the only way a matrix point tests anything. The version is
-      # echoed because a point that silently ran the runner's own git would pass
-      # and mean nothing.
+      # The version is echoed because a point that silently ran the runner's own
+      # git would pass and mean nothing, which is the one way this job can be
+      # green and worthless.
       - name: Test
         env:
           VERSION: ${{ steps.git.outputs.version }}

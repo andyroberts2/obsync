@@ -49,7 +49,7 @@ var GitFloor = strings.TrimSpace(gitFloorFile)
 // does not recognise is not conclusive evidence that git is too old. The
 // commands that need the floor announce themselves the moment obsync needs
 // them, which is the same reasoning that keeps `fsck` out of the design.
-func (r *Repo) gitAtOrAboveTheFloor() (*GateFailure, error) {
+func (r *Repo) gitAtOrAboveTheFloor() (*InterlockFailure, error) {
 	out, err := r.run(invocation{dir: r.vault, args: []string{"--version"}})
 	if err != nil {
 		return nil, err
@@ -63,9 +63,9 @@ func (r *Repo) gitAtOrAboveTheFloor() (*GateFailure, error) {
 	if !below(version, GitFloor) {
 		return nil, nil
 	}
-	return &GateFailure{
-		Gate: freezeGitBelowTheFloor,
-		Fact: "the git obsync is driving is " + version + " and obsync's floor is " + GitFloor,
+	return &InterlockFailure{
+		Interlock: freezeGitBelowTheFloor,
+		Fact:      "the git obsync is driving is " + version + " and obsync's floor is " + GitFloor,
 		Remedy: "run an image carrying git " + GitFloor + " or newer. obsync computes every merge " +
 			"outside the vault with `git merge-tree --write-tree`, which is what fixes the floor " +
 			"where it is, and a vault synced by a git without it would meet that as an " +

@@ -137,8 +137,8 @@ func (r *Repo) resolveTrackedBranch(ctx context.Context, cfg config.Config) (str
 		return "", fmt.Errorf("the vault at %q cannot be read: %w", r.vault, err)
 	}
 	if shows {
-		return "", &GateFailure{
-			Gate: freezeNoRepository,
+		return "", &InterlockFailure{
+			Interlock: freezeNoRepository,
 			Fact: "the vault at " + r.vault + " is not a git repository and holds " + path +
 				", so obsync will not adopt it",
 			Remedy: "point obsync at an empty directory to clone into, or make this one a " +
@@ -163,9 +163,9 @@ func (r *Repo) resolveTrackedBranch(ctx context.Context, cfg config.Config) (str
 	if entry, notEmpty, err := firstEntry(r.vault); err != nil {
 		return "", fmt.Errorf("the vault at %q cannot be read: %w", r.vault, err)
 	} else if notEmpty {
-		return "", &GateFailure{
-			Gate: freezeNoRepository,
-			Fact: "the vault at " + r.vault + " is not a git repository and holds " + entry,
+		return "", &InterlockFailure{
+			Interlock: freezeNoRepository,
+			Fact:      "the vault at " + r.vault + " is not a git repository and holds " + entry,
 			Remedy: "move or delete it and obsync clones on its next run. obsync would have " +
 				"adopted what is there, and git will not clone into a destination holding " +
 				"anything at all" + SelfClearing,
@@ -235,9 +235,9 @@ func (r *Repo) branchNamingACommit(branch string) (string, error) {
 		// obsync's account of them: --quiet leaves nothing on stderr for a ref
 		// that is simply absent, and the exit status is what says this was not
 		// git's everything-code.
-		return "", &GateFailure{
-			Gate: freezeBranchUnresolved,
-			Fact: "the vault's " + branch + " names no commit, so obsync has no tracked branch to sync",
+		return "", &InterlockFailure{
+			Interlock: freezeBranchUnresolved,
+			Fact:      "the vault's " + branch + " names no commit, so obsync has no tracked branch to sync",
 			Remedy: "obsync refuses such a repository rather than repairing it: that is what a " +
 				"clone killed halfway leaves behind, and obsync cannot tell it apart from a " +
 				"broken HEAD in a repository that holds history. docs/operations.md has the " +
@@ -397,7 +397,10 @@ func (r *Repo) remoteMatches(ctx context.Context, patterns ...string) (bool, err
 		if errors.As(err, &command) && command.ExitCode == noMatchingRefs {
 			return false, nil
 		}
-		return false, err
+		// Anything else is the remote not having answered at all: an
+		// `ls-remote` that failed carries no verdict about anything, which is
+		// the abort tier's own fact (§7).
+		return false, unanswered(err)
 	}
 	return true, nil
 }

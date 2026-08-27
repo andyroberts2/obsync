@@ -48,9 +48,9 @@ func (r *Repo) lockTheVault() error {
 		if !errors.Is(err, unix.EWOULDBLOCK) {
 			return fmt.Errorf("obsync could not take its lock at %q: %w", path, err)
 		}
-		return &GateFailure{
-			Gate: freezeSecondObsync,
-			Fact: "another process holds obsync's lock at " + path,
+		return &InterlockFailure{
+			Interlock: freezeSecondObsync,
+			Fact:      "another process holds obsync's lock at " + path,
 			Remedy: "one vault is one obsync: run a second service for a second vault rather than " +
 				"a second obsync for this one. The lock is advisory and dies with the process " +
 				"holding it, so there is nothing to clean up — stopping the other obsync is the " +

@@ -22,7 +22,7 @@ const (
 	freezeCleared            = "level=INFO msg=\"the freeze cleared"
 )
 
-// The vault sentinel is the gate that matters most: the mount drops, `git
+// The vault sentinel is the interlock that matters most: the mount drops, `git
 // status` reports every tracked file deleted, and a fail-open local half would
 // faithfully commit the deletion of the entire vault (§7). The gate is
 // `.obsidian/` — its absence means the vault is not there.
@@ -541,5 +541,196 @@ func TestAFullFreezeWinsOverALiveNetworkFreeze(t *testing.T) {
 	}
 	if said := env.saidSoFar(); !strings.Contains(said, frozenAndTouchingNothing) {
 		t.Errorf("obsync said %q, want the full freeze it entered on top of the network one (§7)", said)
+	}
+}
+
+// State entry and state exit are each said exactly once (§9), and a freeze that
+// stands is not a state that changed. This is the half of that rule a freeze
+// which is *also* answered at bootstrap can break: gate 2 and gate 6 are both
+// asked at bootstrap and again at the top of every run, so a run that took the
+// bootstrap answer as news would announce the freeze cleared and re-enter it
+// one line later, once a tick, for as long as the `.git` stayed gone.
+//
+// The cost is not noise. An operator reading `docker logs` would be told obsync
+// recovered, every minute, while it had not — which is the one thing a log that
+// exists to be believed may not say.
+func TestARepositoryThatStaysGoneIsSaidOnceRatherThanOnceATick(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.turn()
+	env.awaitIdle()
+
+	env.theRepositoryGoes()
+	for range 3 {
+		env.advance(70 * time.Second)
+	}
+
+	said := env.saidSoFar()
+	if got, want := strings.Count(said, frozenAndTouchingNothing), 1; got != want {
+		t.Errorf("obsync announced the freeze %d times over three ticks with the repository gone, "+
+			"want %d: state entry is said exactly once (§9)", got, want)
+	}
+	if got := strings.Count(said, freezeCleared); got != 0 {
+		t.Errorf("obsync said the freeze cleared %d times while the repository was still gone, want "+
+			"none: a log that says obsync recovered when it did not is worse than a silent one "+
+			"(§7, §9)", got)
+	}
+
+	// And the freeze still clears on the run that repairs it, which is the
+	// thing the count above must not be bought with.
+	env.theRepositoryComesBack()
+	env.advance(70 * time.Second)
+
+	if got := strings.Count(env.saidSoFar(), freezeCleared); got != 1 {
+		t.Errorf("obsync said the freeze cleared %d times once the repository was back, want 1 "+
+			"(§7, §9)", got)
+	}
+}
+
+// The same rule for gate 6, which bootstrap and the per-run interlocks also
+// both answer: an unborn tracked branch stands until a human repairs it, and a
+// freeze that stands is not a state that changed (§9).
+func TestATrackedBranchThatStaysUnbornIsSaidOnceRatherThanOnceATick(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.turn()
+	env.awaitIdle()
+	tip := env.vaultTipYet()
+
+	env.mustGit(env.vault, "update-ref", "-d", "refs/heads/main")
+	for range 3 {
+		env.advance(70 * time.Second)
+	}
+
+	said := env.saidSoFar()
+	if got, want := strings.Count(said, frozenAndTouchingNothing), 1; got != want {
+		t.Errorf("obsync announced the freeze %d times over three ticks with the tracked branch "+
+			"naming nothing, want %d (§9)", got, want)
+	}
+	if got := strings.Count(said, freezeCleared); got != 0 {
+		t.Errorf("obsync said the freeze cleared %d times while the branch still named nothing, "+
+			"want none (§7, §9)", got)
+	}
+
+	env.mustGit(env.vault, "update-ref", "refs/heads/main", tip)
+	env.advance(70 * time.Second)
+
+	if got := strings.Count(env.saidSoFar(), freezeCleared); got != 1 {
+		t.Errorf("obsync said the freeze cleared %d times once the branch named a commit again, "+
+			"want 1 (§7, §9)", got)
+	}
+}
+
+// A remote that is down is an aborted run wherever obsync met it, and the
+// probes a frozen obsync re-asks every tick are where that matters most: the
+// freeze is already correctly announced, so an ERROR here is obsync asking for
+// a human twice about one fact, once a tick, for as long as the remote is away.
+//
+// The command behind this one is a `fetch --refmap=` rather than the run's own
+// fetch, which is the whole of why it was outside the tier: the tier is a fact
+// about which command failed, and both of these are obsync having been told
+// nothing (§7).
+func TestAnUnreachableRemoteUnderANetworkFreezeStillSaysNothingAboveDebug(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.turn()
+	env.awaitIdle()
+
+	// The network freeze the re-check probe belongs to: the remote's history
+	// was rewritten under the tip obsync last saw.
+	env.writeNote("Notes/purged.md", "the note the rewrite removes\n")
+	env.advance(70 * time.Second)
+	env.remoteRewritesItsHistory()
+	env.advance(70 * time.Second)
+
+	entered := strings.Count(env.saidSoFar(), "level=ERROR")
+	if entered != 1 {
+		t.Fatalf("obsync said %q, want the one ERROR the network freeze this test is built on "+
+			"enters with (§3, §9)", env.saidSoFar())
+	}
+
+	// And now the remote goes away underneath the freeze. The probe cannot
+	// answer, so obsync stays frozen — the freeze clears on a fact, never on a
+	// failure to establish one — and says nothing further.
+	env.remoteAway()
+	for range 3 {
+		env.advance(16 * time.Minute)
+	}
+
+	said := env.saidSoFar()
+	if got := strings.Count(said, "level=ERROR"); got != entered {
+		t.Errorf("obsync said ERROR %d times with the remote away under a network freeze, want %d — "+
+			"an unreachable remote is an aborted run whichever command met it, and it reports "+
+			"nothing above debug (§7, §9)", got, entered)
+	}
+	if strings.Contains(said, "level=WARN") {
+		t.Errorf("obsync said %q with the remote away, want nothing above debug (§7)", said)
+	}
+
+	// The local half is untouched throughout, which is what a network freeze
+	// means and what an unreachable remote must not change.
+	env.remoteBack()
+	env.writeNote("Notes/still-committing.md", "written while the remote was away\n")
+	env.advance(70 * time.Second)
+
+	if got := env.vaultFileYet("Notes/still-committing.md"); got != "written while the remote was away\n" {
+		t.Errorf("the vault holds %q, want the note the test wrote", got)
+	}
+	if got := env.commitsSoFar(env.vault); got == "1" {
+		t.Error("obsync stopped committing locally, want the local half still running under a " +
+			"network freeze (§7)")
+	}
+}
+
+// A second interlock failing while the first still stands is a *different*
+// state, and state entry is said once per state rather than once ever (§9).
+//
+// The cost of holding the first name is not noise, it is the opposite: the
+// operator does exactly what the log asked them to do, the fact they repaired
+// stops being true, and obsync goes on naming it while standing frozen on
+// something else it never mentioned. That is §7's "every freeze self-clears
+// when its cause is repaired" failing in the one way an operator cannot see.
+func TestASecondInterlockFailingIsSaidRatherThanHiddenBehindTheFirst(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.turn()
+	env.awaitIdle()
+
+	env.mustGit(env.vault, "checkout", "--quiet", "--detach", "HEAD")
+	env.advance(70 * time.Second)
+	if !strings.Contains(env.saidSoFar(), "freeze=\"the vault's HEAD is detached\"") {
+		t.Fatalf("obsync said %q, want gate 3's freeze this test is built on (§7)", env.saidSoFar())
+	}
+
+	// A second fact arrives underneath the first: origin now points at a
+	// remote obsync was never given.
+	elsewhere := env.aSecondBareRemote()
+	env.mustGit(env.vault, "remote", "set-url", config.RemoteName, "file://"+elsewhere)
+	// And the human does exactly what the log told them to.
+	env.mustGit(env.vault, "checkout", "--quiet", "main")
+	env.advance(70 * time.Second)
+
+	said := env.saidSoFar()
+	if !strings.Contains(said, "freeze=\"the vault's origin is not the remote obsync was given\"") {
+		t.Errorf("obsync said %q after the human repaired the fact it named, want gate 5 — the "+
+			"freeze standing now — said in its own right: an operator who has done what the log "+
+			"asked and is told nothing has no way left to find out (§7, §9)", said)
+	}
+
+	// And it still clears, on the fact that is actually holding it.
+	env.mustGit(env.vault, "remote", "set-url", config.RemoteName, env.repoURL)
+	env.writeNote("Daily/2026-08-24.md", "written once both were repaired\n")
+	env.advance(70 * time.Second)
+
+	if got := env.remoteFile("Daily/2026-08-24.md"); got != "written once both were repaired\n" {
+		t.Errorf("the remote holds %q once both facts were repaired, want the note obsync "+
+			"deferred (§7)", got)
+	}
+	if got := strings.Count(env.saidSoFar(), freezeCleared); got != 1 {
+		t.Errorf("obsync said the freeze cleared %d times, want 1 — state exit is said once (§9)", got)
 	}
 }
