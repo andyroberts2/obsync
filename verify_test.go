@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -225,6 +227,62 @@ func TestAnEditBesideWhatTheApplyTouchedIsNotAWriteVerifyFailure(t *testing.T) {
 
 	if got := env.remoteFile("Daily/the human's own note.md"); got != "typed while the merge landed\n" {
 		t.Errorf("the remote holds %q, want the human's edit committed like any other (§2)", got)
+	}
+}
+
+// The other end of that scope, and the one the check's own plumbing draws
+// rather than its argument: `diff-index` is a question about tracked content,
+// so a path the apply *removed* that something puts straight back is untracked
+// at the applied commit and invisible to it. Measured at both matrix points —
+// `git status` reports the path and `diff-index` reports nothing.
+//
+// It is left there, and this is the row that says so. A note reappearing where
+// an incoming change deleted it is exactly what a human recreating it looks
+// like, obsync cannot tell the two apart, and a freeze only a human can clear
+// may not fire on somebody using their vault. Nothing goes out unaccounted for
+// either way: the push carries the commit obsync computed, and the file the
+// vault holds is committed by the next run like any other edit (§7, fail open
+// locally). An apply that leaves its deletions half-done is #34's, the same way
+// every other half-finished apply is.
+func TestANoteRecreatedWhereTheApplyDeletedItIsNotAWriteVerifyFailure(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.writeNote("Daily/2026-08-24.md", "the note the laptop is about to delete\n")
+	env.writeNote("Daily/the one that stays.md", "so the folder outlives the deletion\n")
+	env.turn()
+	env.awaitIdle()
+
+	// The other device deletes the note and pushes, so this run is only behind
+	// and the fast-forward's whole job is a removal.
+	env.onTheLaptop(func(laptop string) {
+		if err := os.Remove(filepath.Join(laptop, "Daily/2026-08-24.md")); err != nil {
+			t.Fatalf("deleting the note on the laptop: %v", err)
+		}
+	})
+	env.installVaultHook("post-merge",
+		"#!/bin/sh\nprintf 'typed straight back in\\n' > 'Daily/2026-08-24.md'\nexit 0\n")
+
+	env.advance(70 * time.Second)
+
+	if got := env.vaultRef("refs/obsync/failed-apply"); got != "" {
+		t.Errorf("write-verify anchored %q for a path recreated where the apply deleted it, want "+
+			"nothing: this is indistinguishable from a human recreating the note, and the freeze "+
+			"that means obsync cannot trust its own view of the vault may not mean that (§7)", got)
+	}
+	if said := env.saidSoFar(); strings.Contains(said, frozenAndTouchingNothing) {
+		t.Errorf("obsync said %q, want no freeze at all (§7)", said)
+	}
+
+	// And the bound on it: the vault's own bytes are what the next run commits,
+	// so the file is accounted for rather than lost, and the deletion the other
+	// device made is still a commit away in history.
+	env.removeVaultHook("post-merge")
+	env.advance(70 * time.Second)
+
+	if got := env.remoteFile("Daily/2026-08-24.md"); got != "typed straight back in\n" {
+		t.Errorf("the remote holds %q, want the bytes the vault was left holding: what obsync does "+
+			"with a file it did not put there is commit it, like any other edit (§2, §7)", got)
 	}
 }
 

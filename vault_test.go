@@ -1523,6 +1523,13 @@ func (e *vaultEnv) vaultRef(ref string) string {
 // is the assertion behind "the anchor sits outside refs/heads/ and is never
 // pushed": obsync's refspec is one branch in each direction, so a ref of its
 // own can never travel (§3, §7).
+//
+// Split on whitespace rather than NUL, which is the same reading remoteBranches
+// below does and is right for the same reason `cat-file --batch-check` is read
+// a line at a time: the rule against splitting git's output is about paths, and
+// there is no path in this listing. git-check-ref-format(1) forbids a space and
+// any control character in a ref name, so the one thing that could hold a
+// separator cannot be here.
 func (e *vaultEnv) obsyncRefsOnTheRemote() []string {
 	e.t.Helper()
 

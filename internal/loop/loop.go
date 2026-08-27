@@ -67,11 +67,11 @@ type Loop struct {
 	// vault sentinel (§7), a remote holding refs but not the tracked branch,
 	// and HEAD moving off the tracked branch (§3) — and the second four: an
 	// upstream rewrite, and each of §4's three ways a merge stops rather than
-	// being improvised into a commit. The thirteenth cause of a full freeze is
-	// write-verify failing (#33), which is gate 9's own freeze arriving from
-	// the run that established it rather than from the ref. The one §7 still
-	// names and this build does not have is the local failure streak reaching
-	// five (#34).
+	// being improvised into a commit. Write-verify failing (#33) adds no
+	// thirteenth cause: it is gate 9's own freeze, reached from the run that
+	// wrote the ref rather than from the ref, which is what makes the two one
+	// state rather than two (§9). The one §7 still names and this build does
+	// not have is the local failure streak reaching five (#34).
 	//
 	// They are two fields rather than one tier because they are two live
 	// states rather than one classification: a vault can be in both at once,

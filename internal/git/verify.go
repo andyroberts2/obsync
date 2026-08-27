@@ -24,11 +24,11 @@ import (
 //
 //  1. The vault's HEAD is the commit obsync applied. An apply that reported
 //     success and left HEAD somewhere else is one obsync has no account of.
-//  2. Nothing the apply touched differs between the vault and that commit.
-//     HEAD alone would not see §6's own worst case — an apply that wrote some
-//     of its paths and not others leaves HEAD correct and the vault holding a
-//     tree obsync never computed, which is exactly why the write side is
-//     all-or-nothing rather than per-path.
+//  2. Nothing the apply touched is tracked at different bytes in the vault
+//     from the ones that commit has at it. HEAD alone would not see §6's own
+//     worst case — an apply that wrote some of its paths and not others leaves
+//     HEAD correct and the vault holding a tree obsync never computed, which is
+//     exactly why the write side is all-or-nothing rather than per-path.
 //
 // The scope is the paths the apply touched and never the whole tree, for the
 // same reason the guard immediately before it has that scope: the vault is a
@@ -45,6 +45,22 @@ import (
 // window is bounded by the guard that runs immediately before the apply, which
 // has just watched every one of these paths hold still across the settle
 // interval (§6).
+//
+// The second fact is a question about *tracked* content, and that boundary is
+// measured rather than assumed: at both matrix points, a path the apply removed
+// that something puts back is untracked at the applied commit, and `diff-index`
+// does not report untracked paths at all — `git status` sees it and this does
+// not. It is left there deliberately, on the rule the scope above is already
+// drawn by. A note reappearing where an incoming change deleted it is precisely
+// what a human recreating it looks like, obsync cannot tell the two apart, and
+// a freeze only a human can clear may not fire on somebody using their vault.
+// Nothing is published that obsync cannot account for either way: HEAD is the
+// commit obsync computed, which is what the push carries, and the file the
+// vault holds is committed by the next run like any other edit — fail open
+// locally (§7). An *apply* that leaves deletions half-done is the other way in,
+// and it is outside this the same way every other half-finished apply is:
+// write-verify runs after an apply git reported as done, and a local command
+// failing for no reason obsync has a rule for is #34's.
 
 // writeVerify is §7's write-verify, and it answers with the full freeze §7 asks
 // for — after anchoring the commit obsync computed, and never before.
@@ -66,7 +82,7 @@ func (r *Repo) writeVerify(applied string, touched []string) error {
 			"vault's HEAD is "+at)
 	}
 
-	unapplied, err := r.differingFromTheVault(applied, touched)
+	unapplied, err := r.firstPathTheVaultDoesNotHold(applied, touched)
 	if err != nil {
 		return err
 	}
@@ -77,16 +93,21 @@ func (r *Repo) writeVerify(applied string, touched []string) error {
 	return nil
 }
 
-// differingFromTheVault is the first of the paths an apply touched that the
-// vault does not hold as the applied commit has it, in git's own order — which
-// is what makes the path a freeze names the same one on every run rather than
-// whichever a map handed back first.
+// firstPathTheVaultDoesNotHold is the first of the paths an apply touched that
+// the vault does not hold as the applied commit has it, or "" when the vault
+// holds all of them. It answers with one path rather than a set, in git's own
+// order — which is what makes the path a freeze names the same one on every run
+// rather than whichever a map handed back first.
 //
 // `diff-index` without --cached, so the question is about the working tree and
 // not only about the index: what write-verify is asked about is the bytes in
 // the vault. -z rather than a line per path, because a note title may legally
-// contain a newline and git C-quotes one onto a single line without it
-// (measured at both matrix points).
+// contain a newline and git C-quotes one onto a single line without it. The
+// newline is the case that cannot be recovered from, but it is not the case
+// that fires first: measured at both matrix points, plain `--name-only` also
+// C-quotes a title carrying any non-ASCII character, so `für.md` comes back as
+// "f\303\274r.md" and an intersection done on lines misses an ordinary vault's
+// paths. A leading dash needs nothing, because no path is ever a pathspec here.
 //
 // The listing is asked of the whole repository and intersected here rather than
 // asked with the touched paths as pathspecs. Two reasons, and the first is the
@@ -101,7 +122,7 @@ func (r *Repo) writeVerify(applied string, touched []string) error {
 // git wrote alongside them. Measured at both matrix points — a clean `reset
 // --keep` and a clean `merge --ff-only` each leave this listing empty — because
 // a false positive here is a freeze only a human can clear.
-func (r *Repo) differingFromTheVault(applied string, touched []string) (string, error) {
+func (r *Repo) firstPathTheVaultDoesNotHold(applied string, touched []string) (string, error) {
 	out, err := r.run(invocation{
 		dir:  r.vault,
 		args: []string{"diff-index", "-z", "--name-only", applied},
@@ -149,9 +170,13 @@ func (r *Repo) anchorTheFailedApply(computed, fact string) error {
 		// A repository that cannot be written a ref is not one obsync can latch
 		// a freeze in, and saying it had would be worse than saying nothing:
 		// the latch is a ref precisely so that it survives what memory does
-		// not. So this travels as an ordinary failed run, which is what the
-		// local failure streak counts and what five of in a row is the full
-		// freeze §7 already names (#34, unbuilt).
+		// not. Freezing in memory instead is the obvious alternative and it is
+		// the one thing §7 forbids outright — a latch keyed on process lifetime
+		// is cleared by the restart an unhealthy container invites, which is
+		// the harm gate 9 exists to prevent rather than a weaker form of it.
+		// So this travels as an ordinary failed run, which is what the local
+		// failure streak counts and what five of in a row is the full freeze §7
+		// already names (#34, unbuilt).
 		return fmt.Errorf("write-verify failed and obsync could not anchor %s at %s: %w",
 			computed, FailedApplyAnchor, err)
 	}
