@@ -88,6 +88,10 @@ type vaultEnv struct {
 	// laptop is the other device's clone of the same remote, made on first use
 	// by remoteCommit.
 	laptop string
+
+	// aside is where theVaultGoesEmpty put the vault, so that
+	// theVaultComesBack can put it back.
+	aside string
 }
 
 // newVault builds a vault that is already a git repo with one commit, a bare
@@ -541,6 +545,186 @@ func (e *vaultEnv) stop() {
 	}
 	if err := e.syncLoop.Close(); err != nil {
 		e.t.Errorf("closing the sync loop: %v", err)
+	}
+}
+
+// theVaultGoesEmpty is the vault sentinel's own case (§7): every note and
+// `.obsidian/` itself are gone while `.git` is still there, which is what a
+// dropped or misdirected mount looks like from inside git — every tracked file
+// reported deleted, and a fail-open local half would commit exactly that.
+//
+// The entries are moved aside rather than deleted, because the other half of
+// the case is the mount coming back with the vault still on it.
+func (e *vaultEnv) theVaultGoesEmpty() {
+	e.t.Helper()
+
+	entries, err := os.ReadDir(e.vault)
+	if err != nil {
+		e.t.Fatalf("reading the vault: %v", err)
+	}
+	e.aside = filepath.Join(e.t.TempDir(), "aside")
+	if err := os.MkdirAll(e.aside, 0o755); err != nil {
+		e.t.Fatalf("making somewhere to put the vault: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() == ".git" {
+			continue
+		}
+		if err := os.Rename(filepath.Join(e.vault, entry.Name()), filepath.Join(e.aside, entry.Name())); err != nil {
+			e.t.Fatalf("moving %q out of the vault: %v", entry.Name(), err)
+		}
+	}
+}
+
+// theVaultComesBack puts back what theVaultGoesEmpty moved aside.
+func (e *vaultEnv) theVaultComesBack() {
+	e.t.Helper()
+
+	entries, err := os.ReadDir(e.aside)
+	if err != nil {
+		e.t.Fatalf("reading what was moved out of the vault: %v", err)
+	}
+	for _, entry := range entries {
+		if err := os.Rename(filepath.Join(e.aside, entry.Name()), filepath.Join(e.vault, entry.Name())); err != nil {
+			e.t.Fatalf("moving %q back into the vault: %v", entry.Name(), err)
+		}
+	}
+}
+
+// theRepositoryGoes and theRepositoryComesBack are gate 2 on a vault obsync has
+// already bootstrapped: the `.git` moved aside and put back. Moved rather than
+// deleted, because what the gate has to be true of is a repository that comes
+// back holding the history it had.
+func (e *vaultEnv) theRepositoryGoes() {
+	e.t.Helper()
+
+	e.aside = filepath.Join(e.t.TempDir(), "aside")
+	if err := os.Rename(filepath.Join(e.vault, ".git"), e.aside); err != nil {
+		e.t.Fatalf("moving the repository out of the vault: %v", err)
+	}
+}
+
+func (e *vaultEnv) theRepositoryComesBack() {
+	e.t.Helper()
+
+	if err := os.Rename(e.aside, filepath.Join(e.vault, ".git")); err != nil {
+		e.t.Fatalf("moving the repository back into the vault: %v", err)
+	}
+}
+
+// theHumanLeavesAMergeHalfFinished is gate 4's own case: a human ran `git
+// merge` in their own vault, it conflicted, and they walked away from it. It is
+// their merge, driven by their own git with their own identity, and what it
+// leaves behind is a real MERGE_HEAD and a real unmerged index.
+func (e *vaultEnv) theHumanLeavesAMergeHalfFinished() {
+	e.t.Helper()
+
+	e.mustGit(e.vault, "checkout", "--quiet", "-b", "a-branch-the-human-made")
+	e.writeNote("Daily/contested.md", "what the human wrote on their branch\n")
+	e.mustGit(e.vault, "add", "-A")
+	e.mustGit(e.vault, append(append([]string{}, humanIdentity...), "commit", "--quiet", "-m", "on the human's branch")...)
+	e.mustGit(e.vault, "checkout", "--quiet", "main")
+	e.writeNote("Daily/contested.md", "what the human wrote on main\n")
+	e.mustGit(e.vault, "add", "-A")
+	e.mustGit(e.vault, append(append([]string{}, humanIdentity...), "commit", "--quiet", "-m", "on main")...)
+
+	// The merge is expected to conflict, which is the whole point of it: an
+	// exit status of zero here would mean the vault is not in the state the
+	// gate is about.
+	if _, code := e.git(e.vault, append(append([]string{}, humanIdentity...), "merge", "a-branch-the-human-made")...); code == 0 {
+		e.t.Fatal("the human's merge did not conflict, so nothing was left half-finished")
+	}
+}
+
+// vaultTipYet and vaultHoldsBranchYet look at the vault without stopping
+// obsync, the way remoteHoldsYet looks at the remote.
+func (e *vaultEnv) vaultTipYet() string {
+	e.t.Helper()
+
+	return strings.TrimSpace(e.mustGit(e.vault, "rev-parse", "HEAD"))
+}
+
+func (e *vaultEnv) vaultHoldsBranchYet(branch string) bool {
+	e.t.Helper()
+
+	_, code := e.git(e.vault, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	return code == 0
+}
+
+// aSecondBareRemote is somewhere obsync was never pointed at, for the one gate
+// whose whole subject is a vault landing in the wrong place.
+func (e *vaultEnv) aSecondBareRemote() string {
+	e.t.Helper()
+
+	elsewhere := filepath.Join(e.t.TempDir(), "elsewhere.git")
+	e.mustGit(e.t.TempDir(), "init", "--bare", "--quiet", "-b", "main", elsewhere)
+	e.mustGit(elsewhere, "config", "gc.autoDetach", "false")
+	return elsewhere
+}
+
+// theVaultBecomesUnwritable is gate 1's own case: the vault directory is there
+// and obsync's UID may not create anything in it, which is what a vault chowned
+// to somebody else looks like from inside the container.
+//
+// The mode is put back at the end of the test whatever happens, because a
+// directory a test cannot delete outlives the test.
+func (e *vaultEnv) theVaultBecomesUnwritable() {
+	e.t.Helper()
+
+	if err := os.Chmod(e.vault, 0o555); err != nil {
+		e.t.Fatalf("making the vault unwritable: %v", err)
+	}
+	e.t.Cleanup(func() { _ = os.Chmod(e.vault, 0o755) })
+}
+
+func (e *vaultEnv) theVaultBecomesWritableAgain() {
+	e.t.Helper()
+
+	if err := os.Chmod(e.vault, 0o755); err != nil {
+		e.t.Fatalf("making the vault writable again: %v", err)
+	}
+}
+
+// aSecondObsyncOnTheSameVault is gate 8's own case: a second obsync, configured
+// exactly as the first, pointed at the same vault. It has its own clock and its
+// own log, because what it says and when it acts are the whole of what the test
+// is about.
+func (e *vaultEnv) aSecondObsyncOnTheSameVault() *vaultEnv {
+	e.t.Helper()
+
+	second := &vaultEnv{
+		t:        e.t,
+		vault:    e.vault,
+		remote:   e.remote,
+		repoURL:  e.repoURL,
+		clock:    newFakeClock(),
+		log:      &lockedBuffer{},
+		wakes:    make(chan struct{}),
+		finished: make(chan struct{}),
+		cfg:      e.cfg,
+	}
+	second.logger = slog.New(slog.NewTextHandler(second.log, &slog.HandlerOptions{Level: e.cfg.LogLevel}))
+	second.driveWith(second.wakes)
+	return second
+}
+
+// someoneElseHoldsTheIndexLock is the third writer's own git holding the lock
+// obsync's `git add` needs — a plugin, a human at a terminal, or a backup tool
+// driving git in the vault. It is a real `.git/index.lock`, which is the only
+// thing there is to hold.
+func (e *vaultEnv) someoneElseHoldsTheIndexLock() {
+	e.t.Helper()
+
+	if err := os.WriteFile(filepath.Join(e.vault, ".git", "index.lock"), nil, 0o644); err != nil {
+		e.t.Fatalf("taking the index lock: %v", err)
+	}
+}
+
+func (e *vaultEnv) theIndexLockIsReleased() {
+	e.t.Helper()
+
+	if err := os.Remove(filepath.Join(e.vault, ".git", "index.lock")); err != nil {
+		e.t.Fatalf("releasing the index lock: %v", err)
 	}
 }
 

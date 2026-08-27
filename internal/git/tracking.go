@@ -66,7 +66,17 @@ func (r *Repo) resolveOwnedPaths() error {
 	if err != nil {
 		return fmt.Errorf("obsync could not find where to stage its own writes: %w", err)
 	}
+	// The repository itself, for the markers gate 4 reads and the lock gate 8
+	// takes. --absolute-git-dir rather than --git-dir, because obsync runs
+	// every git in the vault and a relative answer would be one more thing to
+	// join by hand; and it is the *worktree's* own directory, which is where
+	// git keeps a half-finished rebase or merge in a worktree set.
+	gitDir, err := r.run(invocation{dir: r.vault, args: []string{"rev-parse", "--absolute-git-dir"}})
+	if err != nil {
+		return fmt.Errorf("obsync could not find the vault's repository: %w", err)
+	}
 	r.excludeFile, r.staging = exclude, staging
+	r.gitDir = strings.TrimSuffix(string(gitDir), "\n")
 	return nil
 }
 

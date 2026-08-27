@@ -363,7 +363,27 @@ A condition that must hold before obsync is allowed to act on the vault at
 all. Every gate is a conclusive fact rather than a judgement, and gates are
 re-checked at the top of every sync run — so a gate that starts failing stops
 obsync, and a gate the human repairs releases it, with no restart in between.
+The two whose subject is the process rather than the repository — the vault
+being usable, and the lock — are answered once at bootstrap instead, which is
+the same shape one run further out, because a bootstrap that has not succeeded
+is retried on every run.
 _Avoid_: check, guard, precondition, validation
+
+**Interlock**:
+A gate or the vault sentinel: the closed set of conclusive facts that must hold
+before a sync run may act, asked together at the top of every run and cleared
+together. The wider word exists because the sentinel is not a gate — it is a
+fact about the vault rather than about the repository — and behaves exactly
+like one.
+_Avoid_: safety check, precondition set, guard rail
+
+**Tier**:
+What a runtime failure means: aborted run, network freeze, or full freeze. The
+list is closed at three, and every failure obsync produces belongs to exactly
+one — a condition added later gets a cadence and a health input, never a fourth
+category. The tier decides what is reported and what stops, and nothing else
+does.
+_Avoid_: severity, category, error class, level
 
 **Aborted run**:
 A sync run that gives up before changing anything, leaving the next run to try

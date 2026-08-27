@@ -6,13 +6,16 @@
 // its next wake-up until that run is over. No mutex, no queue, and nothing to
 // go wrong under load.
 //
-// What a run does in this build: ask git what changed, take out the paths it
-// refuses to commit and the ones still being written, commit the rest as one
-// commit, fetch, classify, fast-forward what is only behind, merge what has
-// genuinely diverged out of tree so that both sides survive unless a ceiling
-// says a human should look first, and push (#24, #27, #28, #29, #30, #31).
-// What will later stand between those steps — the nine gates (#32) — is a rule
-// added to a loop that already turns.
+// What a run does in this build: check the interlocks, ask git what changed,
+// take out the paths it refuses to commit and the ones still being written,
+// commit the rest as one commit, fetch, classify, fast-forward what is only
+// behind, merge what has genuinely diverged out of tree so that both sides
+// survive unless a ceiling says a human should look first, and push (#24, #27,
+// #28, #29, #30, #31, #32).
+//
+// The interlocks come first and everything after them is a thing obsync does to
+// a vault they said it may (§7). What a failure then *means* is tier.go: three
+// tiers, a closed list, and the one place a run's outcome is reported.
 //
 // When it turns is cadence.go: the quiet window, the max-wait cap, the jittered
 // tick and the network backoff, none of which is a knob (#25).
@@ -59,12 +62,19 @@ type Loop struct {
 	lastPush       time.Time
 
 	// frozen is the full freeze obsync is in, or empty, and networkFrozen the
-	// network freeze. This build has two causes for the first — a remote
-	// holding refs but not the tracked branch, and HEAD moving off the tracked
-	// branch (§3) — and four for the second: an upstream rewrite, and each of
-	// §4's three ways a merge stops rather than being improvised into a commit.
-	// The nine gates that will produce the rest are #32's, and so is a tier
-	// that is a type rather than two fields.
+	// network freeze. The first has twelve causes — the nine gates and the
+	// vault sentinel (§7), a remote holding refs but not the tracked branch,
+	// and HEAD moving off the tracked branch (§3) — and the second four: an
+	// upstream rewrite, and each of §4's three ways a merge stops rather than
+	// being improvised into a commit. The two §7 still names and this build
+	// does not have are write-verify failing (#33) and the local failure
+	// streak reaching five (#34).
+	//
+	// They are two fields rather than one tier because they are two live
+	// states rather than one classification: a vault can be in both at once,
+	// and §7's answer to that is that full wins rather than that the network
+	// one stops being true. What the *tier* decides is what a failure means
+	// and what is said about it, which is tier.go.
 	//
 	// A full freeze stops obsync touching the repo at all, so it gates the
 	// local half as well as the network one; a network freeze leaves the local
@@ -231,28 +241,47 @@ func (l *Loop) syncRun(ctx context.Context) {
 	committing := l.cadence.mayCommit(l.clock.Now())
 	defer func() { l.cadence.ran(l.clock.Now(), committing) }()
 
-	if err := l.bootstrap(ctx); err != nil {
-		// Reported on every run, which means once a tick for as long as the
-		// vault cannot be reached or is one obsync refuses. The hourly repeat
-		// that turns that into one line an hour is §9's, and #37's: unlike the
-		// network half below, which the backoff already quiets, this has no
-		// wait of its own to hide behind.
+	bootstrapped, err := l.bootstrap(ctx)
+	if err != nil {
+		// Gates 1, 2, 6 and 8 are what bootstrap decides, and each is a full
+		// freeze named after the fact behind it: said once on entry, said once
+		// when it clears, and re-established from scratch by every run for as
+		// long as obsync has no repository (§7, §9).
+		var failing *git.InterlockFailure
+		if errors.As(err, &failing) {
+			l.report(l.freeze(failing.Interlock, failing.Fact, failing.Remedy))
+			return
+		}
+		// Everything else bootstrap can fail at is a clone that did not
+		// happen, and it is reported on every run — once a tick for as long as
+		// the remote cannot be reached. The hourly repeat that turns that into
+		// one line an hour is §9's, and #37's: unlike the network half below,
+		// which the backoff already quiets, this has no wait of its own to
+		// hide behind.
 		l.log.Error("obsync cannot sync the vault it was pointed at", "problem", err,
 			"vault_path", l.config.VaultPath)
 		return
 	}
+	// A bootstrap that *ran* and got through is gates 1, 2, 6 and 8 all
+	// holding, so the freeze one of them was holding clears here rather than a
+	// run later — and only those four, because nothing has yet looked at the
+	// interlocks the run below re-checks.
+	//
+	// Only a bootstrap that ran, because two of those four names are also
+	// per-run interlocks: gate 2 is `.git` still being there and gate 6 is the
+	// tracked branch still naming a commit, and Refusing below enters a freeze
+	// under each of those same names. A bootstrap that returned early because
+	// obsync already has a repository has established nothing since the last
+	// run, so clearing on it would announce a freeze cleared and re-enter it
+	// one line later, once a tick, for as long as the cause stands — which is
+	// both the noise §9's "state exit is said once" forbids and a log telling
+	// an operator obsync recovered when it did not. Those two clear where they
+	// are re-checked, in InterlockFreezes below.
+	if bootstrapped {
+		l.interlocksHold(git.BootstrapFreezes)
+	}
 	if err := l.perform(ctx, committing); err != nil {
-		if errors.Is(err, git.ErrShutdownDeadline) {
-			// Not a failure a human is needed for: obsync was told to stop and
-			// the push had not finished. The next start picks the commit up,
-			// because the commit is already in the vault.
-			l.log.Debug("the sync run was cut short by the shutdown deadline", "problem", err)
-			return
-		}
-		// One line, and no tier: the three tiers are #32's, and until they
-		// exist every failure is reported the same way rather than being
-		// silently sorted into a category obsync cannot yet act on.
-		l.log.Error("the sync run failed", "problem", err)
+		l.report(err)
 	}
 }
 
@@ -265,17 +294,21 @@ func (l *Loop) syncRun(ctx context.Context) {
 // refusal in this design has: the cause is repaired — the remote gains a vault
 // to clone, the stray folder is emptied, the human checks their branch out —
 // and obsync recovers on its own, with no restart (§7).
-func (l *Loop) bootstrap(ctx context.Context) error {
+//
+// It reports whether this run is the one that did it, because that is the run
+// on which the interlocks bootstrap answers are established. Every run after it
+// establishes nothing, and a fact nothing looked at is not a fact that cleared.
+func (l *Loop) bootstrap(ctx context.Context) (bool, error) {
 	if l.repo != nil {
-		return nil
+		return false, nil
 	}
 
 	repo, err := git.Bootstrap(ctx, l.config, l.log, l.clock)
 	if err != nil {
-		return err
+		return false, err
 	}
 	l.repo = repo
-	return nil
+	return true, nil
 }
 
 // stillWithheld reports whether the remote still holds refs but not the tracked
@@ -347,29 +380,55 @@ func (l *Loop) stillRewritten(ctx context.Context, now time.Time) (bool, error) 
 // each log exactly one line (§9); the hourly repeat that keeps a broken obsync
 // from going quiet in between is #37's.
 //
-// One full freeze is held at a time and the first fact wins: they stop obsync
-// doing the same nothing, so a second one arriving changes no behaviour, and
-// re-announcing a freeze obsync is already in would make the log say a state
-// changed when it did not. The ordering that matters — full over network — is
-// in the order these are asked (#32).
-func (l *Loop) freeze(name, fact, remedy string) {
-	if l.frozen != "" {
-		return
+// One full freeze is held at a time, and which one is the *current* fact rather
+// than the first one ever seen. They stop obsync doing the same nothing, so a
+// second freeze arriving changes no behaviour — but it changes what an operator
+// is looking at, and that is the whole of what a freeze is for. Holding the
+// first name would leave obsync naming a fact the human has already repaired,
+// silently, for as long as a second one stood: they would do exactly what the
+// log asked and be told nothing, which is the failure §7's self-clearing rule
+// exists to make impossible.
+//
+// So the guard is the name, which is the same guard networkFreeze has always
+// had: a freeze obsync is already in is not re-announced, and a different fact
+// is. The ordering that matters — full over network, and the first *failing*
+// interlock within a run — is in the order these are asked (#32).
+func (l *Loop) freeze(name, fact, remedy string) error {
+	if l.frozen == name {
+		return errFullFrozen
 	}
 	l.frozen = name
 	l.log.Error("obsync is frozen and is touching nothing until this is repaired", "freeze", name,
 		"fact", fact, "remedy", remedy)
+	return errFullFrozen
 }
 
 // networkFreeze stops the network half and leaves the local one committing: the
 // vault is sound, and its relationship to the remote is not (§7).
-func (l *Loop) networkFreeze(name, fact, remedy string) {
+func (l *Loop) networkFreeze(name, fact, remedy string) error {
 	if l.networkFrozen == name {
-		return
+		return errNetworkFrozen
 	}
 	l.networkFrozen = name
 	l.log.Error("obsync has stopped syncing with the remote until this is repaired", "freeze", name,
 		"fact", fact, "remedy", remedy)
+	return errNetworkFrozen
+}
+
+// interlocksHold clears the freeze an interlock was holding, on a run that
+// found every one of them holding.
+//
+// It is asked of the whole set rather than of the one that fired, because the
+// set is re-checked as a set: Refusing answers with nothing only when every
+// interlock holds, so which one put obsync here is not a question that has to
+// survive to the moment it is released. thawed is a no-op on a freeze obsync is
+// not in, so the freezes that are not interlocks — HEAD moving off the tracked
+// branch, and the remote withholding the tracked branch — are left where their
+// own checks clear them.
+func (l *Loop) interlocksHold(names []string) {
+	for _, name := range names {
+		l.thawed(name)
+	}
 }
 
 // thawed clears the named full freeze if it is the one obsync is in, and says
@@ -454,6 +513,27 @@ const (
 // obsync a local autocommitter that catches up; only the network half waits
 // (§2).
 func (l *Loop) perform(ctx context.Context, committing bool) error {
+	// The interlocks go first, and everything below them is a thing obsync
+	// does to a vault they said it may (§7). Gates 2-7 and 9 and the vault
+	// sentinel are re-checked here on every run, which is what makes a frozen
+	// obsync keep ticking and doing nothing else — and what makes repairing
+	// the cause release it within a tick, with no restart.
+	failing, err := l.repo.Refusing()
+	if err != nil {
+		return err
+	}
+	if failing != nil {
+		return l.freeze(failing.Interlock, failing.Fact, failing.Remedy)
+	}
+
+	// The index lock is asked next: it is not a gate — nothing is wrong with
+	// the vault — but a run that cannot stage is one that gives up before it
+	// changes anything, and asking here is what keeps that an aborted run
+	// rather than a `git add` failing with git's everything-code (§7).
+	if err := l.repo.IndexLocked(); err != nil {
+		return err
+	}
+
 	// HEAD is asked before anything is committed, because a commit is what
 	// this would get wrong: the tracked branch is fixed at bootstrap (§3), so
 	// a run that committed here would put the vault's changes on a branch
@@ -463,36 +543,34 @@ func (l *Loop) perform(ctx context.Context, committing bool) error {
 	// again every run is what makes their doing it enough (§7).
 	head, err := l.repo.HeadBranch()
 	if err != nil {
+		// Gate 3, and the last of the interlocks re-checked at the top of a
+		// run: HEAD is not on a branch at all. It is asked here rather than in
+		// Refusing because the branch it answers with is the thing the next
+		// question is about, and one symbolic-ref answers both.
+		var detached *git.InterlockFailure
+		if errors.As(err, &detached) {
+			return l.freeze(detached.Interlock, detached.Fact, detached.Remedy)
+		}
 		return err
 	}
 	if head != l.repo.TrackedBranch() {
-		l.freeze(freezeHeadOffTrackedBranch,
+		return l.freeze(freezeHeadOffTrackedBranch,
 			"the vault's HEAD is on "+head+" and obsync tracks "+l.repo.TrackedBranch(),
 			"check "+l.repo.TrackedBranch()+" back out in the vault; obsync never checks a branch "+
-				"out itself, because that would rewrite files you have open. This clears on its own "+
-				"once fixed; no restart needed")
-		return nil
+				"out itself, because that would rewrite files you have open"+git.SelfClearing)
 	}
 	l.thawed(freezeHeadOffTrackedBranch)
+	l.interlocksHold(git.InterlockFreezes)
 
 	if l.stillWithheld(ctx) {
-		return nil
+		return errFullFrozen
 	}
 
 	if committing {
 		if err := l.localHalf(); err != nil {
-			// An aborted run, and the abort tier reports nothing above debug:
-			// a path moved while obsync was staging it, so the index holds
-			// bytes obsync cannot vouch for and this pass gives up rather than
-			// committing them. The whole run gives up rather than pushing on
-			// with the network half — an aborted run is a pass, not a half —
-			// and the next wake-up starts fresh against a vault that has since
-			// stopped moving (§6, §7).
-			if errors.Is(err, errStageVerify) {
-				l.log.Debug("the sync run was abandoned rather than committing a path that moved "+
-					"while obsync was staging it", "problem", err)
-				return nil
-			}
+			// A local half that failed stops the whole run rather than pushing
+			// on with the network one: an aborted run is a pass, not a half
+			// (§7). Which tier it was is report's, from the closed table.
 			return err
 		}
 	}
@@ -872,64 +950,46 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 		return nil
 	}
 	frozen, err := l.stillRewritten(ctx, now)
-	if err != nil || frozen {
+	if err != nil {
 		return err
+	}
+	if frozen {
+		return errNetworkFrozen
 	}
 
 	reconciled, err := l.repo.Reconcile(ctx)
 	switch {
 	case errors.Is(err, git.ErrUpstreamRewrite):
-		l.networkFreeze(freezeUpstreamRewrite,
+		return l.networkFreeze(freezeUpstreamRewrite,
 			"the remote no longer holds the commit obsync last saw at the tip of "+
 				l.repo.TrackedBranch(),
 			"decide which history you want: take the remote's with one `git reset --hard origin/"+
 				l.repo.TrackedBranch()+"` in the vault, or put the history you meant back on the "+
 				"remote. obsync will do neither itself — merging would resurrect what the rewrite "+
-				"removed and pushing would restore it. This clears on its own once fixed; no "+
-				"restart needed")
-		return nil
+				"removed and pushing would restore it"+git.SelfClearing)
 	case errors.Is(err, git.ErrConflictOutsideTheTable):
 		// §4's fallback, and the reason the table is worth closing: obsync
 		// stops rather than guessing at bytes, and stops the smallest part of
 		// itself that could publish the guess. The fact is git's own — the
 		// conflict kind is a machine field and the paths are git's spelling —
 		// so nothing here reads a word written for a human.
-		l.networkFreeze(freezeConflictOutsideTheTable, err.Error(),
+		return l.networkFreeze(freezeConflictOutsideTheTable, err.Error(),
 			"look at what the two sides did to those paths and settle it yourself, in the vault or "+
 				"on the remote. obsync keeps both sides of every conflict it has a rule for and "+
 				"improvises none of the rest, so this one is yours. Your vault is still being "+
-				"committed locally meanwhile. This clears on its own once fixed; no restart needed")
-		return nil
+				"committed locally meanwhile"+git.SelfClearing)
 	case errors.Is(err, git.ErrConflictStorm):
-		l.networkFreeze(freezeConflictStorm, err.Error(),
+		return l.networkFreeze(freezeConflictStorm, err.Error(),
 			"look at what changed on both sides before it is baked into a commit — a conflict this "+
 				"large is nearly always one act rather than fifty, a folder moved or a bulk edit "+
 				"or a vault restored over itself. Settle it in the vault or on the remote; your "+
-				"vault is still being committed locally meanwhile. This clears on its own once "+
-				"fixed; no restart needed")
-		return nil
+				"vault is still being committed locally meanwhile"+git.SelfClearing)
 	case errors.Is(err, git.ErrMergedTreeOverTheCeiling):
-		l.networkFreeze(freezeMergedTreeOverTheCeiling, err.Error(),
+		return l.networkFreeze(freezeMergedTreeOverTheCeiling, err.Error(),
 			"raise OBSYNC_SIZE_CEILING to what your remote accepts, or make that file smaller in "+
 				"the vault. It is what the two versions of it merge to, so it is bytes neither "+
 				"side holds yet and nothing of yours is waiting on it. Your vault is still being "+
-				"committed locally meanwhile. This clears on its own once fixed; no restart needed")
-		return nil
-	case errors.Is(err, git.ErrUnsettledOnWriteSide):
-		// The other aborted run the incoming change can produce, and the same
-		// tier: a path it overwrites is still being written, so nothing is
-		// applied at all. All-or-nothing, because a partial apply is not a
-		// valid state the way a partial commit is (§6).
-		l.log.Debug("the sync run was abandoned rather than applying over a file still being written",
-			"problem", err)
-		return nil
-	case errors.Is(err, git.ErrVaultWrittenMidRun):
-		// An aborted run, and the abort tier reports nothing above debug: the
-		// vault is being written where the incoming change lands, which is
-		// news about the next few seconds rather than about obsync (§7).
-		l.log.Debug("the sync run was abandoned rather than applying over a file being written",
-			"problem", err)
-		return nil
+				"committed locally meanwhile"+git.SelfClearing)
 	case errors.Is(err, git.ErrNoUpstreamCounterpart):
 		// §3's sharpest rule, and the one place obsync may create a ref on the
 		// remote. The remote does not hold the tracked branch, so it is asked
@@ -945,15 +1005,21 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 			return err
 		}
 		if withheld {
-			l.freeze(freezeNoUpstreamCounterpart,
+			return l.freeze(freezeNoUpstreamCounterpart,
 				"the remote holds refs but not "+l.repo.TrackedBranch(),
 				"create it on the remote yourself with one `git push -u origin "+l.repo.TrackedBranch()+
-					"`, or point obsync at the branch you meant; this clears on its own once fixed, "+
-					"no restart needed")
-			return nil
+					"`, or point obsync at the branch you meant"+git.SelfClearing)
 		}
 		l.networkSucceeded()
 		return l.push(ctx, now)
+	case errors.Is(err, git.ErrUnsettledOnWriteSide), errors.Is(err, git.ErrVaultWrittenMidRun):
+		// The two aborted runs the incoming change can produce: a path it
+		// overwrites is still being written, or the vault is being written
+		// where it lands. Nothing is applied at all — all-or-nothing, because
+		// a partial apply is not a valid state the way a partial commit is
+		// (§6) — and neither is a fact about the remote, so the backoff is
+		// left where it is and the next tick tries again.
+		return err
 	case err != nil:
 		l.backOff(now)
 		return err

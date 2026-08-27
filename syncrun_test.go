@@ -494,6 +494,16 @@ func TestTheNextRunPushesWhatTheLastOneCouldNot(t *testing.T) {
 // the point of it being stat-driven: two samples and a gap, and not one git
 // between them.
 //
+// Twenty-seven since the interlocks (#32), and the six are the price of gates
+// that are facts rather than beliefs. Two are bootstrap's and happen once — the
+// rev-parse that finds the repository itself, and the one that finds where the
+// lock goes. Four are per run, and they are the four gates only git can answer:
+// `--version` for the floor, the tracked branch resolving, the repository's own
+// origin, and the failed-apply anchor. The other five interlocks cost no git at
+// all — gates 2 and 4 and the vault sentinel are stats, gate 3 is the
+// symbolic-ref this run already ran, and gates 1 and 8 are process-lifetime.
+// **The network half gained none**, which is what this test is actually about.
+//
 // The loop waits on the same clock for its own cadence, and those waits are not
 // timeouts: nothing is killed when one expires. So the assertion is both halves
 // — one git was timed out, and every other wait obsync took out was it waiting
