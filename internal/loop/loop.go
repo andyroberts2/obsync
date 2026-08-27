@@ -244,8 +244,8 @@ func (l *Loop) stillFrozen(ctx context.Context) bool {
 		return false
 	}
 
-	standing, err := l.repo.StandingOfTrackedBranch(ctx)
-	if err != nil || standing == git.RemoteHoldsOtherRefs {
+	withheld, err := l.repo.RemoteHoldsRefsButNotTrackedBranch(ctx)
+	if err != nil || withheld {
 		return true
 	}
 
@@ -363,12 +363,12 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 	// succeed. The cost to an operator who genuinely wants a dedicated branch
 	// is one deliberate manual `git push -u`.
 	if !knowsCounterpart {
-		standing, err := l.repo.StandingOfTrackedBranch(ctx)
+		withheld, err := l.repo.RemoteHoldsRefsButNotTrackedBranch(ctx)
 		if err != nil {
 			l.backOff(now)
 			return err
 		}
-		if standing == git.RemoteHoldsOtherRefs {
+		if withheld {
 			l.freeze(freezeNoUpstreamCounterpart,
 				"the remote holds refs but not "+l.repo.TrackedBranch(),
 				"create it on the remote yourself with one `git push -u origin "+l.repo.TrackedBranch()+

@@ -24,8 +24,9 @@ says what changed, and push it to the tracked branch. It also knows how to
 start: point it at an empty directory and it clones, at a vault that is already
 a repo and it attaches on the branch that vault is on, and at anything else and
 it refuses rather than adopting a folder it cannot reason about. That push
-authenticates: obsync is its own git credential helper, so the token file an operator mounts is
-re-read every time git asks for it and rotating it needs no restart. The loop
+authenticates: obsync is its own git credential helper, so the token file an
+operator mounts is re-read every time git asks for it and rotating it needs no
+restart. The loop
 now keeps its own time too: it ticks every 60s so a change nothing reported
 still arrives, waits out an unreachable remote from 60s to 15 minutes while
 carrying on committing locally, and finishes the run in flight before it exits.

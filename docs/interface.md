@@ -378,6 +378,13 @@ pointed at:
 | Empty | Clones the remote into it, on the branch the remote calls default |
 | Anything else | Refuses it, and keeps re-checking without exiting |
 
+An empty directory pointed at a remote with **no branch to clone** — one holding
+no refs at all, or whose `HEAD` names a branch it does not hold — is refused
+too, and obsync keeps re-checking: pushing a vault to the remote, or naming an
+existing branch with `OBSYNC_BRANCH`, releases it with no restart. Cloning an
+empty remote would leave a repository whose `HEAD` names no commit, which is a
+repository obsync refuses on every later run.
+
 The clone is the one time obsync creates a repository, and it is the only time
 `.git/config` comes into existence under obsync rather than under the human: git
 writes it as part of creating the repo, with **one remote, named `origin`, and a

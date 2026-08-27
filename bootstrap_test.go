@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -483,5 +485,144 @@ func TestARemoteWhoseHeadNamesNothingIsNotClonedIntoAnEmptyDirectory(t *testing.
 	if got := env.vaultFile("Notes/from the remote.md"); got != remoteSeedNote {
 		t.Errorf("the vault holds %q once the remote's HEAD named a branch it holds, want the "+
 			"remote's note (§7)", got)
+	}
+}
+
+// Gate 2 refuses a non-empty directory that is not a repo, and tolerates
+// ignore-floor cruft (§7, §5). Which of the two refusals an operator gets is
+// the difference between moving one file and reconsidering their deployment,
+// so the floor's reading has to be git's reading and not obsync's: #28 writes
+// this same closed list into `.git/info/exclude`, where git is what applies it,
+// and a floor with two readings is a floor that means two things.
+//
+// Each row below was measured against real git with the floor in an exclude
+// file, and the assertion is on obsync's own words because the two refusals
+// have no other difference — both leave the directory exactly as it was.
+func TestGateTwoReadsTheIgnoreFloorTheWayGitDoes(t *testing.T) {
+	t.Parallel()
+
+	for _, row := range []struct {
+		name string
+		path string
+		// covered is git's answer, measured: does the floor cover this path?
+		covered bool
+	}{
+		{"a Mac's cruft at the vault root", ".DS_Store", true},
+		{"a Mac's cruft inside a folder", "Attachments/.DS_Store", true},
+		{"Obsidian's workspace file", ".obsidian/workspace.json", true},
+		{"a plugin's settings", ".obsidian/plugins/dataview/data.json", true},
+		{"Obsidian's trash", ".trash/deleted note.md", true},
+		// A trailing slash does not anchor a gitignore pattern, so `.trash/`,
+		// `.vscode/` and `.idea/` name those folders wherever they sit.
+		{"a trash folder further down", "Notes/.trash/deleted note.md", true},
+		{"an editor's folder further down", "Notes/.vscode/settings.json", true},
+		{"obsync's own attention note in a folder", "Notes/obsync-attention.md", true},
+		// The entries that do carry a slash are anchored, and this is that rule
+		// in the direction that makes it a rule: `.obsidian/workspace.json`
+		// names the vault's own .obsidian, never a folder of that name further
+		// down, which is a note someone wrote and obsync must not sweep past.
+		{"a workspace file in a folder of that name further down", "Notes/.obsidian/workspace.json", false},
+		{"a plugin's settings further down", "Notes/.obsidian/plugins/dataview/data.json", false},
+		{"an ordinary note", "Notes/a note.md", false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := newVaultToBootstrap(t, nil)
+			env.seedRemote("main")
+			env.writeNote(row.path, "whatever this is\n")
+
+			env.turn()
+			env.awaitIdle()
+
+			said := env.saidSoFar()
+			if adopting := strings.Contains(said, "will not adopt"); adopting == row.covered {
+				t.Errorf("obsync said %q about a directory holding only %q, want the ignore floor to "+
+					"cover it: %v (§5, gate 2)", said, row.path, row.covered)
+			}
+			if env.vaultHoldsYet(".git") {
+				t.Errorf("obsync made a repo in a directory holding %q, want it refused and left "+
+					"exactly as it was (§7)", row.path)
+			}
+		})
+	}
+}
+
+// A directory holding nothing but an empty folder is one gate 2 tolerates and
+// git will not clone into, so it gets the refusal that names the entry in the
+// way — and that refusal has to state a fact rather than a guess (§9). The
+// floor covers no folder by that name; what is true is that obsync would have
+// adopted what is there and git will not clone into a directory holding
+// anything at all.
+func TestTheCruftRefusalStatesWhyGitWillNotCloneRatherThanGuessing(t *testing.T) {
+	t.Parallel()
+
+	env := newVaultToBootstrap(t, nil)
+	env.seedRemote("main")
+	if err := os.MkdirAll(filepath.Join(env.vault, "Attachments"), 0o755); err != nil {
+		t.Fatalf("creating the empty folder: %v", err)
+	}
+
+	env.turn()
+	env.awaitIdle()
+
+	said := env.saidSoFar()
+	if !strings.Contains(said, "Attachments") {
+		t.Errorf("obsync said %q about a directory holding one empty folder, want the entry in the "+
+			"way named (§9)", said)
+	}
+	if strings.Contains(said, "ignore floor covers it") {
+		t.Errorf("obsync said %q, want it not to claim the ignore floor covers a folder the floor "+
+			"has never heard of: a refusal states the conclusive fact behind it (§9)", said)
+	}
+
+	// The one entry moved, and no restart.
+	if err := os.Remove(filepath.Join(env.vault, "Attachments")); err != nil {
+		t.Fatalf("removing the empty folder: %v", err)
+	}
+	env.advance(70 * time.Second)
+
+	if got := env.vaultFile("Notes/from the remote.md"); got != remoteSeedNote {
+		t.Errorf("the vault holds %q once the folder was gone, want the remote's note (§7)", got)
+	}
+}
+
+// A branch ref obsync cannot read is damage rather than bootstrap debris — it
+// is what an unclean shutdown leaves (§7) — and the two are told apart by what
+// obsync says, not by what it does: both are refused and both touch nothing.
+// What obsync says has to be git's own account, because announcing damage as a
+// half-written clone points an operator at deleting a `.git` that may hold the
+// only copy of their unpushed commits, which is the one repair this design
+// refuses to make.
+//
+// So the refusal carries the failing git and git's words, which is what
+// wrapping is for: git's words may *name* a failure and obsync's may never
+// invent one (§1, §7).
+func TestADamagedRepoIsRefusedInGitsOwnWordsAndTouchedNotAtAll(t *testing.T) {
+	t.Parallel()
+
+	env := newVaultToBootstrap(t, nil)
+	env.makeVaultARepoOn("main")
+	env.pushVaultTo("main")
+
+	broken := filepath.Join(env.vault, ".git", "refs", "heads", "main")
+	if err := os.WriteFile(broken, []byte("not a sha\n"), 0o644); err != nil {
+		t.Fatalf("breaking the branch ref: %v", err)
+	}
+
+	env.turn()
+	env.awaitIdle()
+
+	if said := env.saidSoFar(); !strings.Contains(said, "symbolic-ref") {
+		t.Errorf("obsync said %q about a repo whose branch ref it could not read, want the failing "+
+			"git named so a human gets git's own account rather than obsync's guess (§1, §7)", said)
+	}
+	if held, err := os.ReadFile(broken); err != nil || string(held) != "not a sha\n" {
+		t.Errorf("the vault's branch ref holds %q (%v), want it exactly as obsync found it: obsync "+
+			"refuses a repo it cannot resolve rather than repairing it (§7)", held, err)
+	}
+	if !env.stillTurning() {
+		t.Error("obsync's sync loop returned over a repo it could not resolve a branch in, want it " +
+			"parked alive (§7)")
 	}
 }

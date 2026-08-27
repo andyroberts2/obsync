@@ -98,41 +98,57 @@ func ShowsMoreThanIgnoreFloor(dir string) (bool, string, error) {
 // shapes the floor uses:
 //
 //   - an entry ending in / matches a directory and everything under it;
+//   - an entry containing no / — before that trailing slash or otherwise —
+//     matches that name at any depth;
 //   - an entry containing a / is anchored to the vault root, and * matches
-//     within one path segment;
-//   - an entry containing no / matches that name at any depth.
+//     within one path segment.
 //
 // The floor is a closed list, so this is a reading of eleven known patterns
 // rather than a gitignore implementation: negation, ** and character classes
 // are not in it and are not handled.
+//
+// A trailing slash does not anchor, which is the one rule here that had to be
+// measured rather than read: with the floor in an exclude file, git ignores
+// Notes/.trash/ exactly as it ignores .trash/ (both matrix points). Anchoring
+// it would make gate 2 refuse a directory the floor covers, which is the
+// floor's whole purpose inverted (§5) — and #28 writes this same list into
+// .git/info/exclude, where git is what applies it, so a floor with two readings
+// is a floor that means two things.
 func matchesIgnoreFloor(relative string, isDir bool) bool {
 	relative = filepath.ToSlash(relative)
 	for _, entry := range IgnoreFloor {
-		if directory, ok := strings.CutSuffix(entry, "/"); ok {
-			if isDir && matchesAnchored(directory, relative) {
-				return true
-			}
-			if strings.HasPrefix(relative, directory+"/") {
-				return true
-			}
-			continue
-		}
-		if strings.Contains(entry, "/") {
-			if matchesAnchored(entry, relative) {
+		directory, namesDirectory := strings.CutSuffix(entry, "/")
+		if !namesDirectory {
+			if covers(entry, relative) {
 				return true
 			}
 			continue
 		}
-		if matched, err := path.Match(entry, path.Base(relative)); err == nil && matched {
+		if isDir && covers(directory, relative) {
 			return true
+		}
+		// ...and everything under it. The walk skips a directory that matched,
+		// so nothing reaches here today; the rule is stated in full anyway,
+		// because a partial one that is only true because of how its one caller
+		// walks is the next caller's surprise.
+		for ancestor := path.Dir(relative); ancestor != "."; ancestor = path.Dir(ancestor) {
+			if covers(directory, ancestor) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// matchesAnchored matches a pattern against a path from the vault root, segment
-// by segment, which is what keeps * inside one segment as gitignore has it.
-func matchesAnchored(pattern, relative string) bool {
+// covers matches one gitignore pattern that names no directory against a path
+// from the vault root: anchored and segment by segment when the pattern carries
+// a /, which is what keeps * inside one segment as gitignore has it, and by
+// name at any depth when it does not.
+func covers(pattern, relative string) bool {
+	if !strings.Contains(pattern, "/") {
+		matched, err := path.Match(pattern, path.Base(relative))
+		return err == nil && matched
+	}
 	patternSegments := strings.Split(pattern, "/")
 	pathSegments := strings.Split(relative, "/")
 	if len(patternSegments) != len(pathSegments) {

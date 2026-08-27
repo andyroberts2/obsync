@@ -108,9 +108,10 @@ func (r *Repo) resolveTrackedBranch(ctx context.Context, cfg config.Config) (str
 	if entry, notEmpty, err := firstEntry(r.vault); err != nil {
 		return "", fmt.Errorf("the vault at %q cannot be read: %w", r.vault, err)
 	} else if notEmpty {
-		return "", fmt.Errorf("obsync clones into an empty directory and the vault at %q holds %q, "+
-			"which git will not clone into even though obsync's ignore floor covers it: move or "+
-			"delete it and obsync clones on its next run", r.vault, entry)
+		return "", fmt.Errorf("obsync clones into an empty directory and the vault at %q holds %q; "+
+			"obsync would have adopted what is there, and git will not clone into a destination "+
+			"holding anything at all: move or delete it and obsync clones on its next run",
+			r.vault, entry)
 	}
 	return r.clone(ctx, cfg)
 }
@@ -140,18 +141,36 @@ func (r *Repo) attach(override string) (string, error) {
 		branch = override
 	}
 
-	// The tracked branch has to name a commit, and an unborn one is refused
-	// rather than repaired: a .git left half-written by a killed clone has
-	// config and HEAD but no commit, and obsync cannot tell that from a human
-	// having broken HEAD in a repo that holds history (§7). The safe reading of
-	// the pair is the one that touches nothing.
+	return r.branchNamingACommit(branch)
+}
+
+// branchNamingACommit answers with the branch when it names a commit, and
+// refuses it when it does not.
+//
+// An unborn tracked branch is refused rather than repaired: a .git left
+// half-written by a killed clone has config and HEAD but no commit, and obsync
+// cannot tell that from a human having broken HEAD in a repo that holds history
+// (§7). The safe reading of the pair is the one that touches nothing.
+//
+// Both bootstrap cases end here, and the clone case is not belt-and-braces. A
+// remote emptied between obsync's look at its HEAD and the clone itself clones
+// with exit 0 into a repo with no refs and an unborn HEAD (measured on both
+// matrix points) — in a directory that was empty a moment ago, which obsync
+// would then refuse on every later run with nothing said about why. One local
+// rev-parse makes that a named refusal instead.
+//
+// git's own words travel with the refusal rather than being replaced by
+// obsync's account of them (§7): --quiet leaves nothing on stderr for a ref
+// that is simply absent, and the argv and the exit status are what tell a
+// future reader that this was exit 1 and not git's everything-code.
+func (r *Repo) branchNamingACommit(branch string) (string, error) {
 	if _, err := r.run(invocation{
 		dir:  r.vault,
 		args: []string{"rev-parse", "--verify", "--quiet", "refs/heads/" + branch},
 	}); err != nil {
 		return "", fmt.Errorf("the vault's %q holds no commits, so obsync has no tracked branch to "+
 			"sync: that is what a clone killed halfway leaves behind, and obsync refuses such a repo "+
-			"rather than repairing it", branch)
+			"rather than repairing it: %w", branch, err)
 	}
 	return branch, nil
 }
@@ -181,11 +200,10 @@ func (r *Repo) clone(ctx context.Context, cfg config.Config) (string, error) {
 		// leaves the directory alone and says why, and the operator pushing a
 		// vault to that remote releases it with no restart.
 		//
-		// The question is asked as a status rather than as a listing: git's
-		// --exit-code gives 2 for "nothing matched", which is a conclusive
-		// answer from a remote obsync reached, and 128 for a remote it did not
-		// reach — so nothing here reads a ref name, and an unreachable remote
-		// stays an ordinary network failure rather than becoming a verdict.
+		// Asked as a status rather than as a listing, for the reason
+		// RemoteHoldsRefsButNotTrackedBranch states: nothing here reads a ref
+		// name, and an unreachable remote stays an ordinary network failure
+		// rather than becoming a verdict.
 		if err := r.remoteHasAHead(ctx, cfg.RepoURL); err != nil {
 			return "", err
 		}
@@ -209,8 +227,12 @@ func (r *Repo) clone(ctx context.Context, cfg config.Config) (string, error) {
 
 	// The branch git resolved, read back the way the attach case reads it: one
 	// value, from the repo obsync now has, rather than a second answer parsed
-	// out of what the remote said.
-	return r.headBranch()
+	// out of what the remote said — and held to the same requirement.
+	branch, err := r.headBranch()
+	if err != nil {
+		return "", err
+	}
+	return r.branchNamingACommit(branch)
 }
 
 // remoteHasAHead reports whether the remote has a HEAD to resolve a default
@@ -259,50 +281,34 @@ func firstEntry(dir string) (string, bool, error) {
 	return names[0], true, nil
 }
 
-// FirstPushStanding is what the remote holds when obsync has no upstream
-// counterpart for the tracked branch — the state §3's sharpest rule keys on,
-// and the only question a first push has to ask before it may create a branch.
-type FirstPushStanding int
-
-const (
-	// RemoteHoldsTrackedBranch: there is an upstream counterpart after all, and
-	// obsync simply had no remote-tracking ref for it. Pushing to it creates
-	// nothing.
-	RemoteHoldsTrackedBranch FirstPushStanding = iota
-	// RemoteHoldsNoRefs: a brand-new empty remote, which is the one case where
-	// a push may create the tracked branch (§3).
-	RemoteHoldsNoRefs
-	// RemoteHoldsOtherRefs: refs, but not ours. A full freeze — the branch name
-	// came from local HEAD, so a stray branch or a typo'd override would
-	// otherwise create a remote branch and sync an entire vault into it, and
-	// the push would succeed (§3).
-	RemoteHoldsOtherRefs
-)
-
-// StandingOfTrackedBranch asks the remote which of the three it is.
+// RemoteHoldsRefsButNotTrackedBranch is §3's sharpest rule asked as one
+// question, and the only one a first push has to ask before it may create a
+// branch: obsync creates the tracked branch on a remote with **no refs at
+// all**, and freezes on a remote holding anything else, because the branch name
+// came from local HEAD and a stray branch or a typo'd override would otherwise
+// create a remote branch and sync an entire vault into it — and the push would
+// succeed.
 //
-// Both questions are answered by a status rather than by a listing: git's
+// True is therefore the full freeze and false is "push": a remote that already
+// holds the tracked branch and a remote holding nothing at all are both pushed
+// to, and only one of them gains a ref.
+//
+// It is one question rather than three answers because that is all either
+// caller does with it — the first push, and the freeze re-checking the fact that
+// put it there — and an enum nobody switches on is git's ls-remote reasoning
+// leaking into the loop.
+//
+// Both halves are answered by a status rather than by a listing: git's
 // --exit-code gives 2 for "no refs matched", which is a conclusive answer from
 // a remote obsync reached, and 128 for a remote it did not reach — so nothing
 // here reads a ref name, and an unreachable remote stays an ordinary network
 // failure rather than being mistaken for a verdict.
-func (r *Repo) StandingOfTrackedBranch(ctx context.Context) (FirstPushStanding, error) {
+func (r *Repo) RemoteHoldsRefsButNotTrackedBranch(ctx context.Context) (bool, error) {
 	holds, err := r.remoteMatches(ctx, "--heads", "refs/heads/"+r.branch)
-	if err != nil {
-		return 0, err
+	if err != nil || holds {
+		return false, err
 	}
-	if holds {
-		return RemoteHoldsTrackedBranch, nil
-	}
-
-	anyRefs, err := r.remoteMatches(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if anyRefs {
-		return RemoteHoldsOtherRefs, nil
-	}
-	return RemoteHoldsNoRefs, nil
+	return r.remoteMatches(ctx)
 }
 
 // remoteMatches reports whether the remote holds any ref matching the patterns,

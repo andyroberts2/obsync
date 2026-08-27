@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/andyroberts2/obsync/internal/vault"
 )
 
 // docs/interface.md is the canonical statement of the declared surface (§10),
@@ -460,4 +462,41 @@ func logfmtFields(line string) map[string]string {
 // reads the same way twice.
 func logfmtKeys(line string) []string {
 	return slices.Sorted(maps.Keys(logfmtFields(line)))
+}
+
+// The ignore floor's contents are part of the declared surface: changing them
+// silently changes what a user's repo holds (§5, §10). This commit gave obsync
+// a second copy of that list in code, and two copies of a promise is a promise
+// that drifts — the same argument the git floor's one-file rule makes. So the
+// page and `vault.IgnoreFloor` are pinned to each other, in order, entry for
+// entry.
+func TestTheIgnoreFloorOnThePageIsTheOneObsyncCarries(t *testing.T) {
+	t.Parallel()
+
+	got, want := fencedBlockAfter(t, "### The ignore floor"), vault.IgnoreFloor
+	if !slices.Equal(got, want) {
+		t.Errorf("%s lists the ignore floor as %v, and obsync carries %v: the floor is one closed "+
+			"list on the declared surface, so the page and the code state it once each and never "+
+			"differently (§5, §10)", interfacePage, got, want)
+	}
+}
+
+// fencedBlockAfter is the lines of the first ``` block below a heading, which
+// is how the page states a closed list an operator reads as one.
+func fencedBlockAfter(t *testing.T, heading string) []string {
+	t.Helper()
+
+	_, below, found := strings.Cut(pageSource(t), heading+"\n")
+	if !found {
+		t.Fatalf("%s has no %q heading", interfacePage, heading)
+	}
+	_, below, found = strings.Cut(below, "```\n")
+	if !found {
+		t.Fatalf("%s has no fenced block below %q", interfacePage, heading)
+	}
+	block, _, found := strings.Cut(below, "```")
+	if !found {
+		t.Fatalf("%s has an unclosed fenced block below %q", interfacePage, heading)
+	}
+	return strings.FieldsFunc(block, func(r rune) bool { return r == '\n' })
 }
