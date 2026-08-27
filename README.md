@@ -2,18 +2,23 @@
 
 Two-way git sync for a self-hosted Obsidian vault, as a Docker sidecar.
 
-obsync watches a mounted Obsidian vault. It commits and pushes what you write,
-and it pulls down what other people push, so the vault and a remote git
-repository stay in step.
+This app has been built to address a very specific need: When using ignis in
+order to serve obsidian as a web app, the standard obsidian git plugin cannot
+be used in-browser, so this is not an option to keep changes in sync with a
+remote git repo. This sidecar is a workaround to achieve a similar outcome.
 
-It exists because the two tools either side of this gap each do half the job.
-[`kubernetes/git-sync`](https://github.com/kubernetes/git-sync) pulls but never
-pushes. [`simonthum/git-sync`](https://github.com/simonthum/git-sync) is a
-one-shot script with no daemon, no debounce and no credential handling.
+obsync watches a mounted Obsidian vault (the same folder that ignis is using). 
+It commits and pushes what you write, and it pulls down what other people push, 
+so the vault and a remote git repository stay in step.
 
-## Does obsync fit?
+It takes prior art as inspiration, an dbuilds on these learnings:
+- [`kubernetes/git-sync`](https://github.com/kubernetes/git-sync) pulls but doesn't pushe. 
+- [`simonthum/git-sync`](https://github.com/simonthum/git-sync) does also push,
+but doesn't appear to be maintained, has no daemon, no debounce and no credential handling.
 
-**Yes, if this is your deployment:**
+## Does obsync fi your use case?
+
+**Yes, if:**
 
 - Your vault lives on a server, and you write into it through a browser.
   [ignis](https://github.com/Nystik-gh/ignis) is the reference stack, and obsync
@@ -41,18 +46,10 @@ one-shot script with no daemon, no debounce and no credential handling.
   really there, and it knows what belongs in the repository because it knows
   what Obsidian puts in one.
 
-> **Load-bearing documentation** ([#16](../../issues/16)).
+> **Important** ([#16](../../issues/16)).
 > **obsync cannot detect Obsidian's own Headless Sync, and cannot coordinate
 > with it.** If you run Headless Sync, decide against obsync here rather than
 > debugging it later.
->
-> The plugin is a second sync system writing your vault, and obsync has no way
-> to see it from a sidecar. obsync treats it as an ordinary third writer, which
-> this design tolerates rather than resolves. What you get is conflict copies
-> nobody wrote, runs that abandon themselves, and two systems arbitrating one
-> vault with no rule between them. The failure signature is in
-> [`docs/operations.md`](docs/operations.md#when-something-else-is-writing-the-vault).
-> Never cut this warning.
 
 ## Quickstart
 
@@ -61,13 +58,12 @@ Four steps, and the third one is the whole configuration.
 1. **Make a repository** on your remote, and a credential that can write to it.
    Give obsync the least scope that works. The minimum for GitHub, GitLab, Gitea
    and an SSH deploy key is in [`docs/credentials.md`](docs/credentials.md).
-2. **Copy [`compose.yaml`](compose.yaml)** out of this repository. Copy it
-   rather than read it: the decisions in it are the ones you did not know you
-   had to make.
+2. **Copy [`compose.yaml`](compose.yaml)** out of this repository. If using
+   ignis, then you can add it to your ignis `docker-compose.yml` file.
 3. **Change three things in it.** Point `OBSYNC_REPO` at your repository, put
-   your token in `./secrets/obsync-token`, and change `./vaults/notes` to your
-   own vault folder. `OBSYNC_REPO` is the only variable obsync will not start
-   without, and nothing else in that file is a placeholder.
+   your token in `./secrets/obsync-token` (just the raw token - nothing else), 
+   and change `./vaults/notes` to point to your own vault folder. 
+   `OBSYNC_REPO` is the only variable obsync will not start without.
 4. **Run `docker compose up -d`.**
 
 What obsync does at startup depends on the directory you point it at:
@@ -94,16 +90,6 @@ for hours. When it needs you, it writes
 [`obsync-attention.md`](docs/operations.md#start-here) at the root of your
 vault, and `docker ps` turns unhealthy.
 [`docs/operations.md`](docs/operations.md) is what to do then.
-
-> **Nothing is published yet.** No tag has been pushed, so the
-> `ghcr.io/andyroberts2/obsync:0.3` that the reference compose pins does not
-> resolve. Build the image yourself instead:
->
-> ```bash
-> docker build -t obsync:dev .
-> ```
->
-> Then point the compose file's `image:` line at `obsync:dev`.
 
 ## What obsync does
 
@@ -204,7 +190,7 @@ vault, and `docker ps` turns unhealthy.
 
 ## What obsync will never do
 
-> **Load-bearing documentation** ([#16](../../issues/16)).
+> **See** ([#16](../../issues/16)).
 > **This list exists so that obsync does not.** Each entry is a line the design
 > deliberately declined to cross, and there is no flag for any of them.
 >
@@ -283,16 +269,6 @@ obsync's own source and fails the build if a forbidden argv appears in it.
 There is no documentation site and no wiki. A rendered page describing whichever
 image you happen to be running drifts from that image the moment it is
 published. The README at a tag is already the versioned document.
-
-## Status
-
-**Early implementation.** The design is settled and the sync loop described
-above works, but no tag has been pushed. Nothing is published to a registry
-until one is, so the image the reference compose pins does not resolve yet and
-the version `obsync status` reports is `dev`.
-
-For now, obsync is something to build and try rather than something to leave
-pointed at the only copy of a vault.
 
 ## Reference deployment
 
