@@ -1,35 +1,32 @@
-# obsync's container image — the supported artifact (§1, §12).
+# obsync's container image. This is the artifact the project supports.
 #
-# Two stages: a builder that cross-compiles a static binary, and an alpine base
-# carrying git. Distroless is ruled out because it has no git, and git is not an
-# implementation detail here — every decision in obsync's design is expressed in
-# git plumbing, driven as a subprocess.
+# The build has two stages. A builder stage compiles a static binary. The final
+# stage is an Alpine base that carries git.
 #
-# Both images are pinned by **digest, never by tag**. Alpine repoints a release
-# tag on every patch, git included, so `alpine:3.23` alone does not deliver "the
-# git version moves only when we move it" — which is the premise an immutable
-# image tag and a build attestation both stand on. Dependabot moves these two
-# lines, and a base CVE bump is a patch release.
+# git is not an implementation detail here. obsync drives git as a subprocess
+# for every operation, so a base image without git is not an option.
+#
+# Both images are pinned by digest instead of by tag. Alpine moves a release
+# tag on every patch, and the git version moves with it. A digest is the only
+# pin that holds the git version still. Dependabot moves these two lines, and a
+# new base image is a patch release of obsync.
 
-# The builder always runs on the machine doing the building and emits a binary
-# for the platform being built, so an arm64 image costs no emulation and a clean
-# checkout still reproduces the image without CI copying a binary in.
+# The builder runs on the machine that does the build and emits a binary for
+# the target platform. An arm64 image needs no emulation, and a clean checkout
+# rebuilds the image without CI copying a binary in.
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS builder
 
-# CGO off is what makes the binary static, which is what lets it be the only
-# thing in the final stage besides git.
+# CGO off makes the binary static. A static binary is the only thing the final
+# stage needs beside git.
 #
-# GOTOOLCHAIN=local is what makes the pinned builder actually pinned: without
-# it, a `go` line or a `toolchain` directive above this image's own Go
-# downloads another toolchain mid-build and the digest above stops describing
-# what compiled obsync. go.mod carries no toolchain directive for that reason
-# and the suite fails if one appears; this is the same rule enforced at the one
-# place it would actually be violated.
+# GOTOOLCHAIN=local keeps the pinned builder pinned. Without it, a `toolchain`
+# directive in go.mod can download a different Go version mid-build, and the
+# digest above stops describing what compiled obsync.
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 
 WORKDIR /src
 
-# The two direct dependencies first, so a source edit does not re-download them.
+# Dependencies first, so a source edit does not download them again.
 COPY go.mod go.sum ./
 RUN go mod download
 
@@ -38,82 +35,64 @@ COPY . .
 ARG TARGETOS
 ARG TARGETARCH
 
-# VERSION is stamped at link time and is what `obsync status` reports (§10,
-# §12). It is deliberately not derived at runtime: the version's job is to
-# identify the bytes of the image an operator pinned, so it has to come from the
-# build. It defaults to `dev` because a local `docker build` is not a release.
+# VERSION is stamped at link time, and it is what `obsync status` reports. It
+# identifies the exact bytes of the image you pinned, so it comes from the
+# build rather than from the runtime. The default is `dev`, because a local
+# `docker build` is not a release.
 ARG VERSION=dev
 
-# -trimpath so the binary does not carry this builder's paths, and -s -w because
-# a symbol table is weight in an image whose whole size argument is that it
-# carries one static binary and git.
+# -trimpath keeps the builder's paths out of the binary. -s -w drops the symbol
+# table, which is weight in an image that carries one binary and git.
 RUN GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/obsync .
 
 FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 
-# git is the runtime, and openssh-client is git's transport for the two SSH repo
-# forms §8 accepts — alpine's git package does not carry one. ca-certificates
-# arrives with git, for the https forms.
+# git is the runtime. openssh-client is git's transport for the two SSH repo
+# forms, and Alpine's git package does not carry one. ca-certificates arrives
+# with git, for the https forms.
 #
-# The version is not pinned here and that is deliberate: the base digest above
-# is what pins it, and CI *derives* the matrix's upper point by asking this
-# image what git it installs rather than by reading a number somebody typed. A
-# pinned `git=2.52.0-r0` would be a second number to keep in step, and would
-# break the moment alpine rebuilt the same version at -r1.
+# The git version is not pinned here on purpose. The base digest above pins it,
+# and CI asks this image which git it installs rather than reading a number
+# somebody typed. A second number is a second thing to keep in step.
 RUN apk add --no-cache git openssh-client
 
-# Re-declared, because an ARG's scope ends at the next FROM. Same value, one
-# --build-arg.
+# Declared again, because an ARG's scope ends at the next FROM.
 ARG VERSION=dev
 
 COPY --from=builder /out/obsync /usr/local/bin/obsync
 
-# The image redistributes the Apache-2.0 work obsync transcribes its credential
-# isolation from, so it carries the licence it is redistributed under (§4(a)).
+# The image redistributes Apache-2.0 code, so it carries that licence.
 COPY --from=builder /src/LICENSE /usr/local/share/obsync/LICENSE
 
-# obsync runs as an arbitrary UID with no `/etc/passwd` entry, so HOME cannot
-# come from that file and is named here instead. Nothing obsync writes goes
-# here — its private git config is a per-process temporary directory, and
-# everything else it writes is an owned path inside the vault — so the directory
-# is not writable, and does not need to be.
+# obsync runs as an arbitrary UID with no `/etc/passwd` entry, so HOME is named
+# here. obsync writes nothing into this directory. Its git config is a
+# temporary directory per process, and everything else it writes is inside the
+# vault. The directory does not need to be writable.
 #
-# It is also the documented place for the one thing an operator may have to
-# mount in: an ssh key and a known_hosts, which is how SSH arrives given SSH
-# needs no knobs (§8). That mount is necessary and **not sufficient**, and the
-# reference compose is where the whole instruction lives. Measured in this image
-# (alpine 3.23, OpenSSH 10.2, both a runtime that synthesises a passwd entry for
-# an unknown UID and one that does not): ssh resolves `~` from the UID's passwd
-# entry and never from HOME, and with no entry at all it exits before reading
-# any configuration — `No user exists for uid 1000`, which reaches obsync as an
-# unreachable remote and is therefore quiet for a day. So an SSH remote needs a
-# second ordinary mount, a passwd line for the UID whose home field is this
-# directory. obsync's own loop needs no entry, and seam 2 checks that with none
-# at all it still clones, commits and pushes.
+# This is also where you mount an SSH key and a known_hosts file, if your remote
+# is an SSH one. That mount is necessary but not sufficient: ssh reads the home
+# directory for `~` out of the UID's passwd entry rather than out of HOME, so an
+# SSH remote also needs a passwd line for the UID. With no entry at all, ssh
+# exits with `No user exists for uid 1000` before it reads any configuration.
+# docs/credentials.md carries the whole instruction.
 ENV HOME=/home/obsync
 RUN mkdir -p /home/obsync
 
-# A default that is not root, so an operator who forgets Docker's `user:` line
-# does not get a container holding a write-scoped credential as UID 0. 1000:1000
-# because that is what ignis defaults to (§8); any other UID works, which is
-# what seam 2 checks at 4242.
+# A default that is not root, so a compose file with no `user:` line does not
+# run a container holding a write-scoped credential as UID 0. The pair is
+# 1000:1000 because that is ignis's default. Any other UID works.
 USER 1000:1000
 
-# Part of the declared surface, parameters included (§9, docs/interface.md).
-# There is no HTTP server and no port behind it: the subcommand is the whole
-# mechanism, and a single static binary means no `curl` needs to exist here to
-# call it.
+# Part of the declared surface, parameters included. See docs/interface.md.
+# There is no HTTP server and no port: the subcommand is the whole mechanism,
+# and a single static binary means no `curl` needs to exist here.
 HEALTHCHECK --interval=60s --timeout=5s --start-period=120s --retries=2 \
   CMD ["obsync", "healthcheck"]
 
-# Exec form, and no init process: obsync is PID 1, receives Docker's SIGTERM
-# itself, and waits on every git it spawns, so there is no orphan-capable
-# process in this container by construction (§1, §8). A shell left at PID 1
-# swallows the signal obsync's whole shutdown rule depends on — and measured,
-# busybox's own shell execs a simple command and gets out of the way, so that
-# harm is one spelling away rather than always present. The exec form is written
-# rather than relied upon.
+# Exec form, and no init process. obsync is PID 1, it receives Docker's SIGTERM
+# itself, and it waits on every git it spawns. A shell at PID 1 swallows the
+# signal that obsync's whole shutdown rule depends on.
 ENTRYPOINT ["obsync"]
 
 LABEL org.opencontainers.image.title="obsync" \
