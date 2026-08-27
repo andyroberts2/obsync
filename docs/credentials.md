@@ -79,9 +79,16 @@ So the check is: **write a note in the vault, wait a minute, and look.**
 
 ```bash
 docker compose exec obsync obsync status   # says when a push last landed, or that none ever has
-docker ps                                 # unhealthy within two minutes if the credential cannot write
+docker ps                                  # the health column, once it is past `starting`
 git -C /path/to/vault log origin/<branch> --oneline -1
 ```
+
+**Read `obsync status` first, and do not read anything into `docker ps` on a
+container you have just started.** The image's `HEALTHCHECK` has a 120-second
+start period, then a 60-second interval and two retries — so a brand-new
+container reads `starting` for the first two minutes whatever is wrong, and
+turns `unhealthy` a couple of minutes after that. `obsync status` is answering
+from the same record with no such delay, which is why it is the first line here.
 
 `obsync status` distinguishing *never attempted* from *attempted, never
 succeeded* is the whole point of that middle state: the first is a quiet vault,

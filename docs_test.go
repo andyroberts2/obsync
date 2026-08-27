@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -261,6 +262,12 @@ func TestEveryNeverListEntryNamesItsOwningTicket(t *testing.T) {
 // that goes nowhere is the same defect as a remedy naming a page that does not
 // exist. Links out to GitHub — an issue, or somebody else's repository — are
 // not checked: a suite that needs the network cannot run on a fork's PR.
+//
+// The anchor is checked as well as the file, because most of the links in this
+// set carry one and a missing anchor fails in the quietest possible way: the
+// page still opens, at the top, and the operator sent to *"the recovery recipe"*
+// at 3am gets the whole document to search instead. Nothing renders an error,
+// so nothing but this notices a renamed heading.
 func TestEveryRelativeLinkInTheDocSetResolves(t *testing.T) {
 	t.Parallel()
 
@@ -268,24 +275,73 @@ func TestEveryRelativeLinkInTheDocSetResolves(t *testing.T) {
 		if !strings.HasSuffix(piece.path, ".md") {
 			continue
 		}
-		source, err := os.ReadFile(piece.path)
-		if err != nil {
-			t.Fatalf("reading %s: %v", piece.path, err)
-		}
-		for _, link := range markdownLink.FindAllStringSubmatch(string(source), -1) {
-			target, _, _ := strings.Cut(link[2], "#")
-			switch {
-			case target == "", strings.Contains(link[2], "://"), strings.HasPrefix(link[2], "../../"):
+		for _, link := range markdownLink.FindAllStringSubmatch(readDocument(t, piece.path), -1) {
+			if strings.Contains(link[2], "://") || strings.HasPrefix(link[2], "../../") {
 				continue
 			}
-			if _, err := os.Stat(resolve(piece.path, target)); err != nil {
-				t.Errorf("%s links to %q, and there is nothing there: %v", piece.path, link[2], err)
+			// An empty target is a link into the page it is written on.
+			target, anchor, _ := strings.Cut(link[2], "#")
+			page := piece.path
+			if target != "" {
+				if page = resolve(piece.path, target); !exists(page) {
+					t.Errorf("%s links to %q, and there is nothing there", piece.path, link[2])
+					continue
+				}
+			}
+			if anchor == "" || !strings.HasSuffix(page, ".md") {
+				continue
+			}
+			if !slices.Contains(headingSlugs(t, page), anchor) {
+				t.Errorf("%s links to %q and %s has no heading with that anchor. The page still "+
+					"opens, at the top, so nothing but this notices — and the link is how an "+
+					"operator reaches a named section at the moment they need it (§11)",
+					piece.path, link[2], page)
 			}
 		}
 	}
 }
 
 var markdownLink = regexp.MustCompile(`\[([^\]]*)\]\(([^)]+)\)`)
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// headingSlugs is every anchor a Markdown page offers, spelled the way GitHub
+// spells one: the heading's rendered text, lowercased, with everything that is
+// not a letter, a digit, a space, an underscore or a hyphen dropped, and spaces
+// hyphenated.
+//
+// Fenced blocks are skipped rather than slugged, because this set's recipes are
+// numbered shell comments — `# 1. Stop obsync` at the start of a line is a
+// heading everywhere except inside the fence it is actually in, and a slug
+// invented there could only ever make a broken link look resolvable.
+func headingSlugs(t *testing.T, path string) []string {
+	t.Helper()
+
+	var slugs []string
+	fenced := false
+	for _, line := range strings.Split(readDocument(t, path), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			fenced = !fenced
+			continue
+		}
+		heading := markdownHeading.FindStringSubmatch(line)
+		if fenced || heading == nil {
+			continue
+		}
+		text := strings.ToLower(inlineMarkup.ReplaceAllString(heading[1], ""))
+		slugs = append(slugs, strings.ReplaceAll(notSluggable.ReplaceAllString(text, ""), " ", "-"))
+	}
+	return slugs
+}
+
+var (
+	markdownHeading = regexp.MustCompile(`^#{1,6}\s+(.*?)\s*$`)
+	inlineMarkup    = regexp.MustCompile("[`*]")
+	notSluggable    = regexp.MustCompile(`[^\p{L}\p{N} _-]`)
+)
 
 // resolve is a link's target as a path from the repository root, which is where
 // the test binary runs. Only the one shape the doc set uses is handled — a page
@@ -431,6 +487,7 @@ func TestTheDamagedRepositoryRecipeIsTheOneObsyncDeclinedToAutomate(t *testing.T
 	for _, move := range []struct{ phrase, why string }{
 		{"keep the old .git", "preserve it rather than deleting it: the unpushed commits are in it"},
 		{"clone", "re-clone beside the vault rather than in place, and reattach"},
+		{"ls-files --deleted", "restore what the vault never received, before obsync publishes its deletion"},
 		{"un-freezes on its own", "obsync releases itself once `git status` succeeds — no restart"},
 		{"builds one back from head", "obsync rebuilds .git/index itself, so staged work can be dropped"},
 	} {
@@ -439,6 +496,96 @@ func TestTheDamagedRepositoryRecipeIsTheOneObsyncDeclinedToAutomate(t *testing.T
 				"and never repairs a repository by replacing it, and this recipe is the whole of "+
 				"what replaces that code (§7, §11)", move.phrase, move.why)
 		}
+	}
+}
+
+// The recovery recipe is the only member of the load-bearing class an operator
+// *runs* rather than reads, so it is measured rather than reviewed: the moves
+// above say the recipe is complete, and this says following it is safe.
+//
+// It is driven in the state the recipe is most likely to be followed in, and
+// the one that makes the difference between the two sides real: a repository
+// that went damaged and stayed damaged while another device went on pushing.
+// The vault is the side obsync treats as true, and a repository freshly cloned
+// from the remote reports everything that arrived meanwhile as *deleted* — so a
+// recipe that stops at reattaching hands obsync a mass deletion of exactly the
+// notes it was frozen instead of fetching, and obsync does what it is built to
+// do with it. Measured: without step 4 obsync commits `Delete
+// Daily/from-the-laptop.md` and pushes it on its first run back.
+//
+// The failure is in the expensive direction twice over — it is the recipe
+// obsync prints in its own remedy, and it publishes rather than merely failing
+// to.
+func TestFollowingTheRecoveryRecipeDoesNotPublishTheDeletionOfWhatOnlyTheRemoteHolds(t *testing.T) {
+	t.Parallel()
+
+	const fromTheLaptop = "Daily/from-the-laptop.md"
+
+	env := newVault(t)
+	env.turn()
+	env.awaitIdle()
+
+	// Five failed local halves, the index rebuild, and the run after it: §7's
+	// damage freeze, reached the only way it can be.
+	env.theDiskRotsTheObjectGitNeedsMost()
+	for range 6 {
+		env.advance(70 * time.Second)
+	}
+
+	// The other device publishes while the freeze stands. A frozen obsync
+	// touches the repository not at all, so nothing brings the note down.
+	env.remoteCommit(fromTheLaptop, "written on the other device\n")
+	if env.vaultHoldsYet(fromTheLaptop) {
+		t.Fatalf("the vault holds %s while obsync is frozen, so this test is not standing on the "+
+			"state it is about — a full freeze fetches nothing", fromTheLaptop)
+	}
+
+	followTheRecoveryRecipe(t, env)
+
+	env.restart()
+	env.turn()
+	env.awaitIdle()
+	env.advance(70 * time.Second)
+
+	if !env.remoteHolds(fromTheLaptop) {
+		t.Errorf("following the recovery recipe published the deletion of %s, which the remote "+
+			"held and the vault had never received. The recipe is the whole of what replaces the "+
+			"repair obsync declined to write, and a recipe that ends with obsync destroying "+
+			"another device's notes is worse than no recipe (§7, §11). obsync said:\n%s",
+			fromTheLaptop, env.said())
+	}
+}
+
+// followTheRecoveryRecipe is docs/operations.md's damaged-repository recipe,
+// run as a human would run it against this vault. Step 5 is left out because it
+// only reads the old repository, and step 6 is the caller's restart.
+func followTheRecoveryRecipe(t *testing.T, env *vaultEnv) {
+	t.Helper()
+
+	env.stop() // 1. Stop obsync.
+
+	beside := t.TempDir()
+	damaged := filepath.Join(beside, "vault-git-damaged")
+	if err := os.Rename(filepath.Join(env.vault, ".git"), damaged); err != nil {
+		t.Fatalf("recipe step 2, keeping the old .git: %v", err)
+	}
+
+	// 3. Clone the remote beside the vault and move its .git into place.
+	fresh := filepath.Join(beside, "vault-fresh")
+	env.mustGit(beside, "clone", "--quiet", "--branch", "main", "file://"+env.remote, fresh)
+	if err := os.Rename(filepath.Join(fresh, ".git"), filepath.Join(env.vault, ".git")); err != nil {
+		t.Fatalf("recipe step 3, moving the fresh .git into place: %v", err)
+	}
+	if err := os.RemoveAll(fresh); err != nil {
+		t.Fatalf("recipe step 3, removing the fresh checkout: %v", err)
+	}
+
+	// 4. Restore what the vault never received. NUL-separated, for the same
+	// reason every listing obsync itself reads is: a vault path may hold a
+	// newline.
+	listed := env.mustGit(env.vault, "ls-files", "-z", "--deleted")
+	for _, missing := range strings.FieldsFunc(listed, func(r rune) bool { return r == 0 }) {
+		env.mustGit(env.vault, "restore", "--", missing)
 	}
 }
 

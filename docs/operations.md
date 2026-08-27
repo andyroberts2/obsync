@@ -204,28 +204,51 @@ nothing else; the tick that succeeds releases it.
 > mv /tmp/vault-fresh/.git /path/to/vault/.git
 > rm -rf /tmp/vault-fresh
 >
-> # 4. Look at what the old repository still has, before you throw it away.
-> git --git-dir=/path/to/vault-git-damaged log --oneline <branch>
-> git --git-dir=/path/to/vault-git-damaged format-patch origin/<branch>..<branch>
+> # 4. Restore what the vault never received. The remote may have moved on
+> #    while obsync was frozen, and nothing brought those files down — so
+> #    git now reports them as deleted, and obsync's first run would commit
+> #    that deletion and push it. Read the list before you act on it.
+> git -C /path/to/vault ls-files --deleted
+> git -C /path/to/vault ls-files -z --deleted | xargs -0 -r git -C /path/to/vault restore --
 >
-> # 5. Start obsync. It un-freezes on its own once `git status` succeeds —
+> # 5. Look at what the old repository still has, before you throw it away.
+> #    -o keeps the patches out of the vault; without it they land in the
+> #    working directory, and obsync would commit and push them.
+> git --git-dir=/path/to/vault-git-damaged log --oneline <branch>
+> git --git-dir=/path/to/vault-git-damaged format-patch -o /path/to/vault-git-damaged-patches \
+>     origin/<branch>..<branch>
+>
+> # 6. Start obsync. It un-freezes on its own once `git status` succeeds —
 > #    no restart is needed for the freeze, and this one is a restart only
 > #    because you stopped it in step 1.
 > docker compose start obsync
 > ```
 >
-> Two things about the state you are looking at, both easy to misread:
+> **Step 4 is the one that is easy to skip and expensive to skip.** The vault is
+> the side obsync treats as true, and the repository you have just attached says
+> the remote holds files the vault does not — so without it obsync does exactly
+> what it is built to do and publishes the deletion of every note another device
+> pushed while this one was frozen. Restoring is the safe direction and deleting
+> again is cheap: the one thing step 4 can get wrong is resurrecting a note you
+> deliberately deleted while obsync was down, and you delete it again in
+> Obsidian.
 >
-> - **obsync has already deleted `.git/index`**, and it builds one back from
->   HEAD before it commits anything. A `git status` reporting every file in the
->   vault as deleted is a missing index, not a lost vault.
+> Three things about the state you are looking at, all easy to misread:
+>
+> - **Before step 3, obsync has already deleted `.git/index`**, and it builds one
+>   back from HEAD before it commits anything. A `git status` reporting every
+>   file in the vault as deleted is a missing index, not a lost vault.
+> - **After step 3 that is no longer the reading.** The repository you attached
+>   has an index of its own, so a file reported deleted there is a real
+>   difference between the remote and the vault, and step 4 is what answers it.
 > - **Your notes were never touched.** Everything in the working tree is
 >   yours and is exactly as you left it. What is at risk is only what had been
 >   committed and not yet pushed, which is what step 2 keeps.
 >
 > The repository you reattached is at the remote's tip and the vault holds your
-> files, so obsync's first run after step 5 commits the difference between them
-> and pushes it. That is the ordinary loop, not a repair.
+> files, so obsync's first run after step 6 commits the difference between them
+> and pushes it. That is the ordinary loop, not a repair — which is exactly why
+> the difference has to be one you meant.
 
 ### A push the remote rejected
 
@@ -281,9 +304,16 @@ run them under:
   The write-verify freeze is the one that survives it, deliberately.
 
 If you run obsync under Swarm, decide deliberately what you want an unhealthy
-task to do before you deploy it. A `restart_policy` of `condition: none` is what
-stops a replacement; the health status is then a signal to read rather than an
-instruction something else acts on.
+task to do before you deploy it. A `restart_policy` of `condition: none` stops
+the *replacement*; it does not stop Swarm acting on the health status in the
+first place, so do not plan on the parked process still being there to ask.
+
+Plan on the ref instead. Everything in the list [above](#do-not-restart-it) is
+process state and is genuinely gone, and the attention note is derived from
+process state — so a note holding a rejection's relayed words is rewritten
+without them until obsync has been refused again. The one thing keyed on
+something a restart cannot reach is `refs/obsync/failed-apply`, which is why the
+freeze that matters most is the freeze that is keyed on a ref.
 
 ---
 
