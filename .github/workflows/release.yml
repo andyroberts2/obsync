@@ -1,0 +1,152 @@
+# The tag half of the pipeline (§12, #43): buildx across amd64 and arm64, the
+# four tags pushed to GHCR, a build-provenance attestation and an SBOM, and a
+# GitHub Release whose notes carry the one section generation cannot produce.
+#
+# The PR and main half — vet, lint and the suite across the git matrix, plus
+# seam 2 — is `ci.yml`, and it has already run on the commit this tag points at.
+# This workflow adds exactly one check of its own, and it is the one §12 calls a
+# verification obligation that is surface rather than sequence: **a release
+# whose `docs/interface.md` moved since the previous tag, with an empty surface
+# change section, is refused.**
+name: Release
+
+# A release is cut by a pushed annotated tag and by nothing else. No manual
+# dispatch, and above all no schedule: a scheduled rebuild republishing only the
+# floating tags makes `1` and `1.4.2` two different images with one name, which
+# quietly destroys the premise the immutable tag *and* the attestation both
+# stand on. A base image CVE moves the pin, and the pin moving cuts a patch
+# release like any other change.
+on:
+  push:
+    tags:
+      - "v*"
+
+# The workflow reads the source; the one job that publishes asks for the scopes
+# it needs and nothing above it holds them (§12).
+permissions:
+  contents: read
+
+# A publish is never cancelled. Two runs of the same tag cannot happen — a tag
+# is pushed once — and a run cancelled between the push and the attestation
+# leaves an image in the registry with nothing saying where it came from.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # One job rather than a gate job and a publish job, and that is a decision
+  # rather than a shortcut. Splitting them means handing the notes file between
+  # jobs, which means an upload and a download action — two more third-party
+  # actions inside the one workflow that holds a credential able to publish the
+  # image an operator's vault sidecar runs. The ordering the split would buy is
+  # already here: the gate is the first step after the checkout, and a failed
+  # step ends the job with nothing logged in and nothing pushed.
+  release:
+    name: Publish the image and cut the release
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write # create the GitHub Release
+      packages: write # push the image, and the attestation beside it
+      id-token: write # the attestation's signing identity
+      attestations: write # record it
+
+    env:
+      # One spelling, read off the repository rather than typed. `docs/
+      # interface.md` and the reference compose name the same image, and the
+      # suite checks that they do.
+      IMAGE: ghcr.io/${{ github.repository }}
+
+    steps:
+      # Third-party actions are SHA-pinned: a tag is a mutable pointer.
+      #
+      # The whole history, because the gate diffs this tag against the previous
+      # one and a shallow checkout has neither.
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # The gate, and the first thing that runs. It decides what this tag
+      # releases — the version, the four tags, and the human's half of the notes
+      # — and refuses the release outright if the declared surface moved with
+      # nothing said about it. `release_test.go` drives this same script against
+      # real repositories with real annotated tags, which is what makes it a
+      # check rather than a wish.
+      - name: What this tag releases
+        id: plan
+        run: |
+          set -euo pipefail
+          bash .github/release.sh "$GITHUB_REF_NAME" "$RUNNER_TEMP/release-notes.md" \
+            >> "$GITHUB_OUTPUT"
+
+      # No QEMU is set up, and none is needed: the Dockerfile's builder stage
+      # runs on $BUILDPLATFORM and cross-compiles, so the arm64 image costs no
+      # emulation to build (§12). Nothing here runs one.
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      # All four tags in one build and one push, which is the whole of what
+      # keeps them from becoming four images with one name. The tag set is the
+      # gate's, not this file's — a tag spelled here would be a second place
+      # `latest` is decided.
+      #
+      # `--provenance=mode=max` and `--sbom=true` are buildx's own attestations,
+      # and they ride *with* the image: they are what `docker buildx imagetools
+      # inspect` answers from, for an operator who has the image and not this
+      # repository.
+      - name: Build and push
+        id: push
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          TAG_SET: ${{ steps.plan.outputs.tags }}
+        run: |
+          set -euo pipefail
+          names=()
+          IFS=',' read -ra tags <<<"$TAG_SET"
+          for tag in "${tags[@]}"; do names+=(--tag "$tag"); done
+
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg "VERSION=$VERSION" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file "$RUNNER_TEMP/metadata.json" \
+            "${names[@]}" \
+            --push .
+
+          digest="$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/metadata.json")"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # And the signed one, which answers the other question: not *what is in
+      # this image* but *did this repository's tagged release workflow build
+      # these exact bytes*. `gh attestation verify oci://<image>:<tag> --owner
+      # <owner>` is the whole of what an operator runs, with no cosign and no
+      # third tool (§12). Pushed to the registry as well, so the answer travels
+      # with the image.
+      - name: Attest what was built
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # Generated notes plus the section that cannot be generated. GitHub
+      # pre-pends a supplied body to the notes it builds from commit titles, so
+      # the tag's own words — including the surface change section the gate just
+      # checked — land above them, and the generated half stays generated (§12).
+      - name: Cut the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --generate-notes

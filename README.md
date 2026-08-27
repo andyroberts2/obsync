@@ -96,10 +96,13 @@ for hours; when it needs you it says so in
 vault, and `docker ps` turns unhealthy. What to do when it does is
 [`docs/operations.md`](docs/operations.md).
 
-> **Nothing is published to a registry yet.** `ghcr.io/andyroberts2/obsync:0.3`
-> is what the reference compose pins and what the first release will put there
-> ([#43](../../issues/43)). Until then, build it: `docker build -t obsync:dev .`
-> and point the compose file's `image:` at `obsync:dev`.
+> **No tag has been pushed yet, so nothing is published.**
+> `ghcr.io/andyroberts2/obsync:0.3` is what the reference compose pins, and the
+> release pipeline that puts it there is in place — one pushed annotated tag
+> builds amd64 and arm64, pushes the four tags, and attaches a provenance
+> attestation and an SBOM. Until the first tag, build it yourself:
+> `docker build -t obsync:dev .` and point the compose file's `image:` at
+> `obsync:dev`.
 
 ## What obsync will never do
 
@@ -328,11 +331,21 @@ ignis's write coalescing pinned to zero so obsync never reads a note that is
 still in another process's memory, and a stop grace period long enough for
 obsync to finish the run it is in rather than be killed halfway through it.
 
-Not yet: the release. Nothing is published to a registry, so the image the
-reference compose pins does not resolve and the version `obsync status` reports
-is `dev` — [#43](../../issues/43) is where the tags, the provenance attestation
-and the "Surface changes" check land. Until then obsync is something to build
-and try rather than something to leave pointed at the only copy of a vault.
+And it is released by pushing one annotated tag. That builds both
+architectures, pushes the same image to GHCR under `1.4.2`, `1.4`, `1` and
+`latest`, attaches a build-provenance attestation and an SBOM beside it, and
+cuts a GitHub Release whose notes are the commit titles plus the one section
+generation cannot produce: **Surface changes**, present in every release and
+empty only when nothing you set or pinned has moved. That section is not a
+convention anybody has to remember — a release whose tag moved
+[`docs/interface.md`](docs/interface.md) and said nothing about it is refused
+rather than published. The page does not have to be correct by construction; it
+has to be impossible to change silently.
+
+Not yet: a tag. Nothing is published to a registry until one is pushed, so the
+image the reference compose pins does not resolve yet and the version `obsync
+status` reports is `dev`. Until then obsync is something to build and try rather
+than something to leave pointed at the only copy of a vault.
 
 ## Reference deployment
 

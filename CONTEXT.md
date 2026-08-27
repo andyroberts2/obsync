@@ -525,6 +525,24 @@ _Avoid_: state file, heartbeat file, pid file
 
 ### Release
 
+**Release**:
+One pushed annotated `v*` tag and everything it cuts: the supported artifact
+built for both architectures and pushed to GHCR under the tag set, an
+attestation and an SBOM beside it, and generated notes carrying the tag's own
+surface change section. The tag is the whole of the automation's input — there
+is one contributor, and a release button earns its keep at a different scale.
+Note the word is the *act*, never the artifact, which is why **supported
+artifact** avoids it.
+_Avoid_: deployment, rollout, cut, ship
+
+**Tag set**:
+The four names one released image is pushed under — `1.4.2`, `1.4`, `1` and
+`latest`. One build, one digest, four names, pushed together: anything that
+republishes a floating name on its own makes `1` and `1.4.2` two images sharing
+a name, which is what the immutable tag and the attestation both stand on not
+happening.
+_Avoid_: image tags, version tags, labels
+
 **Declared surface**:
 Everything obsync's version number makes a promise about: the config surface,
 plus the subcommands, the health contract, and what obsync writes into the
