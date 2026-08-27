@@ -26,16 +26,18 @@ re-read every time git asks for it and rotating it needs no restart. The loop
 now keeps its own time too: it ticks every 60s so a change nothing reported
 still arrives, waits out an unreachable remote from 60s to 15 minutes while
 carrying on committing locally, and finishes the run in flight before it exits.
-The rest of the cadence — commit ten seconds after the vault goes quiet, commit
-anyway every five minutes while someone is still typing — is written and tested
-and waiting on the watcher to tell it the vault is being written to; until then
-obsync runs in tick-only mode, which is a mode it has anyway. The **declared
-surface** — everything a version number will make a promise about — is written
-down ahead of the code that implements it.
+And it is woken by the vault itself: obsync holds an inotify watch on every
+directory in it, kept in step as folders come and go, so an edit is committed
+ten seconds after the vault goes quiet rather than at the next tick — and every
+five minutes anyway while someone is still typing. The watch only ever wakes the
+loop and never says what changed, which is why a kernel with no watches left
+costs latency and nothing else: obsync says which sysctl to raise and falls back
+to its tick. The **declared surface** — everything a version number will make a
+promise about — is written down ahead of the code that implements it.
 
-Not yet: the filesystem watcher, the safety interlocks, the settle guard,
-conflicts, the attention note, the status file and the container image. obsync
-is not something to point at a vault yet.
+Not yet: the safety interlocks, the settle guard, conflicts, the attention note,
+the status file and the container image. obsync is not something to point at a
+vault yet.
 
 ## Reference deployment
 
