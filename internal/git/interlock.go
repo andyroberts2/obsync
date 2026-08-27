@@ -44,7 +44,8 @@ type InterlockFailure struct {
 func (g *InterlockFailure) Error() string { return g.Interlock + ": " + g.Fact }
 
 // SelfClearing is the last sentence of every remedy obsync writes, and it is
-// **load-bearing documentation** in the strictest sense (§11, #16): every
+// **load-bearing documentation** in the strictest sense (§11, #16 —
+// https://github.com/andyroberts2/obsync/issues/16): every
 // freeze in this design clears when its cause is repaired, and that is worth
 // nothing if the operator's reflex is to restart the container and destroy the
 // diagnosis. Never cut it for brevity.

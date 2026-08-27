@@ -89,6 +89,12 @@ and never adopts a remote it was not pointed at.
 — **SSH needs no knobs**, and obsync stores and manages neither. `file://` needs
 nothing.
 
+An SSH remote needs those files where ssh looks for them, which is **`$HOME` in
+the image, `/home/obsync`** — and it needs one more ordinary mount, because ssh
+expands `~` out of the UID's `/etc/passwd` entry rather than out of `HOME`, and
+the image deliberately bakes no entry for any UID. The whole instruction, with
+the measurement behind it, is `docs/credentials.md`.
+
 **A file is the only supported form for the secret.** It is re-read every time
 git asks for a credential, which is what makes a rotated token recover with no
 restart. `_FILE` is token-only and not a general suffix convention.
@@ -97,6 +103,22 @@ The token never appears in a URL, in an argv, in a log line, or in
 `git remote -v`. `OBSYNC_USERNAME` is what the remote wants beside it: GitHub
 takes any non-empty username with a PAT, GitLab needs `oauth2`, Gitea the real
 one. Minimum scopes per remote are in `docs/credentials.md`.
+
+### The identity obsync runs as
+
+**obsync runs as whatever UID and GID Docker's own `user:` line names**, and it
+must be the pair that owns the vault — the one ignis writes its files as. There
+is no `PUID`, no `PGID` and no root entrypoint: obsync's git identity comes from
+its own private config rather than from a passwd file, so it needs no
+`/etc/passwd` entry at all, and the image bakes none.
+
+**The image's default is `USER 1000:1000`** — not root, so an operator who
+forgets the `user:` line does not get a container holding a write-scoped
+credential as UID 0. **`HOME` is `/home/obsync`**, and obsync writes nothing
+there; it is where an SSH key and `known_hosts` are mounted, and nothing else.
+
+A wrong UID is not a silent corruption: a vault obsync's UID cannot write in is
+a **full freeze** with a named cause, and obsync parks alive saying so.
 
 ### Sizes
 

@@ -11,6 +11,187 @@ It exists because the tools either side of this gap only do half the job:
 pushes, and [`simonthum/git-sync`](https://github.com/simonthum/git-sync) is a
 one-shot script with no daemon, debounce, or credential handling.
 
+## Does obsync fit?
+
+**Yes, if this is your deployment:**
+
+- Your vault lives on a server and you write into it through a browser —
+  [ignis](https://github.com/Nystik-gh/ignis) is the reference stack, and obsync
+  is not coupled to it.
+- One continuous writer, plus pushes from your other devices now and then.
+- You have a git remote you control, and a credential that can write to one
+  repository on it.
+- You can run a sidecar container that shares the vault volume and the UID that
+  owns it.
+
+**No, if any of these is true:**
+
+- **You run Obsidian's own Sync** — see below.
+- You want three devices each running their own sync daemon against one branch.
+  That needs per-device branches and real merge machinery, and obsync settled on
+  one continuous writer at the outset.
+- You want one container to sync several vaults, several remotes or several
+  branches. Two vaults is two obsync services; each needs its own repository,
+  branch and credential anyway.
+- You want a metrics endpoint to scrape, or git-LFS configured for you. Neither
+  exists, and neither is coming.
+- What you have is a directory rather than an Obsidian vault. obsync is
+  Obsidian-specific by choice: it proves the vault is really there by looking
+  for `.obsidian/`, and it knows what belongs in the repo because it knows what
+  Obsidian puts in one.
+
+> **Load-bearing documentation** (§11, [#16](../../issues/16)).
+> **obsync cannot detect Obsidian's own Headless Sync, and cannot coordinate
+> with it.** If you run it, decide against obsync here rather than debugging it
+> later.
+>
+> The plugin is a second sync system writing your vault, and obsync has no way
+> to see it from a sidecar: its state lives in ignis's unmounted data root, its
+> process sits in ignis's PID namespace, and the one signal it leaves in the
+> vault is deliberately masked while it runs. obsync treats it as an ordinary
+> third writer — which is a thing this design tolerates rather than a thing it
+> resolves. What you would get is conflict copies nobody wrote, runs that
+> abandon themselves, and two systems arbitrating one vault with no rule
+> between them. The failure signature is in
+> [`docs/operations.md`](docs/operations.md#when-something-else-is-writing-the-vault);
+> the decision is here, because it decides whether obsync is for you at all.
+> Never cut this warning.
+
+## Quickstart
+
+Four steps, and the third one is the whole configuration.
+
+1. **Make a repository** on your remote, and a credential that can write to it.
+   The minimum scope for GitHub, GitLab, Gitea and an SSH deploy key is
+   [`docs/credentials.md`](docs/credentials.md) — give obsync the least that
+   works.
+2. **Copy [`compose.yaml`](compose.yaml)** out of this repository. It is
+   normative rather than exemplary: the decisions in it are decisions, and
+   copying it is how you inherit the ones you did not know you had to make.
+3. **Change three things in it** — `OBSYNC_REPO` to your repository, the token
+   into `./secrets/obsync-token`, and `./vaults/notes` to your vault folder.
+   `OBSYNC_REPO` is the only variable obsync will not start without. Nothing
+   else in that file is a placeholder.
+4. **`docker compose up -d`.**
+
+Point obsync at an empty directory and it clones the remote into it. Point it at
+a vault that is already a git repository and it attaches, on the branch that
+vault is already on. Point it at a non-empty directory that is not a repository
+and it refuses, rather than adopting a folder it cannot reason about.
+
+Then check it, once:
+
+```bash
+docker compose exec obsync obsync status   # what it has done, and what it is waiting on
+docker ps                                 # the image carries its own HEALTHCHECK
+```
+
+Write a note in the vault, wait a minute, and look at your remote. Ten seconds
+after you stop typing, obsync commits — and every five minutes anyway if you
+never stop.
+
+After that there is nothing to do. A healthy obsync writes nothing to its log
+for hours; when it needs you it says so in
+[`obsync-attention.md`](docs/operations.md#start-here) at the root of your
+vault, and `docker ps` turns unhealthy. What to do when it does is
+[`docs/operations.md`](docs/operations.md).
+
+> **Nothing is published to a registry yet.** `ghcr.io/andyroberts2/obsync:0.3`
+> is what the reference compose pins and what the first release will put there
+> ([#43](../../issues/43)). Until then, build it: `docker build -t obsync:dev .`
+> and point the compose file's `image:` at `obsync:dev`.
+
+## What obsync will never do
+
+> **Load-bearing documentation** (§11, [#16](../../issues/16)).
+> **This list is the one document load-bearing in the other direction.** Every
+> other line of this kind exists so that you *do* something; this one exists so
+> that obsync doesn't — each entry is a line the design deliberately declined to
+> cross rather than a default it happens to ship, and there is no flag for any of
+> them.
+>
+> It is at the front door because trust is the adoption barrier here: you are
+> handing a personal vault to a daemon that holds a write-scoped credential and
+> runs unattended at 3am. **Every entry names the ticket that decided it**, so
+> softening one is visibly an amendment rather than an edit. Never cut an entry
+> for brevity.
+
+**obsync never:**
+
+- **force-pushes** — not `--force`, not `--force-with-lease`, and there is no
+  flag to turn it on. Every write to the remote is a fast-forward or it does not
+  happen. (§3, [#6](../../issues/6))
+- **rebases** — a rebase walks a live vault through one checkout per replayed
+  commit while Obsidian has your notes open. (§3, [#6](../../issues/6))
+- **runs `git checkout` after bootstrap** — checking a branch out rewrites the
+  working tree under someone who is typing into it. (§3,
+  [#6](../../issues/6))
+- **writes your repo's `.git/config`**, and never runs `git remote set-url`.
+  Your identity and your remote stay yours; obsync only ever reads them. (§8,
+  [#12](../../issues/12))
+- **re-clones or self-repairs a damaged repo** — a re-clone discards exactly the
+  commits obsync exists to have made. A written recovery recipe replaces it.
+  (§7, [#15](../../issues/15))
+- **discards history.** It may delete derived state such as `.git/index`; it
+  never touches a commit, a blob or a file you own. (§7,
+  [#15](../../issues/15)) Following a rewritten remote by **hard-resetting**
+  onto it is the mirror image of force-pushing, and is refused for the same
+  reason. (§3, [#6](../../issues/6))
+- **stashes** — a stash reverts your working tree to HEAD, so your most recent
+  edits would vanish out of your open vault for the duration. (§3,
+  [#6](../../issues/6))
+- **runs `git fsck`**, at startup or at any cadence — damage is found by
+  working, never by scanning. (§7, [#15](../../issues/15))
+- **rewinds a commit the remote refused**, and imposes no cap on how far the
+  local branch runs ahead of the remote. (§7, [#18](../../issues/18))
+- **diagnoses a remote rejection** — it relays the remote's own words verbatim,
+  labelled as the remote's, and never guesses at a cause. (§7,
+  [#18](../../issues/18))
+- **writes your vault's `.gitignore`** — that file is content, and it is yours.
+  It is also what outranks obsync's own ignore floor, so it is how you overrule
+  a default you disagree with; obsync's floor goes in the repo's exclude file,
+  which is never committed. (§5, [#8](../../issues/8))
+- **deletes a file from your vault of its own accord** — the one time obsync
+  stops tracking files — the workspace churn and OS cruft its ignore floor
+  covers, in a vault whose history already carries them — it takes them out of
+  the index and leaves every byte on disk. (§5, [#8](../../issues/8))
+- **configures git-LFS on your behalf** — if you have set it up, obsync inherits
+  it for free by running git; it will never turn it on for you. (§5,
+  [#8](../../issues/8))
+- **overwrites a conflict copy** — that is the one way this design could
+  actually lose bytes. (§4, [#7](../../issues/7))
+- **exits on a sync failure.** It parks alive and keeps saying why, because a
+  crash-looping container buries the one message that matters. (§2,
+  [#5](../../issues/5))
+
+The entries a grep can decide are decided by one: `neverlist_test.go` reads
+obsync's own source and fails the build if a forbidden argv appears in it, which
+is what makes softening one of these a visible amendment rather than an edit.
+
+## Documentation
+
+- [`compose.yaml`](compose.yaml) — the reference stack, ignis plus obsync. It is
+  normative rather than exemplary: it is the one document whose correctness you
+  inherit by copying it rather than by reading it, so it is exercised in CI.
+- [`docs/interface.md`](docs/interface.md) — the declared surface: the nine
+  environment variables, the four subcommands, the health contract, and what
+  obsync writes into your vault. It is what SemVer is measured over, and what
+  every release's "Surface changes" note is about.
+- [`docs/credentials.md`](docs/credentials.md) — the minimum credential scope
+  for GitHub, GitLab, Gitea and an SSH deploy key, how you find out you got it
+  wrong, and what obsync does with the secret. Read once, when you deploy.
+- [`docs/operations.md`](docs/operations.md) — the three tiers, what clears a
+  freeze, why restarting is the wrong reflex, and the recipes for the two
+  things obsync deliberately will not do for you. Read at 3am.
+- [`SECURITY.md`](SECURITY.md) — how to report something privately.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — the transcription rule, and nothing
+  else.
+
+There is no documentation site and no wiki, deliberately: a rendered page
+describing whichever image you happen to be running re-introduces on the prose
+side exactly the failure digest-pinning removes on the image side. The README at
+a tag is already the versioned document.
+
 ## Status
 
 **Early implementation.** The design is settled and written up as one spec,
@@ -104,9 +285,9 @@ promise about — is written down ahead of the code that implements it.
 And you find out about all of that without going looking. obsync answers exactly
 one question about itself — *does this need a human?* — and answers it in the
 three places you already have: `docker ps`, through a healthcheck that reads a
-private record obsync rewrites at the end of every wake-up; `docker exec obsync
-status`, which prints what it has been doing and what it is waiting on, and
-always exits 0; and `docker logs`, which is **empty when nothing is wrong**. A
+private record obsync rewrites at the end of every wake-up;
+`docker compose exec obsync obsync status`, which prints what it has been doing
+and what it is waiting on, and always exits 0; and `docker logs`, which is **empty when nothing is wrong**. A
 freeze, a remote that has rejected a push, a push that has never once succeeded,
 a remote that has been unreachable for a day, and a loop that has stopped
 turning are the whole of what needs you — everything else, including a remote
@@ -147,56 +328,11 @@ ignis's write coalescing pinned to zero so obsync never reads a note that is
 still in another process's memory, and a stop grace period long enough for
 obsync to finish the run it is in rather than be killed halfway through it.
 
-Not yet: the operator documentation. obsync is not something to point at a
-vault yet.
-
-## What obsync will never do
-
-The list is at the front door on purpose: it is what decides whether obsync is
-something to hand a vault to, and every entry is a line the design declined to
-cross rather than a default it happens to ship. **obsync never:**
-
-- **force-pushes** — not `--force`, not `--force-with-lease`, and there is no
-  flag to turn it on. Every write to the remote is a fast-forward or it does not
-  happen.
-- **rebases** — a rebase walks a live vault through one checkout per replayed
-  commit while Obsidian has your notes open.
-- **runs `git checkout` after bootstrap** — checking a branch out rewrites the
-  working tree under someone who is typing into it.
-- **writes your repo's `.git/config`**, and never runs `git remote set-url`.
-  Your identity and your remote stay yours; obsync only ever reads them.
-- **re-clones or self-repairs a damaged repo** — a re-clone discards exactly the
-  commits obsync exists to have made. A written recovery recipe replaces it.
-- **discards history.** It may delete derived state such as `.git/index`; it
-  never touches a commit, a blob or a file you own. Following a rewritten remote
-  by **hard-resetting** onto it is the mirror image of force-pushing, and is
-  refused for the same reason.
-- **stashes** — a stash reverts your working tree to HEAD, so your most recent
-  edits would vanish out of your open vault for the duration.
-- **runs `git fsck`**, at startup or at any cadence — damage is found by
-  working, never by scanning.
-- **rewinds a commit the remote refused**, and imposes no cap on how far the
-  local branch runs ahead of the remote.
-- **diagnoses a remote rejection** — it relays the remote's own words verbatim,
-  labelled as the remote's, and never guesses at a cause.
-- **writes your vault's `.gitignore`** — that file is content, and it is yours.
-  It is also what outranks obsync's own ignore floor, so it is how you overrule
-  a default you disagree with; obsync's floor goes in the repo's exclude file,
-  which is never committed.
-- **deletes a file from your vault of its own accord** — the one time obsync
-  stops tracking files — the workspace churn and OS cruft its ignore floor
-  covers, in a vault whose history already carries them — it takes them out of
-  the index and leaves every byte on disk.
-- **configures git-LFS on your behalf** — if you have set it up, obsync inherits
-  it for free by running git; it will never turn it on for you.
-- **overwrites a conflict copy** — that is the one way this design could
-  actually lose bytes.
-- **exits on a sync failure.** It parks alive and keeps saying why, because a
-  crash-looping container buries the one message that matters.
-
-The entries a grep can decide are decided by one: `neverlist_test.go` reads
-obsync's own source and fails the build if a forbidden argv appears in it, which
-is what makes softening one of these a visible amendment rather than an edit.
+Not yet: the release. Nothing is published to a registry, so the image the
+reference compose pins does not resolve and the version `obsync status` reports
+is `dev` — [#43](../../issues/43) is where the tags, the provenance attestation
+and the "Surface changes" check land. Until then obsync is something to build
+and try rather than something to leave pointed at the only copy of a vault.
 
 ## Reference deployment
 
@@ -235,16 +371,6 @@ places it is 90MB, once for every such file in the merge. obsync does not check
 free space before it writes, and there is no setting for a disk threshold — it
 reads free space only once a local git has already failed, and then only to tell
 you how much is left.
-
-## Documentation
-
-- [`compose.yaml`](compose.yaml) — the reference stack, ignis plus obsync. It is
-  normative rather than exemplary: it is the one document whose correctness you
-  inherit by copying it rather than by reading it, so it is exercised in CI.
-- [`docs/interface.md`](docs/interface.md) — the declared surface: the nine
-  environment variables, the four subcommands, the health contract, and what
-  obsync writes into your vault. It is what SemVer is measured over, and what
-  every release's "Surface changes" note is about.
 
 ## Research
 
