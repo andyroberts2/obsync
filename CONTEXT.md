@@ -97,6 +97,15 @@ never a schedule of its own, and never a gate on the local half. Distinct from
 the **backoff ceiling**, which is a health verdict rather than a wait.
 _Avoid_: retry delay, cooldown, retry schedule
 
+**Hourly repeat**:
+The one cadence a broken obsync runs on: how often it says again that a human
+is needed, and how often it retries a push the remote has already refused. One
+idea and one constant rather than two, because the retry and the report are one
+tick — counted over the existing tick rather than kept by a schedule of its
+own. Distinct from the **network backoff**, which is for a remote that might
+come back; an hour is for one that has already answered.
+_Avoid_: heartbeat, reminder, nag interval
+
 **Shutdown deadline**:
 How long obsync has to exit after a SIGTERM. It refuses to start a new run and
 finishes the one in flight, and the deadline cuts short the one thing in that

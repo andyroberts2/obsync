@@ -103,6 +103,13 @@ type Repo struct {
 	excludeFile string
 	staging     string
 
+	// statusFile is the third: the private record of the loop's own state,
+	// rewritten at the end of every wake-up (§9). It is resolved with the
+	// other two and for the same reason — asking git per write would put a git
+	// in front of every status file — and it is read back by the two
+	// subcommands, in a process of their own, through git.StatusFilePath.
+	statusFile string
+
 	// gitDir is the repository itself — where git keeps HEAD, the index and
 	// the markers gate 4 reads. Resolved once at bootstrap by asking git,
 	// because a .git that is a file points somewhere else entirely, and
@@ -488,6 +495,17 @@ func (r *Repo) killGroup(cmd *exec.Cmd, waited <-chan error) {
 // a name obsync warned about or a value it refused. Everything else survives,
 // because ssh reaches a key through HOME and that is how a key arrives (§8).
 func (r *Repo) env() []string {
+	env := append(pinnedEnvironment(), r.isolation.environment()...)
+	return append(env, r.credentialEnvironment...)
+}
+
+// pinnedEnvironment is what every git obsync runs starts from, and it is a
+// package-level function rather than a method because one git runs outside a
+// Repo: the path lookup a subcommand does to find the status file (§9,
+// StatusFilePath). One spelling of the pins means a git obsync runs in a
+// subcommand cannot quietly mean something different from the same git run in
+// the loop.
+func pinnedEnvironment() []string {
 	inherited := os.Environ()
 	env := make([]string, 0, len(inherited)+14)
 	for _, entry := range inherited {
@@ -496,13 +514,11 @@ func (r *Repo) env() []string {
 		}
 		env = append(env, entry)
 	}
-	env = append(env,
+	return append(env,
 		"LC_ALL=C",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_OPTIONAL_LOCKS=0",
 	)
-	env = append(env, r.isolation.environment()...)
-	return append(env, r.credentialEnvironment...)
 }
 
 // ErrNetworkDeadline is a network git that ran past obsync's 120s deadline and

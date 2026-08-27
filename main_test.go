@@ -170,7 +170,11 @@ func TestUnknownSubcommandIsRefusedAndNamed(t *testing.T) {
 // The environment block is given in full rather than inherited: it is half of
 // what this seam observes (§8), so a stray OBSYNC_* variable in the test
 // runner's own environment must not be able to reach obsync.
-func runObsync(t *testing.T, env []string, args ...string) (stdout, stderr string, exitCode int) {
+//
+// testing.TB rather than *testing.T for the reason vaultEnv is: the seam-1
+// harness reaches the subcommands through here, over the vault it built, which
+// is the only way §9's two readers of the status file are observed at all.
+func runObsync(t testing.TB, env []string, args ...string) (stdout, stderr string, exitCode int) {
 	t.Helper()
 
 	// The deadline is a bound on failure, not a wait for obsync: everything

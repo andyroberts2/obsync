@@ -5,8 +5,9 @@
 // The design is issue #21 — body plus both comments — and section references
 // (§1–§12) throughout this repo are its sections. This build recognises the
 // declared surface's subcommands (§10), reports the build version, resolves the
-// config surface (§8), and turns a sync loop that commits the vault and pushes
-// it (#24), woken by a watch on the vault (#39).
+// config surface (§8), turns a sync loop that commits the vault and pushes it
+// (#24), woken by a watch on the vault (#39), and answers whether any of that
+// needs a human (#37).
 package main
 
 import (
@@ -17,11 +18,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/andyroberts2/obsync/internal/clock"
 	"github.com/andyroberts2/obsync/internal/config"
 	"github.com/andyroberts2/obsync/internal/credential"
+	"github.com/andyroberts2/obsync/internal/git"
 	"github.com/andyroberts2/obsync/internal/loop"
+	"github.com/andyroberts2/obsync/internal/status"
 	"github.com/andyroberts2/obsync/internal/watcher"
 )
 
@@ -52,12 +56,18 @@ func run(args []string, environ []string, stdin io.Reader, stdout, stderr io.Wri
 	switch subcommand {
 	case "status":
 		// §10: human-readable to stdout, exit 0 always, includes the build
-		// version. It gains the rest of its report when the status file exists.
+		// version. It is what a suspicious operator runs through `docker exec`,
+		// and the most direct answer to "has this been working" (§9).
+		//
+		// Exit 0 always, including over a vault obsync cannot find and a
+		// configuration it cannot use: the report says so, and a subcommand
+		// whose job is to answer a question has answered it.
 		//
 		// The write errors are dropped explicitly rather than by omission: a
 		// failed write to stdout has nowhere left to be reported.
-		_, _ = fmt.Fprintf(stdout, "obsync %s\n", version)
-		_, _ = fmt.Fprintln(stdout, "the sync loop keeps no status file in this build")
+		now := time.Now()
+		vaultPath, file, health := look(environ, now)
+		_, _ = fmt.Fprint(stdout, status.Report(version, vaultPath, file, health, now))
 		return 0
 
 	case "":
@@ -74,17 +84,57 @@ func run(args []string, environ []string, stdin io.Reader, stdout, stderr io.Wri
 		return credential.Helper(args[1], environ, stdin, stdout)
 
 	case "healthcheck":
-		// Recognised, so the surface an operator meets is the one §10 declares,
-		// and saying so out loud beats healthcheck's eventual silence while
-		// there is no status file for it to be silent about.
-		_, _ = fmt.Fprintf(stderr, "obsync: %s is not implemented in this build\n", subcommand)
-		return 1
+		// What the image's HEALTHCHECK calls, and the whole of what makes
+		// `docker ps` show whether obsync needs a human (§9). Silent, and exit
+		// 0 or 1: Docker reads the status and nothing reads the output, so a
+		// line here would be noise in a place nobody looks, once a minute.
+		//
+		// There is no HTTP server and no port behind this. A sidecar whose
+		// entire network posture is one outbound git remote should not acquire
+		// a listening socket to answer a question Docker already has a slot
+		// for, and a health port would be the tenth variable in a surface that
+		// fought to stay at nine (§8, §9).
+		if _, _, health := look(environ, time.Now()); health.NeedsHuman {
+			return 1
+		}
+		return 0
 
 	default:
 		_, _ = fmt.Fprintf(stderr, "obsync: unknown subcommand %q\n", subcommand)
 		usage(stderr)
 		return 1
 	}
+}
+
+// look is what both signal subcommands do: find the vault, read obsync's own
+// record of itself, and derive the one verdict from it (§9).
+//
+// It is one function because the two subcommands must never disagree — the
+// report a human reads and the exit status Docker acts on are two renderings of
+// one answer, not two answers.
+//
+// Every way of failing to get to that record is unhealthy rather than an error
+// to report: the question was never "did this read succeed", it was "does this
+// need a human", and a configuration obsync cannot use, a vault that is not
+// mounted, a directory that is not a repository and a container that has not
+// finished a run yet are all a yes. That is the whole reason the file lives
+// under `.git/obsync/` — the failure modes fall out rather than needing to be
+// coded (§9).
+//
+// The config surface is resolved with its own output discarded. healthcheck is
+// silent, and status prints a report rather than the startup line the loop
+// echoes: neither is the process that resolved this configuration for real.
+func look(environ []string, now time.Time) (vaultPath string, file status.File, health status.Health) {
+	cfg, _, err := config.Resolve(environ, io.Discard)
+	if err != nil {
+		return cfg.VaultPath, status.File{}, status.Unavailable(err)
+	}
+	path, err := git.StatusFilePath(cfg.VaultPath)
+	if err != nil {
+		return cfg.VaultPath, status.File{}, status.Unavailable(err)
+	}
+	file, health = status.Of(path, now)
+	return cfg.VaultPath, file, health
 }
 
 func usage(w io.Writer) {

@@ -68,6 +68,12 @@ type vaultEnv struct {
 	wakes    chan struct{}
 	watching bool
 
+	// environ is the block the configuration above was resolved from, kept so
+	// that a subcommand run in a process of its own is handed exactly what the
+	// loop was — which is what `docker exec` and the image's HEALTHCHECK both
+	// get, since both inherit the container's environment.
+	environ []string
+
 	// cfg and logger are what the loop is built from, held for two reasons: so
 	// that the loop can be built after the vault rather than with it — the
 	// production watcher needs the vault to exist before it can watch it — and
@@ -251,10 +257,11 @@ func buildVault(t testing.TB, reach func(*vaultEnv) (repoURL string, extra []str
 	// startup line goes nowhere: the buffer below holds what the sync loop
 	// says, so a test asserting that a quiet run is quiet is not reading
 	// startup's output.
-	cfg, _, err := config.Resolve(append([]string{
+	env.environ = append([]string{
 		"OBSYNC_REPO=" + repoURL,
 		"OBSYNC_VAULT_PATH=" + env.vault,
-	}, extra...), io.Discard)
+	}, extra...)
+	cfg, _, err := config.Resolve(env.environ, io.Discard)
 	if err != nil {
 		t.Fatalf("resolving the test configuration: %v", err)
 	}

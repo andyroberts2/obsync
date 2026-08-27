@@ -622,6 +622,13 @@ type authenticatedRemote struct {
 
 	mu   sync.Mutex
 	seen []string
+	// readOnly is a credential the remote will take for a fetch and not for a
+	// push, which is the wrong-scoped token §8 declined to probe for at
+	// startup and §9 finds at the first real push instead. It is the remote's
+	// opinion rather than a property of the token, which is what makes it
+	// changeable while obsync runs: an operator widening a scope changes
+	// nothing on this side.
+	readOnly bool
 }
 
 func (r *authenticatedRemote) record(username, credential string) {
@@ -632,6 +639,29 @@ func (r *authenticatedRemote) record(username, credential string) {
 
 // handed is every `username:credential` pair the remote was offered, which is
 // the only place a test can see what obsync's helper actually answered.
+// takesNoWrites is the operator's token scoped to read and not write. What
+// obsync meets is what GitHub answers a push made with one: the fetch is
+// served, and the push is refused before receive-pack ever runs.
+func (r *authenticatedRemote) takesNoWrites() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.readOnly = true
+}
+
+// takesWritesAgain is the operator fixing the scope, which is the repair
+// obsync's own report asks for and the only one there is.
+func (r *authenticatedRemote) takesWritesAgain() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.readOnly = false
+}
+
+func (r *authenticatedRemote) refusesWrites() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.readOnly
+}
+
 func (r *authenticatedRemote) handed() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -673,6 +703,14 @@ func serveRemote(t *testing.T, projectRoot, remotePath, accepted string) *authen
 		if !ok || credential != accepted {
 			w.Header().Set("WWW-Authenticate", `Basic realm="obsync"`)
 			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		// git names the service it wants in the path of the POST and in the
+		// query of the GET that precedes it, so one match covers both halves
+		// of a push and neither half of a fetch. 403 rather than 401: the
+		// credential is not in question, what it is allowed to do is.
+		if remote.refusesWrites() && strings.Contains(r.URL.Path+r.URL.RawQuery, "git-receive-pack") {
+			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		backend.ServeHTTP(w, r)
