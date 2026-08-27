@@ -115,8 +115,24 @@ as designed. Whatever does need you is repeated once an hour and never once a
 tick, so `docker logs --since 1h` is empty exactly when nothing is wrong and
 never empty when something is.
 
-Not yet: the attention note and the container image. obsync is not something to
-point at a vault yet.
+And it ships as one thing. The container image is a digest-pinned Alpine base
+carrying git and one static binary, and it runs as whatever UID and GID Docker's
+own `user:` line names — no root entrypoint, no `PUID`/`PGID` knob, no init
+process, and no `/etc/passwd` entry to need, because obsync's identity comes
+from its own private git config. Docker's `HEALTHCHECK` is baked into it, so
+`docker ps` answers the one question obsync answers about itself with nothing
+added to your compose file. And the compose file is here:
+[`compose.yaml`](compose.yaml) is the reference stack — ignis and obsync beside
+each other — and it is normative rather than exemplary, which is why CI runs it
+instead of reviewing it. Copy it, point `OBSYNC_REPO` at your own repository and
+put your token in a file, and the decisions you did not know you had to make
+have been made for you: the UID the two containers share, the vault mount,
+ignis's write coalescing pinned to zero so obsync never reads a note that is
+still in another process's memory, and a stop grace period long enough for
+obsync to finish the run it is in rather than be killed halfway through it.
+
+Not yet: the attention note, and the operator documentation. obsync is not
+something to point at a vault yet.
 
 ## What obsync will never do
 
@@ -206,6 +222,9 @@ you how much is left.
 
 ## Documentation
 
+- [`compose.yaml`](compose.yaml) — the reference stack, ignis plus obsync. It is
+  normative rather than exemplary: it is the one document whose correctness you
+  inherit by copying it rather than by reading it, so it is exercised in CI.
 - [`docs/interface.md`](docs/interface.md) — the declared surface: the nine
   environment variables, the four subcommands, the health contract, and what
   obsync writes into your vault. It is what SemVer is measured over, and what
