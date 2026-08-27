@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -93,7 +91,7 @@ func TestAConflictStormFreezesTheNetworkHalfRatherThanBakingItIntoACommit(t *tes
 	t.Parallel()
 
 	env := newVault(t)
-	notes := conflictedNotes(conflictStormCeiling + 1)
+	notes := aFolderOf(conflictStormCeiling + 1)
 	env.vaultAlreadyTracks(notes...)
 	env.bothSidesEdit(notes)
 	theirs := env.remoteTip()
@@ -134,7 +132,7 @@ func TestAMergeAtTheStormCeilingIsKeptBothSidesLikeAnyOther(t *testing.T) {
 	t.Parallel()
 
 	env := newVault(t)
-	notes := conflictedNotes(conflictStormCeiling)
+	notes := aFolderOf(conflictStormCeiling)
 	env.vaultAlreadyTracks(notes...)
 	env.bothSidesEdit(notes)
 
@@ -149,9 +147,10 @@ func TestAMergeAtTheStormCeilingIsKeptBothSidesLikeAnyOther(t *testing.T) {
 	}
 }
 
-// conflictedNotes is the paths both sides are about to disagree about, named so
-// that a storm reads as one act in the vault rather than as a list.
-func conflictedNotes(count int) []string {
+// aFolderOf is a folder of notes named so that a bulk act on all of them reads
+// as one act in the vault rather than as a list — which is what the storm
+// ceiling is a judgement about, and what its two directions are both built on.
+func aFolderOf(count int) []string {
 	notes := make([]string, count)
 	for i := range notes {
 		notes[i] = fmt.Sprintf("Projects/note %02d.md", i)
@@ -168,17 +167,59 @@ func (e *vaultEnv) bothSidesEdit(notes []string) {
 
 	e.onTheLaptop(func(laptop string) {
 		for _, note := range notes {
-			full := filepath.Join(laptop, note)
-			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-				e.t.Fatalf("creating the folder for %q on the laptop: %v", note, err)
-			}
-			if err := os.WriteFile(full, []byte("written on the laptop\n"), 0o644); err != nil {
-				e.t.Fatalf("writing %q on the laptop: %v", note, err)
-			}
+			e.writeNoteOnTheLaptop(laptop, note, "written on the laptop\n")
 		}
 	})
 	for _, note := range notes {
 		e.writeNote(note, "written in the vault\n")
+	}
+}
+
+// The storm ceiling counts the paths git recorded stages for, and that is not
+// the same as the paths git wrote a message about. `merge-tree` says
+// `Auto-merging` for every path it merged *cleanly* — measured at both matrix
+// points, fifty-five of them beside a single conflicted path — so a ceiling
+// asked of messages would call an ordinary bulk edit a storm and stop a vault
+// with nothing wrong with it.
+//
+// Fifty-five notes edited at opposite ends on the two sides, and one note
+// rewritten on both. That is one conflict, one copy, and an ordinary merge.
+func TestManyCleanlyMergedNotesBesideOneConflictIsNotAStorm(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	clean := aFolderOf(conflictStormCeiling + 5)
+	const rewritten = "Notes/one both sides rewrote.md"
+	for _, note := range clean {
+		env.writeNote(note, planOf(30, "", ""))
+	}
+	env.vaultAlreadyTracks(append(append([]string{}, clean...), rewritten)...)
+
+	env.onTheLaptop(func(laptop string) {
+		for _, note := range clean {
+			env.writeNoteOnTheLaptop(laptop, note, planOf(30, "", "the laptop's own last line"))
+		}
+		env.writeNoteOnTheLaptop(laptop, rewritten, "written on the laptop\n")
+	})
+	for _, note := range clean {
+		env.writeNote(note, planOf(30, "the vault's own first line", ""))
+	}
+	env.writeNote(rewritten, "written in the vault\n")
+
+	env.wake()
+
+	if got, want := len(env.conflictCopies()), 1; got != want {
+		t.Errorf("obsync wrote %d conflict copies, want %d: only one note was conflicted, and the "+
+			"%d others merged cleanly at opposite ends (§4)", got, want, len(clean))
+	}
+	want := planOf(30, "the vault's own first line", "the laptop's own last line")
+	if got := env.remoteFile(clean[0]); got != want {
+		t.Errorf("the remote holds %q at a cleanly-merged note, want %q — both sides' edits, merged "+
+			"and pushed rather than stopped as a storm (§4)", got, want)
+	}
+	if got := env.said(); strings.Contains(got, "conflict storm") {
+		t.Errorf("obsync said %q, want no storm: the ceiling is a count of conflicted paths, and a "+
+			"path git merged cleanly is not one of them (§4)", got)
 	}
 }
 
@@ -199,10 +240,7 @@ func TestACleanAutoMergeBlobOverTheSizeCeilingFreezesTheNetworkHalf(t *testing.T
 	env.writeNote("Notes/the plan.md", planOf(30, "", ""))
 	env.vaultAlreadyTracks("Notes/the plan.md")
 	env.onTheLaptop(func(laptop string) {
-		if err := os.WriteFile(filepath.Join(laptop, "Notes/the plan.md"),
-			[]byte(planOf(30, "", strings.Repeat("t", 299))), 0o644); err != nil {
-			env.t.Fatalf("writing the plan on the laptop: %v", err)
-		}
+		env.writeNoteOnTheLaptop(laptop, "Notes/the plan.md", planOf(30, "", strings.Repeat("t", 299)))
 	})
 	theirs := env.remoteTip()
 	inTheVault := planOf(30, strings.Repeat("v", 299), "")
@@ -255,6 +293,87 @@ func planOf(lines int, head, tail string) string {
 	return plan.String()
 }
 
+// And the other way round for the second ceiling, which is what keeps it from
+// being a cliff either: a merge whose invented blob is *exactly* the ceiling is
+// an ordinary merge and is pushed. The ceiling is the largest blob a merge may
+// invent, so the comparison is `>` and not `>=` — the same spelling the refusal
+// layer applies to the same number at the `git add`, and two spellings of one
+// number is one number a human has to reconcile.
+//
+// The arithmetic is stated rather than guessed, the way planOf's is: 28 middle
+// lines is 560 bytes, and a 231-byte line at each end takes each side to 812
+// and the merge to exactly 1,024.
+func TestAMergeInventingABlobExactlyAtTheSizeCeilingIsMergedLikeAnyOther(t *testing.T) {
+	t.Parallel()
+
+	env := newVaultWith(t, "OBSYNC_SIZE_CEILING=1KB")
+	env.writeNote("Notes/the plan.md", planOf(30, "", ""))
+	env.vaultAlreadyTracks("Notes/the plan.md")
+	env.onTheLaptop(func(laptop string) {
+		env.writeNoteOnTheLaptop(laptop, "Notes/the plan.md", planOf(30, "", strings.Repeat("t", 231)))
+	})
+	env.writeNote("Notes/the plan.md", planOf(30, strings.Repeat("v", 231), ""))
+
+	env.wake()
+
+	want := planOf(30, strings.Repeat("v", 231), strings.Repeat("t", 231))
+	if len(want) != 1024 {
+		t.Fatalf("the two sides merge to %d bytes, and this test says something about the ceiling "+
+			"only while that is exactly the 1024 the ceiling is set to", len(want))
+	}
+	if got := env.remoteFile("Notes/the plan.md"); got != want {
+		t.Errorf("the remote holds %d bytes at the plan, want the %d the two sides merge to: a blob "+
+			"exactly at the ceiling is not over it, and is merged and pushed like any other (§4, §5)",
+			len(got), len(want))
+	}
+	if got := env.said(); strings.Contains(got, "level=ERROR") {
+		t.Errorf("obsync said %q, want nothing at ERROR: nothing here is over the ceiling", got)
+	}
+}
+
+// The invented blob is found by intersecting two `diff-tree -r -z` runs and
+// matching their answers up **by path**, so a note title a vault may legally
+// hold has to survive that intersection intact. A newline is the one that a
+// line-split or a `\t`-split loses, and it is a title someone gets by pasting a
+// heading into Obsidian's rename box.
+//
+// It matters in the direction that fails open: a path obsync cannot match
+// against the other diff never reaches the intersection at all, and the merge
+// that invents an over-ceiling blob there is pushed rather than stopped.
+func TestACleanAutoMergeBlobOverTheCeilingIsCaughtAtAPathHoldingANewline(t *testing.T) {
+	t.Parallel()
+
+	note := "Notes/Zettel/a [draft] plan\nfür “quoted” note.md"
+	env := newVaultWith(t, "OBSYNC_SIZE_CEILING=1KB")
+	env.writeNote(note, planOf(30, "", ""))
+	env.vaultAlreadyTracks(note)
+	env.onTheLaptop(func(laptop string) {
+		env.writeNoteOnTheLaptop(laptop, note, planOf(30, "", strings.Repeat("t", 299)))
+	})
+	theirs := env.remoteTip()
+	inTheVault := planOf(30, strings.Repeat("v", 299), "")
+	env.writeNote(note, inTheVault)
+
+	env.wake()
+
+	if got := env.remoteTip(); got != theirs {
+		t.Errorf("the remote's branch moved to %s, want it still at %s — the blob this merge invents "+
+			"is over the ceiling, and a note title holding a newline does not hide it from the "+
+			"intersection (§4)", got, theirs)
+	}
+	if got := env.vaultFileYet(note); got != inTheVault {
+		t.Errorf("the vault's note is %d bytes, want the %d the human left: a merge over the size "+
+			"ceiling applies nothing at all (§4)", len(got), len(inTheVault))
+	}
+	// Named, rather than merely stopped: a merge obsync could not *read* also
+	// leaves the remote where it was, and that is a failed run rather than this
+	// freeze. The assertion is the difference between the two (§7, §9).
+	if got := env.said(); !strings.Contains(got, `freeze="merged tree over the size ceiling"`) {
+		t.Errorf("obsync said %q, want the freeze named: the merged tree was read and the blob it "+
+			"invents measured, at a path holding a newline (§4, §9)", got)
+	}
+}
+
 // A conflict copy is exempt from the ceiling at any size, and that is a
 // positive decision rather than an omission (§4). The copy's bytes are the
 // losing version of a path, which the remote already holds — so pack
@@ -268,10 +387,7 @@ func TestAConflictCopyIsExemptFromTheSizeCeilingAtAnySize(t *testing.T) {
 	env.vaultAlreadyTracks("Attachments/scan.png")
 	onTheLaptop := strings.Repeat("t", 2048) + "\n"
 	env.onTheLaptop(func(laptop string) {
-		if err := os.WriteFile(filepath.Join(laptop, "Attachments/scan.png"),
-			[]byte(onTheLaptop), 0o644); err != nil {
-			env.t.Fatalf("writing the attachment on the laptop: %v", err)
-		}
+		env.writeNoteOnTheLaptop(laptop, "Attachments/scan.png", onTheLaptop)
 	})
 	env.writeNote("Attachments/scan.png", "the vault's picture\n")
 
@@ -300,14 +416,11 @@ func TestAMergeTrippingBothCeilingsIsReportedAsAStorm(t *testing.T) {
 	t.Parallel()
 
 	env := newVaultWith(t, "OBSYNC_SIZE_CEILING=1KB")
-	notes := conflictedNotes(conflictStormCeiling + 1)
+	notes := aFolderOf(conflictStormCeiling + 1)
 	env.writeNote("Notes/the plan.md", planOf(30, "", ""))
 	env.vaultAlreadyTracks(append(notes, "Notes/the plan.md")...)
 	env.onTheLaptop(func(laptop string) {
-		if err := os.WriteFile(filepath.Join(laptop, "Notes/the plan.md"),
-			[]byte(planOf(30, "", strings.Repeat("t", 299))), 0o644); err != nil {
-			env.t.Fatalf("writing the plan on the laptop: %v", err)
-		}
+		env.writeNoteOnTheLaptop(laptop, "Notes/the plan.md", planOf(30, "", strings.Repeat("t", 299)))
 	})
 	env.bothSidesEdit(notes)
 	env.writeNote("Notes/the plan.md", planOf(30, strings.Repeat("v", 299), ""))
@@ -339,10 +452,7 @@ func TestTheMergeCeilingFreezeClearsWhenTheMergeStopsTrippingIt(t *testing.T) {
 	env.writeNote("Notes/the plan.md", planOf(30, "", ""))
 	env.vaultAlreadyTracks("Notes/the plan.md")
 	env.onTheLaptop(func(laptop string) {
-		if err := os.WriteFile(filepath.Join(laptop, "Notes/the plan.md"),
-			[]byte(planOf(30, "", strings.Repeat("t", 299))), 0o644); err != nil {
-			env.t.Fatalf("writing the plan on the laptop: %v", err)
-		}
+		env.writeNoteOnTheLaptop(laptop, "Notes/the plan.md", planOf(30, "", strings.Repeat("t", 299)))
 	})
 	env.writeNote("Notes/the plan.md", planOf(30, strings.Repeat("v", 299), ""))
 

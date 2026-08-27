@@ -1112,15 +1112,22 @@ func (e *vaultEnv) commitsOnBranchYet(dir, branch string) string {
 func (e *vaultEnv) remoteCommit(path, content string) {
 	e.t.Helper()
 
-	e.onTheLaptop(func(laptop string) {
-		full := filepath.Join(laptop, path)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			e.t.Fatalf("creating the folder for %q on the laptop: %v", path, err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-			e.t.Fatalf("writing %q on the laptop: %v", path, err)
-		}
-	})
+	e.onTheLaptop(func(laptop string) { e.writeNoteOnTheLaptop(laptop, path, content) })
+}
+
+// writeNoteOnTheLaptop is the other device writing one note, inside an
+// onTheLaptop block that is writing several. remoteCommit is the one-note case
+// and is this plus the commit and the push.
+func (e *vaultEnv) writeNoteOnTheLaptop(laptop, path, content string) {
+	e.t.Helper()
+
+	full := filepath.Join(laptop, path)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		e.t.Fatalf("creating the folder for %q on the laptop: %v", path, err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		e.t.Fatalf("writing %q on the laptop: %v", path, err)
+	}
 }
 
 // onTheLaptop is the other device doing whatever the test needs to its own

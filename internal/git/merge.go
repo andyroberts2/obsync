@@ -517,7 +517,7 @@ func (r *Repo) refuseAnInventedBlobOverTheCeiling(tree, tip string, copies []Con
 // The vault's side is asked first and answered alone when it is empty: a merge
 // that changed nothing against the vault invented nothing either, and the
 // second diff-tree is a command not run.
-func (r *Repo) cleanAutoMergeBlobs(tree, tip string, copies []ConflictCopy) ([]newBlob, error) {
+func (r *Repo) cleanAutoMergeBlobs(tree, tip string, copies []ConflictCopy) ([]treeBlob, error) {
 	ours, err := r.blobsDifferingFrom("HEAD", tree)
 	if err != nil || len(ours) == 0 {
 		return nil, err
@@ -535,7 +535,7 @@ func (r *Repo) cleanAutoMergeBlobs(tree, tip string, copies []ConflictCopy) ([]n
 		exempt[written.Path] = true
 	}
 
-	var invented []newBlob
+	var invented []treeBlob
 	for _, blob := range ours {
 		if alsoTheirs[blob.path] && !exempt[blob.path] {
 			invented = append(invented, blob)
@@ -544,8 +544,12 @@ func (r *Repo) cleanAutoMergeBlobs(tree, tip string, copies []ConflictCopy) ([]n
 	return invented, nil
 }
 
-// newBlob is one path in the merged tree and the object it holds there.
-type newBlob struct {
+// treeBlob is one path a diff named and the object the merged tree holds there.
+//
+// It is deliberately not called a **clean auto-merge blob**: a diff against one
+// parent names every path that parent disagrees with the tree about, and only
+// the intersection of the two diffs is the glossary's term.
+type treeBlob struct {
 	path string
 	oid  string
 }
@@ -558,7 +562,7 @@ type newBlob struct {
 // not read diff.renames — measured at both matrix points, including against a
 // vault config that sets it — and a rename record would carry two paths in one
 // pair, which is a shape this reads as the next entry rather than as one.
-func (r *Repo) blobsDifferingFrom(parent, tree string) ([]newBlob, error) {
+func (r *Repo) blobsDifferingFrom(parent, tree string) ([]treeBlob, error) {
 	out, err := r.run(invocation{
 		dir:  r.vault,
 		args: []string{"diff-tree", "-r", "-z", "--no-renames", parent, tree},
@@ -567,8 +571,15 @@ func (r *Repo) blobsDifferingFrom(parent, tree string) ([]newBlob, error) {
 		return nil, err
 	}
 
+	// Refused before any of it is read rather than after: the records come in
+	// pairs, so an odd count is a listing obsync has misread from the start,
+	// and half-reading one is work done on an answer already known to be bad.
 	records := splitNUL(out)
-	var blobs []newBlob
+	if len(records)%2 != 0 {
+		return nil, fmt.Errorf("git diff-tree reported %q with no path after it", records[len(records)-1])
+	}
+
+	var blobs []treeBlob
 	for at := 0; at+1 < len(records); at += 2 {
 		// ":<srcmode> <dstmode> <srcoid> <dstoid> <status>", and it is read as
 		// fields because no path is in it — the path is the record after it,
@@ -578,11 +589,8 @@ func (r *Repo) blobsDifferingFrom(parent, tree string) ([]newBlob, error) {
 			return nil, fmt.Errorf("git diff-tree reported an entry obsync could not read: %q", records[at])
 		}
 		if mode, oid := fields[1], fields[3]; holdsABlob(mode) {
-			blobs = append(blobs, newBlob{path: records[at+1], oid: oid})
+			blobs = append(blobs, treeBlob{path: records[at+1], oid: oid})
 		}
-	}
-	if len(records)%2 != 0 {
-		return nil, fmt.Errorf("git diff-tree reported %q with no path after it", records[len(records)-1])
 	}
 	return blobs, nil
 }
@@ -615,7 +623,7 @@ func holdsABlob(mode string) bool {
 // count of bytes is all of it, and none of the three can hold a newline. A NUL
 // form exists in a later git than obsync's floor, so the choice is this or a
 // second command per object.
-func (r *Repo) blobSizes(blobs []newBlob) (map[string]int64, error) {
+func (r *Repo) blobSizes(blobs []treeBlob) (map[string]int64, error) {
 	var asked bytes.Buffer
 	for _, blob := range blobs {
 		asked.WriteString(blob.oid)
