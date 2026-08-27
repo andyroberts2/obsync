@@ -24,6 +24,47 @@ contact moves something, and 0.x is where it is allowed to.
 The version identifies the build. `obsync status` reports it, and it is stamped
 at link time rather than derived at runtime.
 
+### What a release publishes
+
+A release is cut by one pushed annotated tag, `vMAJOR.MINOR.PATCH`, and by
+nothing else — no schedule, and no button. The tag's message carries the
+"Surface changes" section, and a release whose tag moved this page with that
+section empty is refused rather than published.
+
+The image is published to GHCR and to no other registry:
+
+```
+ghcr.io/andyroberts2/obsync
+```
+
+One build is pushed under four names. For `v1.4.2` they are `1.4.2`, `1.4`, `1`
+and `latest`, and they are the same image — the digest is one, and the
+attestation and SBOM beside it describe that one build. Pin the floating major:
+it is the name that follows a base image patch, and an unattended sidecar on a
+pin that never moves is a vault on a stale base. Pre-1.0 there is no meaningful
+floating major, so [`compose.yaml`](../compose.yaml) pins `0.3` and changes to
+`1` at 1.0. `latest` is published because people expect it to exist; nothing
+here points at it, and neither should anything you run unattended.
+
+**A floating name only ever moves forward.** A release publishes the floating
+names it is the newest under and no others, so a backport cut from an older line
+takes `1.3.5` and `1.3` and leaves `1` and `latest` on the newer build. What you
+pinned never becomes older code.
+
+**A base image bump is a `patch` release.** The base and the builder are pinned
+by digest rather than by tag, because Alpine repoints a release tag on every
+patch and git comes with it — so a CVE in the base is not something that arrives
+under a name you already have. It arrives as a version of obsync, with notes,
+like everything else this page promises about.
+
+Every release carries a build-provenance attestation and an SBOM, pushed beside
+the image:
+
+```bash
+gh attestation verify oci://ghcr.io/andyroberts2/obsync:0.3 --owner andyroberts2
+docker buildx imagetools inspect ghcr.io/andyroberts2/obsync:0.3
+```
+
 ---
 
 ## 1. The config surface

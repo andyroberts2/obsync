@@ -834,23 +834,37 @@ func seam2Selection(t *testing.T) string {
 	return pattern
 }
 
-// seam2Tests is every test in this file that asks for seam 2, by name.
+// seam2Tests is every test in the suite that asks for seam 2, by name.
+//
+// Every file rather than this one, and that is what the check is worth: a
+// seam-2 test written in another file is exactly the one that would go
+// unnoticed, because it is the one nobody is looking at while reading the
+// seam-2 suite. #43 wrote the first of them, in release_test.go — the image's
+// version label — and a check scoped to a filename would have had nothing to
+// say about it.
 func seam2Tests(t *testing.T) []string {
 	t.Helper()
 
+	files, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatalf("looking for the suite's test files: %v", err)
+	}
+
 	var asked []string
-	// Split on the declaration rather than parsed: what is wanted is which
-	// function bodies mention the switch, and a body is everything up to the
-	// next top-level `func`.
-	for _, function := range strings.Split(read(t, "image_test.go"), "\nfunc ") {
-		name, body, isFunction := strings.Cut(function, "(t *testing.T) {")
-		if !isFunction || !strings.HasPrefix(name, "Test") || !strings.Contains(body, "needsSeam2(t)") {
-			continue
+	for _, file := range files {
+		// Split on the declaration rather than parsed: what is wanted is which
+		// function bodies mention the switch, and a body is everything up to
+		// the next top-level `func`.
+		for _, function := range strings.Split(read(t, file), "\nfunc ") {
+			name, body, isFunction := strings.Cut(function, "(t *testing.T) {")
+			if !isFunction || !strings.HasPrefix(name, "Test") || !strings.Contains(body, "needsSeam2(t)") {
+				continue
+			}
+			asked = append(asked, name)
 		}
-		asked = append(asked, name)
 	}
 	if len(asked) == 0 {
-		t.Fatalf("no test in image_test.go asks for seam 2, which cannot be right while this file " +
+		t.Fatalf("no test in the suite asks for seam 2, which cannot be right while image_test.go " +
 			"is the seam-2 suite")
 	}
 	return asked
