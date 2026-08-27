@@ -36,6 +36,7 @@ import (
 	"github.com/andyroberts2/obsync/internal/clock"
 	"github.com/andyroberts2/obsync/internal/config"
 	"github.com/andyroberts2/obsync/internal/git"
+	"github.com/andyroberts2/obsync/internal/status"
 	"github.com/andyroberts2/obsync/internal/vault"
 )
 
@@ -66,18 +67,18 @@ type Loop struct {
 	retryNetworkAt time.Time
 	lastPush       time.Time
 
-	// frozen is the full freeze obsync is in, or empty, and networkFrozen the
-	// network freeze. The first has thirteen causes — the nine gates and the
-	// vault sentinel (§7), a remote holding refs but not the tracked branch,
-	// HEAD moving off the tracked branch (§3), and the local failure streak
-	// reaching five (#34) — and the second five: an upstream rewrite, each of
-	// §4's three ways a merge stops rather than being improvised into a
-	// commit, and a remote rejection (#35), which is the only one of them that
-	// is a verdict rather than an inconclusive check and therefore the only one
-	// entered on a first occurrence. Write-verify failing (#33) adds no cause
-	// of its own: it is gate 9's freeze, reached from the run that wrote the
-	// ref rather than from the ref, which is what makes the two one state
-	// rather than two (§9).
+	// frozen is the full freeze obsync is in, or the zero value, and
+	// networkFrozen the network freeze. The first has thirteen causes — the
+	// nine gates and the vault sentinel (§7), a remote holding refs but not the
+	// tracked branch, HEAD moving off the tracked branch (§3), and the local
+	// failure streak reaching five (#34) — and the second five: an upstream
+	// rewrite, each of §4's three ways a merge stops rather than being
+	// improvised into a commit, and a remote rejection (#35), which is the only
+	// one of them that is a verdict rather than an inconclusive check and
+	// therefore the only one entered on a first occurrence. Write-verify
+	// failing (#33) adds no cause of its own: it is gate 9's freeze, reached
+	// from the run that wrote the ref rather than from the ref, which is what
+	// makes the two one state rather than two (§9).
 	//
 	// Twelve of the thirteen self-clear by re-checking a fact. The thirteenth
 	// is the honest exception §7 names rather than papers over: a streak is a
@@ -95,8 +96,55 @@ type Loop struct {
 	// half committing, because the vault is sound and only its relationship to
 	// the remote is not (§7). Both are re-evaluated at the top of every run, so
 	// that repairing the cause releases obsync with no restart.
-	frozen        string
-	networkFrozen string
+	//
+	// Each holds the fact and the remedy it was entered with as well as its
+	// name, for the reason liveFreeze gives.
+	frozen        liveFreeze
+	networkFrozen liveFreeze
+
+	// pushAttempted is whether obsync has ever handed the remote a push since
+	// it started, and lastPush above whether one ever landed. The pair is
+	// §9's three states rather than two: nothing attempted is *nothing has
+	// changed yet*, which is not a failure and is never reported as one, and
+	// attempted with nothing landed is *nobody has ever seen this deployment
+	// work* — ERROR immediately and unhealthy at once, which is what makes a
+	// wrong-scoped token findable without the startup push probe §8 refused to
+	// run.
+	//
+	// In-memory and process-lifetime only, like every other record the loop
+	// keeps. The question it answers is about this obsync rather than about the
+	// vault's history — a restarted obsync with nothing to push has genuinely
+	// not attempted one, and the first thing it does attempt answers again.
+	pushAttempted bool
+
+	// networkFailingSince is when the network half last went from working to
+	// not, and zero while it is working. It is what §9's backoff ceiling is
+	// measured against, and it is set where the backoff is rather than where a
+	// failure is classified: a verdict the remote returned is not a remote that
+	// has gone quiet, and neither is a race this run lost.
+	//
+	// It is cleared by a network half that got all the way through
+	// (networkHalfGotThrough) rather than by any command the remote answered,
+	// which is what separates it from the backoff beside it.
+	networkFailingSince time.Time
+
+	// lastCommit is when the local half last captured the vault, carried for
+	// the status file so that `obsync status` answers the question a suspicious
+	// operator actually has. It is a fact rather than a verdict: a vault nobody
+	// has typed into for a week has nothing to commit and is perfectly healthy.
+	lastCommit time.Time
+
+	// saidNeedsHumanAt is when obsync last told a human that it needs one, and
+	// it is the whole of §9's hourly repeat: state entry and state exit each
+	// log once, and in between a broken obsync repeats itself once an hour, on
+	// a counter over the existing tick rather than on a cadence of its own.
+	//
+	// It is stamped by the freezes, which say their own fact on entry, and by
+	// the repeat itself, so that a freeze entered a minute ago is not
+	// immediately repeated. It is cleared by any run that finds obsync healthy,
+	// so the next state a human is needed for is announced at once rather than
+	// an hour after the last one.
+	saidNeedsHumanAt time.Time
 
 	// repo is the vault's repository once obsync has bootstrapped into it, and
 	// it carries the tracked branch, resolved on the first run that reached the
@@ -169,6 +217,32 @@ type Loop struct {
 type unsettledPath struct {
 	since time.Time
 	said  bool
+}
+
+// liveFreeze is a freeze obsync is in: the name an operator reads, the
+// conclusive fact behind it, the remedy, and when obsync entered it. The zero
+// value is not frozen.
+//
+// The fact and the remedy are kept rather than only logged, because the log
+// line scrolls away and the two things that stand while a freeze does are
+// derived from this: the status file §9's health verdict is read out of, and
+// the attention note's first section (#38). A rejection's fact especially —
+// the remote's own words, which exist nowhere else, because obsync will not
+// make that push again for an hour.
+type liveFreeze struct {
+	name   string
+	fact   string
+	remedy string
+	since  time.Time
+}
+
+// record is the freeze as the status file carries it, or nil when obsync is not
+// in one.
+func (f liveFreeze) record() *status.Freeze {
+	if f.name == "" {
+		return nil
+	}
+	return &status.Freeze{Name: f.name, Fact: f.fact, Remedy: f.remedy, Since: f.since}
 }
 
 func New(cfg config.Config, log *slog.Logger, clk clock.Clock, wakes <-chan struct{}) *Loop {
@@ -282,6 +356,12 @@ func (l *Loop) syncRun(ctx context.Context) {
 	// is judged on the vault it started against.
 	committing := l.cadence.mayCommit(l.clock.Now())
 	defer func() { l.cadence.ran(l.clock.Now(), committing) }()
+	// The status file is rewritten at the end of every wake-up whatever the run
+	// turned out to be, because liveness is a fact about the loop rather than
+	// about the outcome (§9). Deferred rather than written at the bottom of
+	// this function for the same reason: every way a run can end is a wake-up
+	// that happened, and a run that gave up early still turned.
+	defer func() { l.signal(l.clock.Now()) }()
 
 	bootstrapped, err := l.bootstrap(ctx)
 	if err != nil {
@@ -292,16 +372,29 @@ func (l *Loop) syncRun(ctx context.Context) {
 		var failing *git.InterlockFailure
 		if errors.As(err, &failing) {
 			l.report(l.freeze(failing.Interlock, failing.Fact, failing.Remedy))
+			// Said again every hour, here rather than through the status file
+			// as every other freeze is, because these are the freezes there is
+			// nowhere to write one from: gates 1, 2, 6 and 8 are what stands
+			// between obsync and a repository, so there is no `.git` to write
+			// into and no vault obsync may write an attention note in either
+			// (§9's two log-only carve-outs). The log is the whole channel,
+			// and a channel that says a thing once is one an operator reads an
+			// hour later and finds empty.
+			l.sayNeedsHuman(l.clock.Now(), status.Health{
+				State: failing.Interlock, Fact: failing.Fact, Remedy: failing.Remedy,
+			})
 			return
 		}
 		// Everything else bootstrap can fail at is a clone that did not
-		// happen, and it is reported on every run — once a tick for as long as
-		// the remote cannot be reached. The hourly repeat that turns that into
-		// one line an hour is §9's, and #37's: unlike the network half below,
-		// which the backoff already quiets, this has no wait of its own to
-		// hide behind.
-		l.log.Error("obsync cannot sync the vault it was pointed at", "problem", err,
-			"vault_path", l.config.VaultPath)
+		// happen, and it is re-established from scratch by every run for as
+		// long as obsync has no repository. So it goes through §9's hourly
+		// repeat rather than being said once a tick: unlike the network half
+		// below, which the backoff already quiets, this has no wait of its own
+		// to hide behind, and there is no status file to carry it either —
+		// there is no `.git` to write one into, which is the case §9 says
+		// reads as unhealthy with no special case.
+		l.needsHuman(l.clock.Now(), "obsync cannot sync the vault it was pointed at",
+			"problem", err, "vault_path", l.config.VaultPath)
 		return
 	}
 	// A bootstrap that *ran* and got through is gates 1, 2, 6 and 8 all
@@ -363,7 +456,7 @@ func (l *Loop) bootstrap(ctx context.Context) (bool, error) {
 // answers nothing, and obsync stays frozen: the freeze clears on a fact, never
 // on a failure to establish one.
 func (l *Loop) stillWithheld(ctx context.Context) bool {
-	if l.frozen != freezeNoUpstreamCounterpart {
+	if l.frozen.name != freezeNoUpstreamCounterpart {
 		return false
 	}
 
@@ -398,7 +491,7 @@ func (l *Loop) stillWithheld(ctx context.Context) bool {
 // is not a fact obsync can look up but what the next merge comes out as
 // (networkThawed).
 func (l *Loop) stillRewritten(ctx context.Context, now time.Time) (bool, error) {
-	if l.networkFrozen != freezeUpstreamRewrite {
+	if l.networkFrozen.name != freezeUpstreamRewrite {
 		return false, nil
 	}
 
@@ -411,8 +504,8 @@ func (l *Loop) stillRewritten(ctx context.Context, now time.Time) (bool, error) 
 	if rewritten {
 		return true, nil
 	}
-	cleared := l.networkFrozen
-	l.networkFrozen = ""
+	cleared := l.networkFrozen.name
+	l.networkFrozen = liveFreeze{}
 	l.log.Info("the freeze cleared and obsync is syncing with the remote again", "freeze", cleared,
 		"branch", l.repo.TrackedBranch())
 	return false, nil
@@ -420,7 +513,8 @@ func (l *Loop) stillRewritten(ctx context.Context, now time.Time) (bool, error) 
 
 // freeze enters a full freeze, and says so once. State entry and state exit
 // each log exactly one line (§9); the hourly repeat that keeps a broken obsync
-// from going quiet in between is #37's.
+// from going quiet in between is signal.go's, and it is stamped here so that a
+// freeze entered a minute ago is not immediately repeated.
 //
 // One full freeze is held at a time, and which one is the *current* fact rather
 // than the first one ever seen. They stop obsync doing the same nothing, so a
@@ -436,10 +530,19 @@ func (l *Loop) stillRewritten(ctx context.Context, now time.Time) (bool, error) 
 // is. The ordering that matters — full over network, and the first *failing*
 // interlock within a run — is in the order these are asked (#32).
 func (l *Loop) freeze(name, fact, remedy string) error {
-	if l.frozen == name {
+	now := l.clock.Now()
+	if l.frozen.name == name {
+		// The fact and the remedy are kept current while the name is not
+		// re-announced. Nothing is said, so state entry is still said exactly
+		// once — but what stands beside the freeze is what obsync knows now
+		// rather than what it knew on entry, which matters where the fact
+		// moves: a damage freeze's streak count grows, and a second rejection
+		// carries whatever the remote said this time.
+		l.frozen.fact, l.frozen.remedy = fact, remedy
 		return errFullFrozen
 	}
-	l.frozen = name
+	l.frozen = liveFreeze{name: name, fact: fact, remedy: remedy, since: now}
+	l.saidNeedsHumanAt = now
 	l.log.Error("obsync is frozen and is touching nothing until this is repaired", "freeze", name,
 		"fact", fact, "remedy", remedy)
 	return errFullFrozen
@@ -448,10 +551,13 @@ func (l *Loop) freeze(name, fact, remedy string) error {
 // networkFreeze stops the network half and leaves the local one committing: the
 // vault is sound, and its relationship to the remote is not (§7).
 func (l *Loop) networkFreeze(name, fact, remedy string) error {
-	if l.networkFrozen == name {
+	now := l.clock.Now()
+	if l.networkFrozen.name == name {
+		l.networkFrozen.fact, l.networkFrozen.remedy = fact, remedy
 		return errNetworkFrozen
 	}
-	l.networkFrozen = name
+	l.networkFrozen = liveFreeze{name: name, fact: fact, remedy: remedy, since: now}
+	l.saidNeedsHumanAt = now
 	l.log.Error("obsync has stopped syncing with the remote until this is repaired", "freeze", name,
 		"fact", fact, "remedy", remedy)
 	return errNetworkFrozen
@@ -476,10 +582,10 @@ func (l *Loop) interlocksHold(names []string) {
 // thawed clears the named full freeze if it is the one obsync is in, and says
 // so once.
 func (l *Loop) thawed(name string) {
-	if l.frozen != name {
+	if l.frozen.name != name {
 		return
 	}
-	l.frozen = ""
+	l.frozen = liveFreeze{}
 	l.log.Info("the freeze cleared and obsync is syncing again", "freeze", name,
 		"branch", l.repo.TrackedBranch())
 }
@@ -506,18 +612,18 @@ func (l *Loop) thawed(name string) {
 // reconcile happens at all, by a probe that cannot overwrite obsync's record of
 // what the remote last held, and it stops the run when it holds.
 func (l *Loop) networkThawed(disproved ...string) {
-	if l.networkFrozen == "" {
+	if l.networkFrozen.name == "" {
 		return
 	}
 	found := false
 	for _, name := range disproved {
-		found = found || name == l.networkFrozen
+		found = found || name == l.networkFrozen.name
 	}
 	if !found {
 		return
 	}
-	cleared := l.networkFrozen
-	l.networkFrozen = ""
+	cleared := l.networkFrozen.name
+	l.networkFrozen = liveFreeze{}
 	l.log.Info("the freeze cleared and obsync is syncing with the remote again", "freeze", cleared,
 		"branch", l.repo.TrackedBranch())
 }
@@ -662,7 +768,7 @@ func (l *Loop) perform(ctx context.Context, committing bool) error {
 	// vault. So a mount that drops while obsync is damage-frozen is still said,
 	// and this stays the one thing in the design that is not re-checked because
 	// it cannot be.
-	if l.frozen == freezeDamagedRepo {
+	if l.frozen.name == freezeDamagedRepo {
 		return l.probeTheDamage()
 	}
 
@@ -966,6 +1072,7 @@ func (l *Loop) untrackChurnSubset() (bool, error) {
 	if err := l.repo.Commit(untrackMessage(churn)); err != nil {
 		return false, err
 	}
+	l.lastCommit = l.clock.Now()
 	l.churnUntracked = true
 
 	// WARN rather than the INFO a run that committed gets, because the news is
@@ -1160,6 +1267,7 @@ func (l *Loop) localHalf() error {
 	if err := l.repo.Commit(commitMessage(staged)); err != nil {
 		return err
 	}
+	l.lastCommit = l.clock.Now()
 	l.log.Info("committed", "paths", len(staged), "subject", subject(staged))
 	return nil
 }
@@ -1418,8 +1526,11 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 			"branch", l.repo.TrackedBranch(), "conflict_copies", len(reconciled.ConflictCopies))
 		return l.push(ctx, now)
 	}
-	// Equal, or reconciled: a run that changed nothing says nothing, because
-	// docker logs --since 1h being empty is a designed signal (§9).
+	// Equal or Behind: there was nothing to publish, so the fetch and the
+	// reconcile are the whole half and it got through.
+	l.networkHalfGotThrough()
+	// A run that changed nothing says nothing, because docker logs --since 1h
+	// being empty is a designed signal (§9).
 	return nil
 }
 
@@ -1439,6 +1550,14 @@ func (l *Loop) push(ctx context.Context, now time.Time) error {
 	}
 
 	err := l.repo.Push(ctx)
+	// §9's three states rather than two, and this is the line that tells the
+	// first from the second: *never attempted* is nothing having changed yet,
+	// which is not a failure and is never reported as one, and *attempted,
+	// never succeeded* is a deployment nobody has ever seen work — ERROR
+	// immediately and unhealthy at once, which is what makes a wrong-scoped
+	// token findable without the startup probe §8 declined to run.
+	l.pushAttempted = l.pushAttempted || attempted(err)
+
 	var rejected *git.RemoteRejection
 	switch {
 	case err == nil:
@@ -1472,11 +1591,35 @@ func (l *Loop) push(ctx context.Context, now time.Time) error {
 	l.lastPush = now
 	l.remoteInStep = true
 	l.networkSucceeded()
+	// The network half got all the way through, which is the one thing that
+	// clears the ceiling's clock on a run that had something to publish.
+	l.networkHalfGotThrough()
 	// The one thing that is evidence against a rejection: the remote taking
 	// the push it had refused.
 	l.networkThawed(freezeRemoteRejection)
 	l.log.Info("pushed", "branch", l.repo.TrackedBranch())
 	return nil
+}
+
+// attempted reports whether a push outcome is evidence about whether this
+// obsync can publish at all, which is the question §9's middle state asks.
+//
+// Two outcomes are not, and they are the whole exception. A **lost race** is the
+// remote answering that obsync is behind: the write never happened, the next
+// run fetches, merges and publishes both sides, and counting it would let the
+// first divergence a healthy new deployment ever has read as "nobody has ever
+// seen this work" — which is the noise the abort tier exists to prevent (§7). A
+// push **obsync itself cut short** at the shutdown deadline is not evidence
+// either: obsync was told to stop, the commit is in the vault waiting for the
+// next start, and nothing about the remote was established.
+//
+// Everything else counts, including a remote that could not be reached at all.
+// That is deliberate and it is the point of the middle state: an established
+// deployment gets a day's grace on an unreachable remote, and one that has
+// never once pushed gets none, because the failure a startup probe would have
+// caught is exactly this one.
+func attempted(err error) bool {
+	return !errors.Is(err, git.ErrLostTheRace) && !errors.Is(err, git.ErrShutdownDeadline)
 }
 
 // retryHourly is what a remote rejection waits, and it is deliberately not the
@@ -1500,7 +1643,15 @@ func (l *Loop) retryHourly(now time.Time) {
 	l.retryNetworkAt = now.Add(hourly)
 }
 
-// backOff doubles the network half's wait, from 60s and never past 15m.
+// backOff doubles the network half's wait, from 60s and never past 15m, and
+// starts the clock §9's backoff ceiling is measured against.
+//
+// That clock is started here rather than where a failure is classified, and the
+// membership is the point: everything that backs off is a network half that
+// failed to establish anything, which is what the ceiling is about. A verdict
+// the remote returned does not reach here — a rejection freezes, and is
+// unhealthy at once rather than in a day — and neither does a race this run
+// lost, because the remote answered.
 func (l *Loop) backOff(now time.Time) {
 	if l.backoff == 0 {
 		l.backoff = backoffFloor
@@ -1508,6 +1659,9 @@ func (l *Loop) backOff(now time.Time) {
 		l.backoff = min(2*l.backoff, backoffLongest)
 	}
 	l.retryNetworkAt = now.Add(l.backoff)
+	if l.networkFailingSince.IsZero() {
+		l.networkFailingSince = now
+	}
 }
 
 // networkSucceeded resets the backoff to its floor. Any success does it: the
@@ -1515,4 +1669,37 @@ func (l *Loop) backOff(now time.Time) {
 // continuation of an old one.
 func (l *Loop) networkSucceeded() {
 	l.backoff, l.retryNetworkAt = 0, time.Time{}
+}
+
+// networkHalfGotThrough clears the clock §9's backoff ceiling is measured
+// against, and says once that the remote came back when it had been gone long
+// enough to stop being healthy.
+//
+// It is deliberately not networkSucceeded's job, and the split is the whole of
+// what the ceiling measures. The **backoff** is reset by any command the remote
+// answered, because the next failure is then a fresh one rather than the
+// continuation of an old one. The **ceiling** is about whether obsync is
+// publishing at all, so only a network half that got all the way through clears
+// it — a fetch that works while every push is refused is a vault that has
+// stopped being backed up, and clearing the ceiling's clock on the half that
+// still works would leave that reading healthy for ever and saying nothing,
+// which is the exact harm §9 exists to prevent. That is not hypothetical: a
+// token narrowed to read-only on a deployment that had been working fetches
+// perfectly and fails only at the push, for ever.
+//
+// The recovery line is said only past the ceiling, because that is the only
+// point at which the remote's absence was ever news: inside the day a remote
+// coming back is obsync working, and a line about it on every recovered tick is
+// how a quiet log stops being a signal (§9). Saying it here rather than off a
+// successful fetch is what keeps it true — the remote has answered every
+// question this run asked it, including the one that publishes.
+func (l *Loop) networkHalfGotThrough() {
+	if l.networkFailingSince.IsZero() {
+		return
+	}
+	if now := l.clock.Now(); now.Sub(l.networkFailingSince) > backoffCeiling {
+		l.log.Info("the remote answered again", "gone_for",
+			now.Sub(l.networkFailingSince).Round(time.Second), "branch", l.repo.TrackedBranch())
+	}
+	l.networkFailingSince = time.Time{}
 }

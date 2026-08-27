@@ -101,8 +101,22 @@ changes still arrive, and the commit the remote refused is never rewound and
 never capped. The **declared surface** — everything a version number will make a
 promise about — is written down ahead of the code that implements it.
 
-Not yet: the attention note, the status file and the container image. obsync is
-not something to point at a vault yet.
+And you find out about all of that without going looking. obsync answers exactly
+one question about itself — *does this need a human?* — and answers it in the
+three places you already have: `docker ps`, through a healthcheck that reads a
+private record obsync rewrites at the end of every wake-up; `docker exec obsync
+status`, which prints what it has been doing and what it is waiting on, and
+always exits 0; and `docker logs`, which is **empty when nothing is wrong**. A
+freeze, a remote that has rejected a push, a push that has never once succeeded,
+a remote that has been unreachable for a day, and a loop that has stopped
+turning are the whole of what needs you — everything else, including a remote
+that is merely down, an aborted run and any amount of backoff, is obsync working
+as designed. Whatever does need you is repeated once an hour and never once a
+tick, so `docker logs --since 1h` is empty exactly when nothing is wrong and
+never empty when something is.
+
+Not yet: the attention note and the container image. obsync is not something to
+point at a vault yet.
 
 ## What obsync will never do
 

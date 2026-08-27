@@ -1,12 +1,15 @@
 package git
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/andyroberts2/obsync/internal/vault"
 )
@@ -45,8 +48,21 @@ func (r *Repo) writeIgnoreFloor() error {
 	return nil
 }
 
-// resolveOwnedPaths asks git where the two owned paths inside .git are, once,
-// and is the only thing here that ever asks.
+// statusFileName is where obsync's status file lives, relative to the
+// repository (§9). One name in one place, because two processes look it up: the
+// loop resolves it once at bootstrap and writes it at the end of every
+// wake-up, and `obsync healthcheck` and `obsync status` resolve it again in a
+// process of their own to read it.
+//
+// `.git/obsync/` is what makes §9's three unhealthy-by-construction cases fall
+// out rather than need coding — the mount drops and the file goes with it, a
+// directory that is not a repository has no `.git` to write into, and a fresh
+// container has not run yet. It is also outside every commit by construction,
+// so the file can never be synced anywhere.
+const statusFileName = "obsync/status.json"
+
+// resolveOwnedPaths asks git where the owned paths inside .git are, once, and
+// is the only thing here that ever asks.
 //
 // git is asked rather than joining ".git" onto the vault path, because a .git
 // that is a *file* is a worktree or a submodule and bootstrap attaches to those
@@ -66,6 +82,10 @@ func (r *Repo) resolveOwnedPaths() error {
 	if err != nil {
 		return fmt.Errorf("obsync could not find where to stage its own writes: %w", err)
 	}
+	statusFile, err := r.gitPath(statusFileName)
+	if err != nil {
+		return fmt.Errorf("obsync could not find where to write its status file: %w", err)
+	}
 	// The repository itself, for the markers gate 4 reads and the lock gate 8
 	// takes. --absolute-git-dir rather than --git-dir, because obsync runs
 	// every git in the vault and a relative answer would be one more thing to
@@ -75,9 +95,99 @@ func (r *Repo) resolveOwnedPaths() error {
 	if err != nil {
 		return fmt.Errorf("obsync could not find the vault's repository: %w", err)
 	}
-	r.excludeFile, r.staging = exclude, staging
+	r.excludeFile, r.staging, r.statusFile = exclude, staging, statusFile
 	r.gitDir = strings.TrimSuffix(string(gitDir), "\n")
 	return nil
+}
+
+// WriteStatus writes obsync's status file, through the same write-then-rename
+// every owned path goes through (§6, §9).
+//
+// It is asked at the end of every wake-up whatever the run turned out to be,
+// including from inside a freeze — a full freeze stops obsync touching the
+// *repository*, and this is obsync's own declared path rather than anything of
+// the human's or of git's. It has to be written then: §9 makes a live freeze
+// and a loop that has stopped turning two different unhealthy states, and they
+// are only distinguishable if a frozen obsync goes on saying it is alive.
+//
+// The repository is checked for still being there first, and that check is the
+// point rather than a courtesy: the write creates the directories it needs, so
+// a `.git` that has gone would otherwise be *recreated* here — an empty
+// `.git/obsync/` in a vault that is no longer a repository, which is a
+// directory gate 2 would then have to reason about and a trace obsync left
+// somewhere it had promised to stop.
+func (r *Repo) WriteStatus(content []byte) error {
+	if _, err := os.Stat(r.gitDir); err != nil {
+		return fmt.Errorf("obsync will not write a status file into a repository that is not "+
+			"there: %w", err)
+	}
+	return r.writeOwnedFile(r.statusFile, content)
+}
+
+// StatusFilePath is where the status file lives for the vault at vaultPath,
+// asked of git in a process that has no repository open (§9).
+//
+// git is asked rather than joining `.git/obsync/status.json` onto the vault
+// path, for the reason resolveOwnedPaths gives: a `.git` that is a *file* is a
+// worktree or a submodule, and bootstrap attaches to those deliberately. A
+// reader that guessed would report a perfectly healthy vault as one that has
+// never run.
+//
+// It is the one git obsync runs outside a Repo, because a subcommand answering
+// a question about the vault holds none of what a Repo is: no lock, no private
+// configuration and no credential. It takes the pins that matter to a path
+// lookup and nothing else, and it is read-only — the failure it can produce is
+// an answer of "there is no repository here", which is exactly the unhealthy
+// verdict that answer deserves.
+func StatusFilePath(vaultPath string) (string, error) {
+	// The vault is looked at before git is, because a vault that is not there
+	// is the commonest of these — it is what a dropped mount looks like — and
+	// Go accounts for a failed chdir by naming the *program* it could not
+	// start. An operator told that git does not exist goes looking in the one
+	// place nothing is wrong.
+	if _, err := os.Stat(vaultPath); err != nil {
+		return "", fmt.Errorf("obsync could not look at the vault at %s: %w", vaultPath, err)
+	}
+
+	cmd := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-path", statusFileName)
+	cmd.Dir = vaultPath
+	// The same pins every other git obsync runs takes, plus the two that stand
+	// in for the isolation a Repo carries and this has none of: no system
+	// configuration, and no ambient `~/.gitconfig` either.
+	//
+	// `/dev/null` rather than a file of obsync's own, because a path lookup
+	// needs nothing a private configuration would hold — what it needs is to
+	// not read a configuration obsync did not write. Every other git obsync
+	// runs is already deaf to `~/.gitconfig`, because a Repo pins
+	// GIT_CONFIG_GLOBAL at its own private file; leaving it unset here would
+	// make this the one git that reads one. Measured at both matrix points
+	// (2.38.5 and 2.52.0): a `~/.gitconfig` git cannot parse fails
+	// `rev-parse --git-path` with exit 128, so `obsync healthcheck` would call
+	// a perfectly healthy vault unreadable — and HOME is not hypothetical
+	// here, it is exactly where §8 says an ssh key arrives.
+	cmd.Env = append(pinnedEnvironment(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		// git's own words, carried because they are the whole of what
+		// separates "this directory is not a repository" from anything else
+		// that can go wrong here. They name a failure and decide nothing,
+		// which is the rule this design applies to git's prose everywhere (§7).
+		if said := firstLine(stderr.String()); said != "" {
+			return "", fmt.Errorf("obsync could not find a git repository in %s: %s", vaultPath, said)
+		}
+		return "", fmt.Errorf("obsync could not find a git repository in %s: %w", vaultPath, err)
+	}
+	// One path and a trailing newline, taken whole rather than split. Measured
+	// at both matrix points (2.38.5 and 2.52.0) against a vault path holding a
+	// space, a newline and a non-ASCII character: `rev-parse --git-path` writes
+	// the path raw and C-quotes nothing, so the only newline in this answer is
+	// the one git ends it with. That is what makes the trim safe rather than a
+	// guess — the rule this design keeps everywhere is that a path is the one
+	// thing in git's output that can hold a newline (§1).
+	return strings.TrimSuffix(stdout.String(), "\n"), nil
 }
 
 // sweepStagingDebris removes whatever a crash left in obsync's staging

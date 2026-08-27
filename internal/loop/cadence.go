@@ -90,6 +90,34 @@ const (
 // that the pack a rejection keeps re-uploading is not sent every minute.
 const hourly = time.Hour
 
+// backoffCeiling is the point at which a remote that has merely gone quiet
+// stops being healthy: 24 hours (§9).
+//
+// It is **not a retry limit**, and nothing in the loop reads it as one: obsync
+// keeps backing off and retrying past it, and the only thing that changes is
+// the health verdict. It exists because waiting is the correct behaviour and
+// stays correct — nothing about the failure ever escalates it — so only elapsed
+// time separates a remote that will come back from one that will not, and a day
+// is the point at which an operator would rather be told than left to find out.
+//
+// It lives here with the other cadence constants because it is measured against
+// the same clock they are, and it is carried into the status file rather than
+// re-declared by the subcommand that reads it: two copies of a number is two
+// answers to one question, waiting to drift.
+const backoffCeiling = 24 * time.Hour
+
+// stalenessWindow is how long the status file may go unwritten before that is
+// evidence the sync loop has stopped turning: five ticks, which is five
+// minutes (§9).
+//
+// It is the persistence threshold and the tick multiplied rather than a third
+// number, because it *is* those two: five wake-ups is what "long enough to stop
+// believing in bad luck" means for a loop whose wake-ups are a tick apart. The
+// tick is jittered by a tenth, so five of them is at most 5m30s of real time
+// against a 5m window — which cannot false-positive, because the file is
+// rewritten at the end of *every* wake-up rather than every fifth.
+const stalenessWindow = persistenceThreshold * tick
+
 // persistenceThreshold is how many times in a row something has to happen
 // before obsync stops believing in bad luck: five.
 //

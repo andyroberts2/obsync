@@ -122,9 +122,19 @@ func TestARejectionIsRetriedHourlyAndTheRetryIsAWholeNetworkHalf(t *testing.T) {
 	if env.remoteHoldsYet("Daily/2026-08-24.md") {
 		t.Error("the remote holds the vault's note, want the hourly retry's push rejected again")
 	}
-	if got, want := strings.Count(env.saidSoFar(), "level=ERROR"), 1; got != want {
-		t.Errorf("obsync logged %d ERRORs over an hour of rejection, want %d — state entry is "+
-			"said exactly once (§9); it said:\n%s", got, want, env.saidSoFar())
+	// Two lines an hour apart, and they are two different obligations rather
+	// than one said twice: state entry is said exactly once, and a broken
+	// obsync repeats itself hourly so that `docker logs --since 1h` is never
+	// empty while something is wrong (§9, #37). The second names the same
+	// freeze, because it is the same state.
+	said := env.saidSoFar()
+	if got, want := strings.Count(said, "level=ERROR"), 2; got != want {
+		t.Errorf("obsync logged %d ERRORs over an hour of rejection, want %d — one on entry, and "+
+			"one hourly repeat (§9); it said:\n%s", got, want, said)
+	}
+	if got, want := strings.Count(said, `state="remote rejection"`), 1; got != want {
+		t.Errorf("obsync repeated the rejection %d times in the hour, want %d — the repeat is "+
+			"hourly rather than once a tick (§9); it said:\n%s", got, want, said)
 	}
 
 	// The human changes the remote's rule, which is the only repair there is.
