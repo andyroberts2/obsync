@@ -367,12 +367,52 @@ newer one — stale, consistent, and named in the attention note.
 > repo contains. Adding an entry to the floor is a surface change; removing one
 > is a surface change; so is either edit to the refused list.
 
+### Bootstrap, and the one repo obsync creates
+
+obsync decides once, when it starts, what to do with the directory it was
+pointed at:
+
+| The directory | What obsync does |
+|---|---|
+| Already a git repo | Attaches to it, on the branch it is already on |
+| Empty | Clones the remote into it, on the branch the remote calls default |
+| Anything else | Refuses it, and keeps re-checking without exiting |
+
+An empty directory pointed at a remote with **no branch to clone** — one holding
+no refs at all, or whose `HEAD` names a branch it does not hold — is refused
+too, and obsync keeps re-checking: pushing a vault to the remote, or naming an
+existing branch with `OBSYNC_BRANCH`, releases it with no restart. Cloning an
+empty remote would leave a repository whose `HEAD` names no commit, which is a
+repository obsync refuses on every later run.
+
+The clone is the one time obsync creates a repository, and it is the only time
+`.git/config` comes into existence under obsync rather than under the human: git
+writes it as part of creating the repo, with **one remote, named `origin`, and a
+fetch refspec naming one branch and no tags**. obsync never writes that file
+afterwards. A directory holding nothing but ignore-floor entries is not refused,
+but git will not clone into a directory that holds anything at all, so obsync
+names the entry in the way instead.
+
+`OBSYNC_BRANCH` overrides the branch in the first two rows. On a vault that is
+already a repo it may only agree with the branch the vault is on — **obsync
+never runs `git checkout` after bootstrap**, so an override naming another
+branch is refused, and the remedy is the human's own checkout.
+
+**obsync creates the tracked branch on the remote only when the remote has no
+refs at all.** A remote that has refs but not the tracked branch is a full
+freeze: the branch name came from local HEAD, so a stray branch or a typo'd
+override would otherwise create a remote branch and sync an entire vault into
+it, and the push would succeed. The cost, when a dedicated branch is what you
+want, is one deliberate `git push -u origin <branch>`.
+
 ### The counterpart claim
 
 **obsync never writes a file the human owns.**
 
 - `.git/config` holds their identity and their remote. obsync only ever *reads*
   it — that read is the check that `origin` is still where obsync was pointed.
+  The one exception is the repo obsync creates by cloning into an empty
+  directory, where there was no file and no human yet.
 - The vault's `.gitignore` is theirs alone, and outranks obsync's floor.
 - Their notes are theirs.
 

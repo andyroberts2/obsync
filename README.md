@@ -20,9 +20,13 @@ decision tickets, resolved one at a time. What exists today is the project
 skeleton, the config surface — nine environment variables, one required, echoed
 in a startup line — and the walking skeleton of the sync loop: a wake-up makes
 obsync ask git what changed in the vault, commit it as one commit whose message
-says what changed, and push it to the tracked branch. That push authenticates:
-obsync is its own git credential helper, so the token file an operator mounts is
-re-read every time git asks for it and rotating it needs no restart. The loop
+says what changed, and push it to the tracked branch. It also knows how to
+start: point it at an empty directory and it clones, at a vault that is already
+a repo and it attaches on the branch that vault is on, and at anything else and
+it refuses rather than adopting a folder it cannot reason about. That push
+authenticates: obsync is its own git credential helper, so the token file an
+operator mounts is re-read every time git asks for it and rotating it needs no
+restart. The loop
 now keeps its own time too: it ticks every 60s so a change nothing reported
 still arrives, waits out an unreachable remote from 60s to 15 minutes while
 carrying on committing locally, and finishes the run in flight before it exits.
@@ -33,9 +37,9 @@ obsync runs in tick-only mode, which is a mode it has anyway. The **declared
 surface** — everything a version number will make a promise about — is written
 down ahead of the code that implements it.
 
-Not yet: the filesystem watcher, the safety interlocks, the settle guard,
-conflicts, the attention note, the status file and the container image. obsync
-is not something to point at a vault yet.
+Not yet: the filesystem watcher, the rest of the safety interlocks, the settle
+guard, conflicts, the attention note, the status file and the container image.
+obsync is not something to point at a vault yet.
 
 ## Reference deployment
 
