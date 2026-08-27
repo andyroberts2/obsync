@@ -111,7 +111,9 @@ discover a remote's real limit, so lowering it reduces how often a remote
 rejects a push and never stops one.
 
 **Conflict copies are exempt from the ceiling at any size.** Their bytes are the
-remote's losing version of a path, which the remote already holds.
+losing version of a path, which the remote already holds — or, where the losing
+side is the vault's own, which obsync already committed through the `git add`
+the ceiling is applied on.
 
 ### Names obsync does not recognise, and names it used to
 

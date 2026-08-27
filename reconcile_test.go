@@ -43,15 +43,15 @@ func TestANotePushedFromAnotherDeviceArrivesInTheVault(t *testing.T) {
 }
 
 // Divergence is the designed-for case rather than an anomaly: someone pushed
-// from their laptop while the vault was being written to. The merge that keeps
-// both sides is computed out of tree and is #30's; what this slice owes is that
-// obsync does nothing destructive while it waits for it.
+// from their laptop while the vault was being written to. Both sides' notes
+// survive it, and neither side's history is written over.
 //
-// Nothing is destructive here in either direction. The vault keeps committing —
-// a diverged remote does not stop the local half — and the remote keeps the
-// commit obsync could not fast-forward past, because every write to the remote
-// is a fast-forward or it does not happen (§3).
-func TestBothSidesChangedIsNeitherPushedNorOverwritten(t *testing.T) {
+// Two edits to two different notes need no conflict resolution at all — the
+// keep-both rule's copies are #30's own rows, in conflict_test.go — so what is
+// asserted here is the other half: the merge is a merge, the commit obsync
+// could not fast-forward past is still in the history it pushed, and there is
+// no branch of obsync's own anywhere (§3, §4).
+func TestBothSidesChangedIsMergedAndNeitherSideIsOverwritten(t *testing.T) {
 	t.Parallel()
 
 	env := newVault(t)
@@ -63,26 +63,29 @@ func TestBothSidesChangedIsNeitherPushedNorOverwritten(t *testing.T) {
 	env.writeNote("Daily/2026-08-24.md", "written in the vault\n")
 	env.advance(70 * time.Second)
 
-	if got, want := env.commitsSoFar(env.vault), "2"; got != want {
-		t.Errorf("the vault holds %s commits, want %s — a diverged remote does not stop the local "+
-			"half committing (§2)", got, want)
+	if got, want := env.vaultFile("Notes/from the laptop.md"), "written on the other device\n"; got != want {
+		t.Errorf("the vault holds %q at the other device's note, want %q — a divergence is merged "+
+			"rather than left (§3, §4)", got, want)
 	}
-	if got := env.remoteTip(); got != theirs {
-		t.Errorf("the remote's branch moved to %s, want it still at %s: obsync never force-pushes, "+
-			"so a diverged branch is left for the merge rather than written over (§3)", got, theirs)
+	if got, want := env.remoteFile("Daily/2026-08-24.md"), "written in the vault\n"; got != want {
+		t.Errorf("the remote holds %q at the vault's note, want %q", got, want)
 	}
-	if env.vaultHoldsYet("Notes/from the laptop.md") {
-		t.Error("obsync applied the remote's commit to a diverged vault, want it left for the " +
-			"out-of-tree merge that keeps both sides (§4)")
+	if _, code := env.git(env.remote, "merge-base", "--is-ancestor", theirs, "refs/heads/main"); code != 0 {
+		t.Errorf("the commit the remote already held (%s) is no longer in the history obsync "+
+			"pushed: obsync never force-pushes, so every write to the remote is a fast-forward or "+
+			"it does not happen (§3)", theirs)
+	}
+	if got, want := env.vaultTip(), env.remoteTip(); got != want {
+		t.Errorf("the vault's branch is at %s and the remote's at %s, want the same commit: the "+
+			"merge is pushed in the run that made it (§3)", got, want)
 	}
 	if said := env.saidSoFar(); strings.Contains(said, "level=ERROR") {
 		t.Errorf("obsync said %q about a divergence, want no ERROR: both sides changing is normal "+
 			"operation, not a failure a human is needed for (§9)", said)
 	}
 	// Divergence is where a design that pushed to a branch of its own would do
-	// it. obsync has no device branch: it pushes straight to the tracked
-	// branch, and its steady state when it cannot is one un-merged branch
-	// behind rather than a second branch nobody asked for (§3).
+	// it. obsync has no device branch: it merges and pushes straight to the
+	// tracked branch (§3).
 	if got, want := env.remoteBranches(), []string{"refs/heads/main"}; len(got) != 1 || got[0] != want[0] {
 		t.Errorf("the remote holds the branches %v, want %v — obsync pushes straight to the "+
 			"tracked branch and never to a device branch (§3)", got, want)

@@ -25,23 +25,37 @@ const (
 	Diverged SyncState = "diverged"
 )
 
+// Reconciliation is what one pass of Reconcile found and did.
+type Reconciliation struct {
+	// State is how the tracked branch stood against its upstream counterpart.
+	State SyncState
+
+	// ConflictCopies is what the keep-both rule wrote into this run's merge
+	// commit, in git's own order (§4). It is empty on every state but a
+	// divergence, and empty on most of those too: a clean line-level merge
+	// keeps both sides without a copy, which is the common case rather than
+	// the exception.
+	ConflictCopies []ConflictCopy
+}
+
 // Reconcile brings the vault as far into step with the remote as it safely
 // can, and answers with how the two stood when it looked.
 //
 // It fetches, checks that the remote's history is still the history obsync last
-// saw, and classifies. A branch that is only behind is fast-forwarded here,
-// because that is the whole of what "behind" needs doing to it; the other three
-// answers are the caller's, and only one of them is a push (§3).
+// saw, and classifies. A branch that is only behind is fast-forwarded here and
+// one that has genuinely diverged is merged here, because both are the whole of
+// what those answers need doing to them; what is left for the caller is the
+// push (§3).
 //
 // The merge is a merge and never a rebase, and the working tree is why: a
 // rebase walks the vault through one checkout per replayed commit, with a human
 // watching their notes revert to older versions and ignis writing into the
-// intermediate tree. A fast-forward is one working-tree transition and HEAD
-// never leaves the branch.
-func (r *Repo) Reconcile(ctx context.Context) (SyncState, error) {
+// intermediate tree. A fast-forward and an out-of-tree merge are each one
+// working-tree transition, and HEAD never leaves the branch.
+func (r *Repo) Reconcile(ctx context.Context) (Reconciliation, error) {
 	before, err := r.remoteTip()
 	if err != nil {
-		return "", err
+		return Reconciliation{}, err
 	}
 	if before == "" {
 		// obsync has no ref for this branch, so it has never seen the remote
@@ -52,23 +66,23 @@ func (r *Repo) Reconcile(ctx context.Context) (SyncState, error) {
 		// and a remote that does hold the branch is fetched from normally.
 		holds, err := r.remoteMatches(ctx, "--heads", "refs/heads/"+r.branch)
 		if err != nil {
-			return "", err
+			return Reconciliation{}, err
 		}
 		if !holds {
-			return "", ErrNoUpstreamCounterpart
+			return Reconciliation{}, ErrNoUpstreamCounterpart
 		}
 	}
 
 	if err := r.fetch(ctx); err != nil {
-		return "", err
+		return Reconciliation{}, err
 	}
 
 	tip, err := r.remoteTip()
 	if err != nil {
-		return "", err
+		return Reconciliation{}, err
 	}
 	if tip == "" {
-		return "", ErrNoUpstreamCounterpart
+		return Reconciliation{}, ErrNoUpstreamCounterpart
 	}
 
 	// What obsync last saw the remote hold. Ordinarily it is what was read a
@@ -80,25 +94,33 @@ func (r *Repo) Reconcile(ctx context.Context) (SyncState, error) {
 	lastSeen := before
 	if lastSeen == tip {
 		if lastSeen, err = r.previousRemoteTip(); err != nil {
-			return "", err
+			return Reconciliation{}, err
 		}
 	}
 	rewritten, err := r.upstreamRewritten(lastSeen, tip)
 	if err != nil {
-		return "", err
+		return Reconciliation{}, err
 	}
 	if rewritten {
-		return "", ErrUpstreamRewrite
+		return Reconciliation{}, ErrUpstreamRewrite
 	}
 
 	state, err := r.classify()
 	if err != nil {
-		return "", err
+		return Reconciliation{}, err
 	}
-	if state != Behind {
-		return state, nil
+	switch state {
+	case Behind:
+		return Reconciliation{State: Behind}, r.fastForward(tip)
+	case Diverged:
+		// Both sides moved, which is the designed-for case rather than an
+		// anomaly, and §4's out-of-tree merge is the whole of the answer to it.
+		// Fast-forward-only-and-freeze was rejected on frequency alone.
+		copies, err := r.merge(tip)
+		return Reconciliation{State: Diverged, ConflictCopies: copies}, err
+	default:
+		return Reconciliation{State: state}, nil
 	}
-	return Behind, r.fastForward(tip)
 }
 
 // UpstreamRewritten re-asks the question a network freeze on an upstream
@@ -244,30 +266,8 @@ func (r *Repo) fastForward(tip string) error {
 	if err != nil {
 		return err
 	}
-	overwrites := make(map[string]bool, len(touched))
-	for _, path := range touched {
-		overwrites[path] = true
-	}
-	changed, err := r.Changed()
-	if err != nil {
+	if err := r.refuseWhileTheVaultIsWritten(touched); err != nil {
 		return err
-	}
-	for _, change := range changed {
-		if overwrites[change.Path] {
-			return fmt.Errorf("%w: the vault holds a change to %q, which the incoming commits "+
-				"overwrite", ErrVaultWrittenMidRun, change.Path)
-		}
-	}
-
-	// And the settle guard, over the same scope and immediately before the
-	// apply (§6). It catches what the check above cannot: a write that started
-	// after that status, into a path the incoming commits land on. The apply is
-	// all-or-nothing — there is no skipping a path here, because a partial
-	// apply leaves the vault holding a tree obsync never computed — so one
-	// unsettled path abandons the run, and recomputing costs nothing.
-	if moving := vault.Unsettled(r.clock, r.vault, touched); moving != "" {
-		return fmt.Errorf("%w: %q is still being written and the incoming commits overwrite it",
-			ErrUnsettledOnWriteSide, moving)
 	}
 
 	// The tip by object name rather than by ref, so that what is applied is
@@ -281,6 +281,47 @@ func (r *Repo) fastForward(tip string) error {
 		args: []string{"merge", "--ff-only", "--quiet", tip},
 	})
 	return err
+}
+
+// refuseWhileTheVaultIsWritten abandons the run rather than letting an incoming
+// change overwrite a file something is writing, and is the guard both of
+// obsync's applies take — the fast-forward, and §4's out-of-tree merge.
+//
+// Two facts, and the second is the one no sampling window can anticipate. A
+// path the incoming change touches that the vault has changed since HEAD is a
+// run obsync abandons rather than a write it forces: there is no second commit
+// inside a run and no stashing (§3), and git applies exactly this scope itself
+// when it refuses. Then the settle guard, over the same scope and immediately
+// before the apply, catches a write that started after that status.
+//
+// The scope is deliberate and load-bearing. Checking the whole tree instead
+// would let one continuously edited note block every incoming change
+// indefinitely, on a vault that is never quiet.
+//
+// The apply is all-or-nothing — there is no skipping a path here, because a
+// partial apply leaves the vault holding a tree obsync never computed — so one
+// unsettled path abandons the run, and recomputing costs nothing (§6).
+func (r *Repo) refuseWhileTheVaultIsWritten(touched []string) error {
+	overwrites := make(map[string]bool, len(touched))
+	for _, path := range touched {
+		overwrites[path] = true
+	}
+	changed, err := r.Changed()
+	if err != nil {
+		return err
+	}
+	for _, change := range changed {
+		if overwrites[change.Path] {
+			return fmt.Errorf("%w: the vault holds a change to %q, which the incoming change "+
+				"overwrites", ErrVaultWrittenMidRun, change.Path)
+		}
+	}
+
+	if moving := vault.Unsettled(r.clock, r.vault, touched); moving != "" {
+		return fmt.Errorf("%w: %q is still being written and the incoming change overwrites it",
+			ErrUnsettledOnWriteSide, moving)
+	}
+	return nil
 }
 
 // pathsBetween is every path whose content differs between two commits, in
