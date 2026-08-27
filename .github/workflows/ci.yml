@@ -98,23 +98,25 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # The base image is named in exactly one place in this workflow, and it is
-      # the same image §12 pins by digest for the release build. It moves into
-      # the Dockerfile's own FROM when the image lands (#41), and this step
-      # reads it from there rather than gaining a second copy of it.
+      # Neither point's number is written here. The floor is read from the one
+      # file the binary embeds for gate 7; the current point is read off the
+      # Dockerfile's own base image and then asked of it, so a Dependabot digest
+      # bump moves the matrix with no second number to remember (§12).
+      #
+      # The base is the *last* FROM — the image obsync ships on, not the builder
+      # it is compiled in — and the flags on a cross-compiling FROM are skipped,
+      # so `FROM --platform=$BUILDPLATFORM golang AS builder` cannot be mistaken
+      # for it.
       - name: Resolve this point's git version
         id: git
-        env:
-          BASE_IMAGE: alpine:3.23
         run: |
           set -euo pipefail
           if [ "${{ matrix.point }}" = "floor" ]; then
             version="$(tr -d '[:space:]' < internal/git/GIT_FLOOR)"
           else
-            base="$BASE_IMAGE"
-            if [ -f Dockerfile ]; then
-              base="$(awk '$1 == "FROM" { print $2; exit }' Dockerfile)"
-            fi
+            base="$(awk 'toupper($1) == "FROM" {
+              for (i = 2; i <= NF; i++) if ($i !~ /^--/) { image = $i; break }
+            } END { print image }' Dockerfile)"
             # The base image carries no git until the shipped image installs
             # one, so the version is asked of the package it would install.
             version="$(docker run --rm "$base" \
@@ -163,3 +165,43 @@ jobs:
           export PATH="$HOME/git/$VERSION/bin:$PATH"
           git --version
           go test -race ./...
+
+  # Seam 2 (§12, #41): the container image and the reference compose, which are
+  # the two things no in-process test can see — the image running as an
+  # arbitrary UID with no `/etc/passwd` entry, the git floor gate firing, the
+  # `HEALTHCHECK` being wired, and the credential file being re-read.
+  #
+  # amd64 only here, and both architectures at release time: the architecture
+  # risk is near zero when every expensive operation is a git subprocess, and
+  # cross-compiling means the arm64 image costs no emulation to *build*. What it
+  # would cost is emulation to *run*, which is what a PR does not spend.
+  #
+  # The suite builds the image itself rather than taking one built by a step
+  # above it, so that what is smoke-tested is this checkout's Dockerfile and the
+  # version it is stamped with is the one the tests assert on.
+  image:
+    name: Seam 2 — the image and the reference compose
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # The buildx builder the suite's `docker buildx build --load` needs. No
+      # QEMU is set up: nothing in this job runs an arm64 image.
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # SEAM2 is what asks for it: without it the same suite skips the image and
+      # runs seam 1 alone, which is what every other job and every developer's
+      # loop does. The run is scoped to the seam-2 tests by name — seam 1 is
+      # already run across both matrix points above, and running it a third time
+      # here would buy nothing.
+      - name: Build the image and smoke-test it
+        env:
+          SEAM2: "1"
+        run: go test -run '^(TestTheImage|TestTheReferenceCompose)' -timeout 25m -v .

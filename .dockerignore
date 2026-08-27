@@ -1,0 +1,34 @@
+# What never reaches the image build's context.
+#
+# Kept deliberately short and additive rather than an allow-list: the build
+# embeds `internal/git/GIT_FLOOR` into the binary for gate 7, and an exclusion
+# that swept it out would produce an image whose floor is whatever the last
+# compile happened to see. Seam 2 builds this Dockerfile and runs the gate, so
+# that mistake fails the suite rather than shipping.
+
+# The git directory is the largest thing here and the build reads none of it —
+# the version is stamped by --build-arg, never derived from a checkout.
+.git
+.gitignore
+
+# CI, the AFK sandbox and its node tooling: none of it is shipped, and nothing
+# in the image depends on it.
+.github
+.sandcastle
+node_modules
+package.json
+package-lock.json
+
+# Documentation, which the image does not carry. LICENSE is not here: the image
+# redistributes Apache-2.0 work and carries the licence it does so under.
+docs
+README.md
+CONTEXT.md
+
+# Build output from a local `go build`, which would otherwise be copied in and
+# then overwritten by the builder's own.
+/obsync
+/bin
+/dist
+*.test
+coverage.out
