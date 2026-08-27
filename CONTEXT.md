@@ -104,6 +104,14 @@ run which can be waiting on the outside world — a network git. A local git is
 never timed out, at shutdown or at any other moment.
 _Avoid_: grace period, drain timeout, stop timeout
 
+**Persistence threshold**:
+How many times in a row something must happen before obsync stops believing in
+bad luck: five. One constant for that idea rather than one per user — it is both
+the length the local failure streak escalates at and the status file's staleness
+window of five ticks — so the same question can never be given two answers that
+drift apart.
+_Avoid_: retry limit, max attempts, failure tolerance
+
 ### Torn writes
 
 **Settle guard**:

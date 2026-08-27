@@ -73,6 +73,22 @@ const (
 	backoffLongest = 15 * time.Minute
 )
 
+// persistenceThreshold is how many times in a row something has to happen
+// before obsync stops believing in bad luck: five.
+//
+// It is one constant for that idea rather than one per user, deliberately, and
+// §2's table states it once for both — the local failure streak (§7, #34) and
+// the status file's staleness window, which is five ticks (§9, #37). A design
+// that carried two of them would be answering the same question twice and
+// inviting the two answers to drift.
+//
+// It is a count rather than a duration, and it lives here because it is the
+// other half of the same table: five runs is five wake-ups, so what it actually
+// measures is five ticks of elapsed time — long enough that a transient loss
+// has had every chance to clear, and short enough that a human is told inside
+// five minutes rather than at leisure.
+const persistenceThreshold = 5
+
 // cadence is when the sync loop wakes, and whether the run it wakes for may
 // commit.
 //

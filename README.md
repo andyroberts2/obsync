@@ -78,12 +78,22 @@ comment. And after obsync writes an incoming change into your vault, it checks
 that the vault holds the tree it meant to put there: a tree it cannot account
 for is anchored at a ref for you to look at, and obsync stops rather than
 pushing it — the one refusal that survives a restart, and the one you clear
-yourself. The **declared surface** — everything a version number will make a
-promise about — is written down ahead of the code that implements it.
+yourself. And when the disk itself goes wrong, obsync finds out by working
+rather than by scanning: it never runs `git fsck`, because every run already
+reads exactly the objects it depends on, and a corrupt object announces itself
+the moment something needs it. git's exit status cannot tell a rotted object
+from a locked index, so time decides instead — five sync runs in a row whose
+local half failed, and obsync discards the one piece of repository state that
+holds no history, `.git/index`, and builds it again from HEAD. If the run after
+that fails too it stops, tells you the command that failed, git's own words, and
+how much room is left on the disk when there is almost none, and then retries
+one read-only `git status` a tick until the repository reads again. It repairs
+nothing else and never re-clones. The **declared surface** — everything a
+version number will make a promise about — is written down ahead of the code
+that implements it.
 
-Not yet: the damaged-repo freeze, push dispositions, the attention note, the
-status file and the container image. obsync is not something to point at a vault
-yet.
+Not yet: push dispositions, the attention note, the status file and the
+container image. obsync is not something to point at a vault yet.
 
 ## What obsync will never do
 
@@ -167,7 +177,9 @@ pays nothing for that copy — it is a blob it already holds, at a second path �
 but the vault volume carries the file **twice**, until you resolve the conflict
 and delete the copy. For notes that is kilobytes. For a 90MB video edited in two
 places it is 90MB, once for every such file in the merge. obsync does not check
-free space before it writes, and there is no setting for a disk threshold.
+free space before it writes, and there is no setting for a disk threshold — it
+reads free space only once a local git has already failed, and then only to tell
+you how much is left.
 
 ## Documentation
 

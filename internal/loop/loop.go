@@ -12,11 +12,14 @@
 // behind, merge what has genuinely diverged out of tree so that both sides
 // survive unless a ceiling says a human should look first, check that the vault
 // holds the tree it just applied, and push (#24, #27, #28, #29, #30, #31, #32,
-// #33).
+// #33, #34).
 //
 // The interlocks come first and everything after them is a thing obsync does to
 // a vault they said it may (§7). What a failure then *means* is tier.go: three
-// tiers, a closed list, and the one place a run's outcome is reported.
+// tiers, a closed list, and the one place a run's outcome is reported. What a
+// run of them means is the local failure streak, which is the only thing here
+// permitted to call a failure permanent — because it is the only thing that
+// measures time, and time is the classifier (§7, #34).
 //
 // When it turns is cadence.go: the quiet window, the max-wait cap, the jittered
 // tick and the network backoff, none of which is a knob (#25).
@@ -27,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/andyroberts2/obsync/internal/clock"
@@ -63,15 +67,19 @@ type Loop struct {
 	lastPush       time.Time
 
 	// frozen is the full freeze obsync is in, or empty, and networkFrozen the
-	// network freeze. The first has twelve causes — the nine gates and the
+	// network freeze. The first has thirteen causes — the nine gates and the
 	// vault sentinel (§7), a remote holding refs but not the tracked branch,
-	// and HEAD moving off the tracked branch (§3) — and the second four: an
-	// upstream rewrite, and each of §4's three ways a merge stops rather than
-	// being improvised into a commit. Write-verify failing (#33) adds no
-	// thirteenth cause: it is gate 9's own freeze, reached from the run that
-	// wrote the ref rather than from the ref, which is what makes the two one
-	// state rather than two (§9). The one §7 still names and this build does
-	// not have is the local failure streak reaching five (#34).
+	// HEAD moving off the tracked branch (§3), and the local failure streak
+	// reaching five (#34) — and the second four: an upstream rewrite, and each
+	// of §4's three ways a merge stops rather than being improvised into a
+	// commit. Write-verify failing (#33) adds no cause of its own: it is gate
+	// 9's freeze, reached from the run that wrote the ref rather than from the
+	// ref, which is what makes the two one state rather than two (§9).
+	//
+	// Twelve of the thirteen self-clear by re-checking a fact. The thirteenth
+	// is the honest exception §7 names rather than papers over: a streak is a
+	// fact about history, so the damage freeze self-clears by retrying the
+	// work, which is the probe.
 	//
 	// They are two fields rather than one tier because they are two live
 	// states rather than one classification: a vault can be in both at once,
@@ -122,6 +130,26 @@ type Loop struct {
 	// In-memory and process-lifetime only, deliberately: a restart restarts the
 	// clock, which is acceptable for a warning that is not a gate.
 	unsettled map[string]unsettledPath
+
+	// localFailureStreak is how many sync runs in a row have had their local
+	// half fail, whatever the stated reason (§7, #34). It is the only thing in
+	// obsync permitted to conclude that a failure is permanent, because it is
+	// the only thing that measures time: damage is permanent and bad luck is
+	// not, and git's exit status cannot tell them apart — a corrupt object, a
+	// zero-length one, a missing one and a truncated index all exit 128, which
+	// is also what a bad revision and a locked index exit.
+	//
+	// Runs, not commands: one run failing three commands over the same damaged
+	// object is one piece of evidence. It is reset by any run whose local half
+	// completes, and a run that never ran its local half is neither — the
+	// command that would have found the damage was not run, so that run is
+	// evidence of nothing.
+	//
+	// In-memory and process-lifetime only, like the two records above. A
+	// restart restarts the count, which is right rather than merely tolerable:
+	// the streak's whole content is "obsync has tried five times", and a
+	// process that has just started has not.
+	localFailureStreak int
 }
 
 // unsettledPath is one path the settle guard is excluding: when obsync first
@@ -507,6 +535,18 @@ const (
 	// ceiling — the one blob a merge can invent, and so the only route through
 	// the merge path to bytes the remote has never accepted.
 	freezeMergedTreeOverTheCeiling = "merged tree over the size ceiling"
+
+	// freezeDamagedRepo is the local failure streak having reached five and the
+	// run after the index rebuild having failed too (§7, #34). It is the one
+	// full freeze that is not a conclusive fact about now — it is the
+	// conclusion time draws from a run of them — and the one that clears by
+	// retrying the work rather than by re-checking anything.
+	//
+	// It is named for the thing an operator has to deal with rather than for
+	// the counter that established it: what the evidence says is that the
+	// repository is damaged, and the fact obsync writes beside it is the count,
+	// the argv and git's own words.
+	freezeDamagedRepo = "the vault's repository is damaged"
 )
 
 // perform is the body of a sync run: what changed, one commit, one push.
@@ -521,12 +561,38 @@ func (l *Loop) perform(ctx context.Context, committing bool) error {
 	// sentinel are re-checked here on every run, which is what makes a frozen
 	// obsync keep ticking and doing nothing else — and what makes repairing
 	// the cause release it within a tick, with no restart.
+	//
+	// Everything from here to the network half is the run's local half: the
+	// part that touches only the vault and its `.git` (CONTEXT.md). A failure
+	// in any of it is one run of the local failure streak, whatever it was —
+	// which is what localFailed is for, and why it is written at each of those
+	// sites rather than inferred from an error at the end. A freeze is not one
+	// of them: it is obsync refusing to touch the vault rather than obsync
+	// failing to, and it says its own fact and clears by its own rule.
 	failing, err := l.repo.Refusing()
 	if err != nil {
-		return err
+		return l.localFailed(err)
 	}
 	if failing != nil {
 		return l.freeze(failing.Interlock, failing.Fact, failing.Remedy)
+	}
+
+	// A damaged repository is the one freeze with no fact to re-check, because
+	// what put obsync here is not something it can look up: it is five runs'
+	// worth of the work failing. So the rest of the run is one read-only probe
+	// — `git status`, which writes nothing — and the probe succeeding is the
+	// whole of the way out (§7, #34).
+	//
+	// It sits below the interlocks rather than above them, and that is the
+	// reading of two sentences together rather than a preference. §7 says gates
+	// 2-7 and 9 are re-checked at the top of *every* sync run, and it says a
+	// frozen obsync runs exactly one read-only probe per tick — which is a
+	// statement about the probe's cadence, not a licence to stop looking at the
+	// vault. So a mount that drops while obsync is damage-frozen is still said,
+	// and this stays the one thing in the design that is not re-checked because
+	// it cannot be.
+	if l.frozen == freezeDamagedRepo {
+		return l.probeTheDamage()
 	}
 
 	// The index lock is asked next: it is not a gate — nothing is wrong with
@@ -534,7 +600,19 @@ func (l *Loop) perform(ctx context.Context, committing bool) error {
 	// changes anything, and asking here is what keeps that an aborted run
 	// rather than a `git add` failing with git's everything-code (§7).
 	if err := l.repo.IndexLocked(); err != nil {
-		return err
+		return l.localFailed(err)
+	}
+
+	// obsync can find itself with no index at all, and git reads a missing one
+	// as an empty one. The rebuild at five discards the index and asks git to
+	// write it back, and a repository too damaged to answer leaves nothing
+	// there — so this is asked before either half, because a run against an
+	// empty index would publish the deletion of every path obsync did not
+	// stage. git.RestoreIndexIfMissing is where that is argued, and it is
+	// asked after the index lock because a lock somebody else holds is what
+	// would stop obsync writing one back.
+	if err := l.repo.RestoreIndexIfMissing(); err != nil {
+		return l.localFailed(err)
 	}
 
 	// HEAD is asked before anything is committed, because a commit is what
@@ -554,7 +632,7 @@ func (l *Loop) perform(ctx context.Context, committing bool) error {
 		if errors.As(err, &detached) {
 			return l.freeze(detached.Interlock, detached.Fact, detached.Remedy)
 		}
-		return err
+		return l.localFailed(err)
 	}
 	if head != l.repo.TrackedBranch() {
 		return l.freeze(freezeHeadOffTrackedBranch,
@@ -574,11 +652,171 @@ func (l *Loop) perform(ctx context.Context, committing bool) error {
 			// A local half that failed stops the whole run rather than pushing
 			// on with the network one: an aborted run is a pass, not a half
 			// (§7). Which tier it was is report's, from the closed table.
-			return err
+			return l.localFailed(err)
 		}
+		// The one place the streak is reset, and it is deliberately not "the
+		// run got this far": it is the run having asked git what changed and
+		// committed what it found, which is the work the damage stops (§7).
+		l.localCompleted()
 	}
 	return l.networkHalf(ctx)
 }
+
+// localFailed counts one run of the local failure streak and escalates it when
+// it has gone on long enough to stop being bad luck (§7, #34).
+//
+// Three things happen in a fixed order:
+//
+//   - every local failure is counted, whatever the stated reason, and labelled
+//     — with what git's own prose looks like, and with free space when there is
+//     almost none. Both labels change what a human reads and nothing else;
+//   - at five, obsync discards and rebuilds the index and lets the run be
+//     reported as the failure it was. **Unconditionally**, and not because a
+//     stderr matched an index error: letting prose choose an *action* is the
+//     line this design does not cross, and the rebuild is safe whether or not
+//     the index was the problem, because the index holds no history;
+//   - the run after that one is the "one more run" §7 asks for. If it fails
+//     too, the streak is six, waiting is no longer a theory anyone believes,
+//     and obsync freezes.
+//
+// Five is the persistence threshold, and the reason for the number lives beside
+// it in cadence.go rather than being restated here.
+func (l *Loop) localFailed(err error) error {
+	l.localFailureStreak++
+	said := l.whatItLooksLike(err)
+	labelled := err
+	if said != "" {
+		labelled = fmt.Errorf("%w — %s", err, said)
+	}
+	switch {
+	case l.localFailureStreak < persistenceThreshold:
+		return labelled
+	case l.localFailureStreak == persistenceThreshold:
+		l.rebuildTheIndex(labelled)
+		return labelled
+	}
+	return l.freeze(freezeDamagedRepo, l.damageFact(err, said), damagedRepoRemedy)
+}
+
+// localCompleted is a run whose local half completed, which is the whole of
+// what resets the streak — obsync went back to the vault and the work it does
+// there worked (§7).
+//
+// It clears the freeze too, though nothing reaches here while the freeze
+// stands: the probe is the only thing a frozen run does. It is written as a
+// pair with the counter rather than left to the probe alone so that the count
+// and the freeze can never disagree about whether obsync is in trouble.
+func (l *Loop) localCompleted() {
+	l.localFailureStreak = 0
+	l.thawed(freezeDamagedRepo)
+}
+
+// rebuildTheIndex discards `.git/index` and builds it back from HEAD, and says
+// what that cost.
+//
+// The invariant it stands on is stated where it acts, in git.RebuildIndex:
+// obsync may discard derived state; it never discards history. What is said
+// here is the half of that a human pays — anything they had staged and not
+// committed is no longer staged — because a cost obsync does not mention is one
+// it hid.
+//
+// WARN rather than ERROR: it is true, advisory, and nobody has to do anything
+// about it (§9). It is said once per streak, because the rebuild happens once
+// per streak.
+//
+// A rebuild that fails is said at debug and nothing more. It is not a fact
+// obsync acts on, and it is not a second failure to report: the run it belongs
+// to has already failed and been counted, and the run after it is the one that
+// decides. Freezing here instead would be obsync escalating on a repair rather
+// than on the work, which is the wrong evidence.
+func (l *Loop) rebuildTheIndex(failed error) {
+	if err := l.repo.RebuildIndex(); err != nil {
+		l.log.Debug("obsync could not rebuild the vault's index, and the next run decides",
+			"problem", err)
+		return
+	}
+	l.log.Warn("obsync's local half has failed enough sync runs in a row to stop looking "+
+		"transient, so obsync has discarded the vault's .git/index and built it again from HEAD "+
+		"— the one piece of repository state "+
+		"obsync may throw away, because it holds no history. Anything you had staged and not "+
+		"committed is no longer staged; every file is untouched on disk, and the next run commits "+
+		"them like any other change",
+		"streak", l.localFailureStreak, "problem", failed)
+}
+
+// probeTheDamage is all a sync run does once the interlocks have been asked and
+// the damage freeze is standing: one read-only `git status`, and none of the
+// work a run would otherwise do (§7).
+//
+// The probe succeeding releases the freeze, and that is the only way out of it
+// — there is no gate to re-check, because what put obsync here was five runs of
+// the work failing rather than a fact about now. The run ends there rather than
+// carrying on into the one it would have been: the next tick starts a whole run
+// from the interlocks down, against a repository obsync has only just found it
+// can read again.
+//
+// A probe that fails says so at debug alone. State entry is said exactly once
+// (§9), and a freeze that is still standing is not news once a tick.
+func (l *Loop) probeTheDamage() error {
+	if err := l.repo.Probe(); err != nil {
+		l.log.Debug("the probe found the vault's repository still unreadable", "problem", err,
+			"streak", l.localFailureStreak)
+		return errFullFrozen
+	}
+	l.localCompleted()
+	return nil
+}
+
+// damageFact is the conclusive-looking sentence a freeze carries, and here it
+// is deliberately an account of evidence rather than of a fact: the count of
+// runs, the argv that failed, git's own first line of stderr, what that prose
+// looks like, and free space when there is almost none (§9).
+//
+// The argv and the stderr are carried because the operator's next move is to
+// run that command themselves, and a bug report carrying them is one a
+// maintainer can act on. Neither decides anything here.
+func (l *Loop) damageFact(err error, said string) string {
+	fact := "obsync's local half has failed " + strconv.Itoa(l.localFailureStreak) +
+		" sync runs in a row, and rebuilding the vault's index did not help. The last failure " +
+		"was: " + err.Error()
+	if said != "" {
+		fact += " — " + said
+	}
+	return fact
+}
+
+// whatItLooksLike is everything obsync adds to a local failure's own words: git
+// naming the failure, and how much room is left where the repository lives.
+//
+// Both are labels. git's words may name a failure and only persistence may
+// escalate one (§7), and statfs labels and never gates — there is no free-space
+// gate anywhere in obsync, and no threshold to configure.
+func (l *Loop) whatItLooksLike(err error) string {
+	said := git.LooksLike(err)
+	free := l.repo.FreeSpaceIfLow()
+	switch {
+	case said != "" && free != "":
+		return said + ", and " + free
+	case said != "":
+		return said
+	}
+	return free
+}
+
+// damagedRepoRemedy is what a human does about a damaged repository, and every
+// clause of it is a place obsync deliberately declined to act (§7, §11).
+//
+// obsync ships no `recover` subcommand and performs no repair beyond the index,
+// so the recipe is the human's — and it opens by telling them not to delete the
+// thing their unpushed commits are still in, because that is the reflex this
+// costs the most.
+const damagedRepoRemedy = "keep the old .git rather than deleting it: the commits obsync had not " +
+	"pushed yet are in it and may still be recoverable, which is exactly why obsync never " +
+	"re-clones or repairs a repository by replacing it. Clone the remote beside the vault, move " +
+	"its .git into place, and check what git says. obsync has already rebuilt the index, which " +
+	"is the only repository state it may discard; everything else is history and is yours. " +
+	"docs/operations.md has the recipe. While this stands obsync runs one read-only `git status` " +
+	"a tick and nothing else, and starts syncing again the moment that succeeds" + git.SelfClearing
 
 // untrackChurnSubset is the one-shot that takes the workspace churn and OS
 // cruft out of a vault whose history already carries them (§5), and reports

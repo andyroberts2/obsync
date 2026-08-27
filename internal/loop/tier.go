@@ -58,9 +58,10 @@ const (
 // gate 9's own freeze, established by the run that writes the ref and re-read
 // by every run afterwards, so the two are one state rather than two rows that
 // could disagree. Plus HEAD moving off the tracked branch, a merge state
-// appearing mid-run (gate 4), `.git` disappearing (gate 2), and the remote
-// holding refs but not the tracked branch. The local failure streak reaching
-// five is §7's last member and is #34's.
+// appearing mid-run (gate 4), `.git` disappearing (gate 2), the remote holding
+// refs but not the tracked branch, and the local failure streak reaching five
+// (#34) — which arrives here as `errFullFrozen` like every other freeze,
+// because it is entered where its evidence is counted.
 var tiers = []struct {
 	is   error
 	tier tier
@@ -78,11 +79,18 @@ var tiers = []struct {
 // tierOf sorts a failure into its tier, and answers false for one with no row.
 //
 // A failure with no row is not a fourth tier and is not silently treated as
-// one: it is a git that failed for a reason obsync has no rule for, which is
-// what the local failure streak counts, and five of them in a row is the full
-// freeze §7 already names (#34, unbuilt). Until then it is reported as what it
-// is — a run that failed — rather than being quietly sorted into the tier that
-// says nothing.
+// one: it is a git that failed for a reason obsync has no rule for, and it is
+// reported as exactly that — a run that failed — rather than being quietly
+// sorted into the tier that says nothing.
+//
+// It is not what decides the local failure streak, and the two are worth
+// keeping apart. The streak counts a run whose *local half* failed whatever the
+// stated reason (§7), which is a fact about where the failure happened rather
+// than about whether this table has a row for it: an `index.lock` somebody else
+// holds for five runs running has a row and is still five runs of obsync not
+// being able to work in the vault, and a push that failed has no row and is not
+// the local half at all. So the streak is counted at the sites in perform that
+// are the local half, and this table goes on saying only what a failure means.
 func tierOf(err error) (tier, bool) {
 	var failing *git.InterlockFailure
 	if errors.As(err, &failing) {
