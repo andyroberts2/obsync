@@ -351,7 +351,10 @@ func (r *Repo) trackedBranchResolves() (*InterlockFailure, error) {
 //
 // obsync attempts no corrective action: a tool that has just proved it cannot
 // apply a tree correctly is the last thing that should try again unsupervised.
-// Nothing here writes the ref; that is write-verify's, and it is #33's.
+// Nothing here writes the ref; that is write-verify's, in verify.go. This is the
+// same freeze under the same name, which is what makes the run that establishes
+// the fact and every run that re-reads it one state an operator is told about
+// once (§9).
 func (r *Repo) noFailedApplyAnchor() (*InterlockFailure, error) {
 	if _, err := r.run(invocation{
 		dir:  r.vault,
@@ -367,13 +370,20 @@ func (r *Repo) noFailedApplyAnchor() (*InterlockFailure, error) {
 		Interlock: freezeFailedApplyAnchor,
 		Fact: "the repository holds " + FailedApplyAnchor + ", so a tree obsync applied to the " +
 			"vault was not the tree it had computed",
-		Remedy: "this is the one freeze a restart cannot clear, and the one you clear yourself. " +
-			FailedApplyAnchor + " holds the tree obsync meant to apply, kept so that a later gc " +
-			"cannot prune the one artifact that explains it; compare it against your vault, " +
-			"recover what you need, and delete the ref with `git update-ref -d " +
-			FailedApplyAnchor + "`. obsync attempts no repair of its own" + SelfClearing,
+		Remedy: failedApplyRemedy,
 	}, nil
 }
+
+// failedApplyRemedy is what a human does about the write-verify freeze, and it
+// is one sentence in one place because gate 9 and write-verify are one freeze:
+// write-verify establishes the fact and writes the ref, and gate 9 re-reads
+// that ref on every run afterwards. Two spellings of one remedy would read to
+// an operator as two different freezes with the same name.
+const failedApplyRemedy = "this is the one freeze a restart cannot clear, and the one you clear " +
+	"yourself. " + FailedApplyAnchor + " holds the tree obsync meant to apply, kept so that a " +
+	"later gc cannot prune the one artifact that explains it; compare it against your vault, " +
+	"recover what you need, and delete the ref with `git update-ref -d " + FailedApplyAnchor +
+	"`. obsync attempts no repair of its own" + SelfClearing
 
 // FailedApplyAnchor is the ref holding the tree obsync computed but could not
 // verify. It sits outside refs/heads/ and is never pushed, and it is an owned

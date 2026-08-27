@@ -984,8 +984,10 @@ func (r *Repo) applyMerge(commit string) error {
 	if err := r.refuseWhileTheVaultIsWritten(touched); err != nil {
 		return err
 	}
-	_, err = r.run(invocation{dir: r.vault, args: []string{"reset", "--keep", "--quiet", commit}})
-	return err
+	if _, err = r.run(invocation{dir: r.vault, args: []string{"reset", "--keep", "--quiet", commit}}); err != nil {
+		return err
+	}
+	return r.writeVerify(commit, touched)
 }
 
 // ErrConflictOutsideTheTable is a conflict §4's closed table has no row for.

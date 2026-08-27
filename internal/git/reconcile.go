@@ -317,11 +317,13 @@ func (r *Repo) fastForward(tip string) error {
 	// --ff-only, so this can only ever be the transition git can make without
 	// writing a commit: obsync's merge of two histories that really did diverge
 	// is computed out of tree (§4, #30) and never by this command.
-	_, err = r.run(invocation{
+	if _, err = r.run(invocation{
 		dir:  r.vault,
 		args: []string{"merge", "--ff-only", "--quiet", tip},
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	return r.writeVerify(tip, touched)
 }
 
 // refuseWhileTheVaultIsWritten abandons the run rather than letting an incoming
