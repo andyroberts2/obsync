@@ -74,12 +74,16 @@ cause is repaired — no restart, and obsync never exits, because a crash-loopin
 container buries the one message that matters. The one that matters most is
 `.obsidian/`: its absence means the vault is not there, and any amount of note
 deletion with it intact is you editing your vault, which obsync syncs without
-comment. The **declared surface** — everything a version number will make a
+comment. And after obsync writes an incoming change into your vault, it checks
+that the vault holds the tree it meant to put there: a tree it cannot account
+for is anchored at a ref for you to look at, and obsync stops rather than
+pushing it — the one refusal that survives a restart, and the one you clear
+yourself. The **declared surface** — everything a version number will make a
 promise about — is written down ahead of the code that implements it.
 
-Not yet: write-verify, the damaged-repo freeze, push dispositions, the attention
-note, the status file and the container image. obsync is not something to point
-at a vault yet.
+Not yet: the damaged-repo freeze, push dispositions, the attention note, the
+status file and the container image. obsync is not something to point at a vault
+yet.
 
 ## What obsync will never do
 

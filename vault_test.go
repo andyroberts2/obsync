@@ -1505,6 +1505,30 @@ func (e *vaultEnv) remoteTip() string {
 	return strings.TrimSpace(e.mustGit(e.remote, "rev-parse", "refs/heads/main"))
 }
 
+// vaultRef is what a ref in the vault names, or "" when the vault does not hold
+// it. It is how the failed-apply anchor is asserted on: the anchor is a ref
+// obsync writes and a human deletes, so both its presence and its absence are
+// observable state rather than something a test has to ask obsync about (§7).
+func (e *vaultEnv) vaultRef(ref string) string {
+	e.t.Helper()
+
+	out, exit := e.git(e.vault, "rev-parse", "--verify", "--quiet", ref)
+	if exit != 0 {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// obsyncRefsOnTheRemote is every ref under refs/obsync/ the remote holds, which
+// is the assertion behind "the anchor sits outside refs/heads/ and is never
+// pushed": obsync's refspec is one branch in each direction, so a ref of its
+// own can never travel (§3, §7).
+func (e *vaultEnv) obsyncRefsOnTheRemote() []string {
+	e.t.Helper()
+
+	return strings.Fields(e.mustGit(e.remote, "for-each-ref", "--format=%(refname)", "refs/obsync/"))
+}
+
 // remoteBranches is every branch the remote holds, which is how "obsync pushes
 // straight to the tracked branch — no device branch" is asserted: the absence
 // of a second branch rather than the presence of the first.

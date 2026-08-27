@@ -10,8 +10,9 @@
 // take out the paths it refuses to commit and the ones still being written,
 // commit the rest as one commit, fetch, classify, fast-forward what is only
 // behind, merge what has genuinely diverged out of tree so that both sides
-// survive unless a ceiling says a human should look first, and push (#24, #27,
-// #28, #29, #30, #31, #32).
+// survive unless a ceiling says a human should look first, check that the vault
+// holds the tree it just applied, and push (#24, #27, #28, #29, #30, #31, #32,
+// #33).
 //
 // The interlocks come first and everything after them is a thing obsync does to
 // a vault they said it may (§7). What a failure then *means* is tier.go: three
@@ -66,9 +67,11 @@ type Loop struct {
 	// vault sentinel (§7), a remote holding refs but not the tracked branch,
 	// and HEAD moving off the tracked branch (§3) — and the second four: an
 	// upstream rewrite, and each of §4's three ways a merge stops rather than
-	// being improvised into a commit. The two §7 still names and this build
-	// does not have are write-verify failing (#33) and the local failure
-	// streak reaching five (#34).
+	// being improvised into a commit. The thirteenth cause of a full freeze is
+	// write-verify failing (#33), which is gate 9's own freeze arriving from
+	// the run that established it rather than from the ref. The one §7 still
+	// names and this build does not have is the local failure streak reaching
+	// five (#34).
 	//
 	// They are two fields rather than one tier because they are two live
 	// states rather than one classification: a vault can be in both at once,
@@ -958,7 +961,27 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 	}
 
 	reconciled, err := l.repo.Reconcile(ctx)
+	var failing *git.InterlockFailure
 	switch {
+	case errors.As(err, &failing):
+		// Write-verify: obsync applied a tree it had computed and the vault
+		// does not hold it, so it can no longer trust its own view of the vault
+		// (§7, #33). It is a full freeze rather than a network one — obsync
+		// stops committing too, because the thing it would be committing is a
+		// tree it cannot account for — and it is the one freeze a restart
+		// cannot clear, because the fact it is keyed on is the ref write-verify
+		// has already written.
+		//
+		// The backoff is deliberately left where it is: nothing here is a fact
+		// about the remote, and the remote answered every question this run
+		// asked it.
+		//
+		// It is matched by type rather than by name, which is the same way the
+		// tier table sorts an interlock: this is where the network half meets
+		// the full-freeze tier at all, and §7 puts more than write-verify in it
+		// — a merge state appearing mid-run and `.git` disappearing are both
+		// facts a run can establish after the interlocks were asked.
+		return l.freeze(failing.Interlock, failing.Fact, failing.Remedy)
 	case errors.Is(err, git.ErrUpstreamRewrite):
 		return l.networkFreeze(freezeUpstreamRewrite,
 			"the remote no longer holds the commit obsync last saw at the tip of "+

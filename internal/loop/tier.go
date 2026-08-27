@@ -53,11 +53,14 @@ const (
 // **Full freeze.** Any of the nine gates and the vault sentinel, which arrive
 // as a `*git.InterlockFailure` and are matched by type rather than by row —
 // there are ten of them, they are one kind of fact, and a table listing them
-// twice is a table that can disagree with itself. Plus HEAD moving off the
-// tracked branch, a merge state appearing mid-run (gate 4), `.git` disappearing
-// (gate 2), and the remote holding refs but not the tracked branch. Write-verify
-// failing and the local failure streak reaching five are §7's last two members
-// and are #33's and #34's.
+// twice is a table that can disagree with itself. Write-verify failing arrives
+// the same way and is the reason the type match is worth more than a row: it is
+// gate 9's own freeze, established by the run that writes the ref and re-read
+// by every run afterwards, so the two are one state rather than two rows that
+// could disagree. Plus HEAD moving off the tracked branch, a merge state
+// appearing mid-run (gate 4), `.git` disappearing (gate 2), and the remote
+// holding refs but not the tracked branch. The local failure streak reaching
+// five is §7's last member and is #34's.
 var tiers = []struct {
 	is   error
 	tier tier
