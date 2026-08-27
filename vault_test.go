@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1110,17 +1112,113 @@ func (e *vaultEnv) commitsOnBranchYet(dir, branch string) string {
 func (e *vaultEnv) remoteCommit(path, content string) {
 	e.t.Helper()
 
+	e.onTheLaptop(func(laptop string) {
+		full := filepath.Join(laptop, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			e.t.Fatalf("creating the folder for %q on the laptop: %v", path, err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			e.t.Fatalf("writing %q on the laptop: %v", path, err)
+		}
+	})
+}
+
+// onTheLaptop is the other device doing whatever the test needs to its own
+// clone, and pushing the result as one commit. Writing a note is the common
+// case and has its own helper above; deleting one, renaming one, or putting a
+// folder where the vault has a file are the acts §4's conflict table is written
+// in terms of, and each is a line of ordinary git in a human's own repo.
+func (e *vaultEnv) onTheLaptop(act func(laptop string)) {
+	e.t.Helper()
+
 	laptop := e.laptopUpToDate()
-	full := filepath.Join(laptop, path)
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		e.t.Fatalf("creating the folder for %q on the laptop: %v", path, err)
-	}
-	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-		e.t.Fatalf("writing %q on the laptop: %v", path, err)
-	}
+	act(laptop)
 	e.mustGit(laptop, "add", "-A")
 	e.mustGit(laptop, e.asAHuman("commit", "--quiet", "-m", "written on the laptop")...)
 	e.mustGit(laptop, "push", "--quiet", "file://"+e.remote, "refs/heads/main:refs/heads/main")
+}
+
+// renameNote is what a human does in Obsidian when they rename a note: the
+// bytes move to a new name, and nothing tells git about it beforehand.
+func (e *vaultEnv) renameNote(from, to string) {
+	e.t.Helper()
+
+	full := filepath.Join(e.vault, to)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		e.t.Fatalf("creating the folder for %q: %v", to, err)
+	}
+	if err := os.Rename(filepath.Join(e.vault, from), full); err != nil {
+		e.t.Fatalf("renaming %q to %q: %v", from, to, err)
+	}
+}
+
+// conflictCopies is every conflict copy in the vault, found the way a human
+// finds one and the way the attention note will (§4): by the filename pattern,
+// which is the whole of the recovery state. Vault-relative and sorted, so a
+// test reads the same list every run.
+func (e *vaultEnv) conflictCopies() []string {
+	e.t.Helper()
+
+	var found []string
+	err := filepath.WalkDir(e.vault, func(entry string, info fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(e.vault, entry)
+		if err != nil {
+			return err
+		}
+		if relative == ".git" {
+			return fs.SkipDir
+		}
+		if !info.IsDir() && strings.Contains(relative, "(obsync conflict ") {
+			found = append(found, filepath.ToSlash(relative))
+		}
+		return nil
+	})
+	if err != nil {
+		e.t.Fatalf("looking for conflict copies in the vault: %v", err)
+	}
+	sort.Strings(found)
+	return found
+}
+
+// theConflictCopy is the one copy a test expected obsync to write, and fails
+// naming what it found instead.
+func (e *vaultEnv) theConflictCopy() string {
+	e.t.Helper()
+
+	copies := e.conflictCopies()
+	if len(copies) != 1 {
+		e.t.Fatalf("the vault holds %d conflict copies (%v), want exactly one. obsync said:\n%s",
+			len(copies), copies, e.log.String())
+	}
+	return copies[0]
+}
+
+// remoteTree is every path the remote's tip holds, sorted — the whole of what a
+// fresh clone would arrive with.
+func (e *vaultEnv) remoteTree() []string {
+	e.t.Helper()
+
+	out := e.mustGit(e.remote, "ls-tree", "-r", "-z", "--name-only", "refs/heads/main")
+	paths := strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
+	sort.Strings(paths)
+	return paths
+}
+
+// mergeParents is how many parents the remote's tip commit has. A merge that
+// kept both sides has two, which is what makes it a merge rather than obsync
+// having picked one.
+func (e *vaultEnv) mergeParents() int {
+	e.t.Helper()
+	e.stop()
+
+	out := strings.TrimSpace(e.mustGit(e.remote, "log", "-1", "--format=%P", "refs/heads/main"))
+	if out == "" {
+		return 0
+	}
+	return len(strings.Fields(out))
 }
 
 // remotePurgesItsTip is the operator who force-pushed to purge a leaked secret:

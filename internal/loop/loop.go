@@ -8,10 +8,11 @@
 //
 // What a run does in this build: ask git what changed, take out the paths it
 // refuses to commit and the ones still being written, commit the rest as one
-// commit, fetch, classify, fast-forward what is only behind, and push what is
-// only ahead (#24, #27, #28, #29). Everything that will later stand between
-// those steps — the gates (#32) and the out-of-tree merge a real divergence
-// needs (#30) — is a rule added to a loop that already turns.
+// commit, fetch, classify, fast-forward what is only behind, merge what has
+// genuinely diverged out of tree so that both sides survive, and push (#24,
+// #27, #28, #29, #30). Everything that will later stand between those steps —
+// the gates (#32) and the two merge ceilings (#31) — is a rule added to a loop
+// that already turns.
 //
 // When it turns is cadence.go: the quiet window, the max-wait cap, the jittered
 // tick and the network backoff, none of which is a knob (#25).
@@ -541,6 +542,27 @@ func (l *Loop) reportRefusals(refused []vault.Refusal) {
 	}
 }
 
+// reportConflictCopies says what the keep-both rule kept, once per copy as it
+// is written (§9's WARN row).
+//
+// WARN rather than INFO because it is true, self-healing and advisory: nothing
+// is broken, nothing is lost, and there is one thing for the human to do at
+// their own pace. It is said once because a copy is written once — the standing
+// signal is the attention note's second section (#38), which is derived from
+// the vault by the filename pattern rather than from anything obsync remembers.
+//
+// A conflict is never an unhealthy check either: under the keep-both rule a
+// conflict is normal operation, and reserving unhealthy for freezes keeps that
+// signal meaning "a human must act" (§9).
+func (l *Loop) reportConflictCopies(copies []git.ConflictCopy) {
+	for _, written := range copies {
+		l.log.Warn("both sides changed this note, so obsync kept both: your version is untouched at "+
+			"its own path and the remote's is beside it, byte for byte. Edit the two together and "+
+			"delete the copy — that is the whole of it, and the ordinary loop commits it",
+			"path", written.Of, "conflict_copy", written.Path)
+	}
+}
+
 // errStageVerify is a path that moved on disk between the settle guard's second
 // sample and obsync's `git add` — the third writer, whose writes no sampling
 // window can anticipate (§6).
@@ -798,7 +820,7 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 		return err
 	}
 
-	state, err := l.repo.Reconcile(ctx)
+	reconciled, err := l.repo.Reconcile(ctx)
 	switch {
 	case errors.Is(err, git.ErrUpstreamRewrite):
 		l.networkFreeze(freezeUpstreamRewrite,
@@ -855,7 +877,7 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 	}
 	l.networkSucceeded()
 
-	switch state {
+	switch reconciled.State {
 	case git.Ahead:
 		return l.push(ctx, now)
 	case git.Equal:
@@ -869,15 +891,13 @@ func (l *Loop) networkHalf(ctx context.Context) error {
 		l.log.Info("the vault caught up with the remote", "branch", l.repo.TrackedBranch())
 	case git.Diverged:
 		// Both sides moved, which is the designed-for case rather than an
-		// anomaly — and the out-of-tree merge that keeps both is #30's. Until
-		// it lands obsync holds its commits locally rather than pushing them:
-		// the push could only be refused, since every write to the remote is a
-		// fast-forward or it does not happen (§3).
-		//
-		// Not in step, deliberately: the fetch was fine, and obsync still
-		// cannot publish, which is exactly the state the churn one-shot waits
-		// out rather than making a structural commit into.
-		l.log.Debug("the vault and the remote have both changed", "branch", l.repo.TrackedBranch())
+		// anomaly. The merge already happened, out of tree and in one commit
+		// carrying whatever conflict copies the keep-both rule needed (§4), so
+		// what is left is to publish it.
+		l.reportConflictCopies(reconciled.ConflictCopies)
+		l.log.Info("the vault and the remote had both changed and were merged, keeping both sides",
+			"branch", l.repo.TrackedBranch(), "conflict_copies", len(reconciled.ConflictCopies))
+		return l.push(ctx, now)
 	}
 	// Equal, or reconciled: a run that changed nothing says nothing, because
 	// docker logs --since 1h being empty is a designed signal (§9).

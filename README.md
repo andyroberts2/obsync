@@ -30,36 +30,41 @@ restart. Sync now runs both ways: every run fetches, works out how the vault
 and the remote stand, and fast-forwards the vault when someone else pushed —
 merged, never rebased. A remote whose history was rewritten underneath obsync
 is detected rather than merged, and stops the network half until a human says
-which history wins; both sides changing at once waits for the merge that keeps
-both. The loop keeps its own time too: it ticks every 60s so a change nothing
-reported still arrives, waits out an unreachable remote from 60s to 15 minutes
-while carrying on committing locally, and finishes the run in flight before it
-exits. And it is woken by the vault itself: obsync holds an inotify watch on
-every directory in it, kept in step as folders come and go, so an edit is
-committed ten seconds after the vault goes quiet rather than at the next tick —
-and every five minutes anyway while someone is still typing. The watch only ever
-wakes the loop and never says what changed, which is why a kernel with no
-watches left costs latency and nothing else: obsync says which sysctl to raise
-and falls back to its tick. obsync also knows what belongs in the repo and what
-does not: an ignore floor it writes into the repo's own exclude file keeps
-workspace churn, the trash and OS cruft out of every commit while the rest of
-`.obsidian/` is tracked, so a fresh clone is the same vault; your own
-`.gitignore` outranks that floor, except for plugin settings, which are where
-API keys live and which obsync refuses on the `git add` itself. A short closed
-list of credential-shaped filenames, and any file over the size ceiling, are
-never committed — skipped, said once, and never a reason to stop syncing
-everything else. And a file that is still being written is left out of *this*
-commit rather than committed in half: obsync samples each changed path twice a
-second apart and leaves out anything that moved, so a note caught mid-save or a
-40MB attachment still copying arrives whole on the next run instead of torn.
-Nothing waives that check, and an incoming change is never applied over a path
-being written at all. The **declared surface** — everything a version number
-will make a promise about — is written down ahead of the code that implements
-it.
+which history wins. When both sides changed at once, both survive: the merge is
+computed entirely outside the vault, so a conflicted state never exists in it
+and conflict markers never reach a note. Your version stays exactly where it is
+and the other side's lands beside it as an ordinary note named
+`Note (obsync conflict 2026-08-24 1403).md`, byte for byte, committed in the
+same commit — resolve it by editing the two together and deleting the copy, and
+the ordinary loop commits that like any other edit. The loop keeps its own time
+too: it ticks every 60s so a change nothing reported still arrives, waits out an
+unreachable remote from 60s to 15 minutes while carrying on committing locally,
+and finishes the run in flight before it exits. And it is woken by the vault
+itself: obsync holds an inotify watch on every directory in it, kept in step as
+folders come and go, so an edit is committed ten seconds after the vault goes
+quiet rather than at the next tick — and every five minutes anyway while someone
+is still typing. The watch only ever wakes the loop and never says what changed,
+which is why a kernel with no watches left costs latency and nothing else:
+obsync says which sysctl to raise and falls back to its tick. obsync also knows
+what belongs in the repo and what does not: an ignore floor it writes into the
+repo's own exclude file keeps workspace churn, the trash and OS cruft out of
+every commit while the rest of `.obsidian/` is tracked, so a fresh clone is the
+same vault; your own `.gitignore` outranks that floor, except for plugin
+settings, which are where API keys live and which obsync refuses on the
+`git add` itself. A short closed list of credential-shaped filenames, and any
+file over the size ceiling, are never committed — skipped, said once, and never
+a reason to stop syncing everything else. And a file that is still being
+written is left out of *this* commit rather than committed in half: obsync
+samples each changed path twice a second apart and leaves out anything that
+moved, so a note caught mid-save or a 40MB attachment still copying arrives
+whole on the next run instead of torn. Nothing waives that check, and an
+incoming change is never applied over a path being written at all. The
+**declared surface** — everything a version number will make a promise about —
+is written down ahead of the code that implements it.
 
-Not yet: the rest of the safety interlocks, conflicts, the attention note, the
-status file and the container image. obsync is not something to point at a vault
-yet.
+Not yet: the two merge ceilings, the rest of the safety interlocks, the
+attention note, the status file and the container image. obsync is not something
+to point at a vault yet.
 
 ## What obsync will never do
 

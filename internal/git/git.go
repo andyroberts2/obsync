@@ -320,6 +320,12 @@ type invocation struct {
 	dir   string
 	args  []string
 	stdin []byte
+	// env is what this one git needs in its environment that no other does,
+	// appended after the pins so that nothing here can displace them. The
+	// only member is GIT_INDEX_FILE, which is how the out-of-tree merge builds
+	// a tree without ever touching the index the human's own git shares
+	// (merge.go).
+	env []string
 	// deadline is set only on a network command, at networkDeadline. A local
 	// command leaves it zero and is never timed out, which is §1's asymmetry
 	// expressed as the absence of a timer rather than as a rule to remember.
@@ -343,7 +349,7 @@ func (r *Repo) run(inv invocation) ([]byte, error) {
 
 	cmd := exec.Command("git", inv.args...)
 	cmd.Dir = inv.dir
-	cmd.Env = r.env()
+	cmd.Env = append(r.env(), inv.env...)
 	// Its own process group, so that killing it kills git-remote-https and ssh
 	// with it rather than leaving them holding the connection (§1).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -425,6 +431,7 @@ waiting:
 		return nil, &CommandError{
 			Args:     append([]string{}, inv.args...),
 			ExitCode: exit.ExitCode(),
+			Stdout:   stdout.Bytes(),
 			Stderr:   stderr.String(),
 		}
 	}
@@ -495,7 +502,14 @@ var ErrShutdownDeadline = errors.New("obsync was stopping and the network git ha
 type CommandError struct {
 	Args     []string
 	ExitCode int
-	Stderr   string
+	// Stdout is what git wrote before it exited, and it is carried because one
+	// command obsync runs answers on stdout *and* exits non-zero to say what
+	// kind of answer it is: `merge-tree --write-tree` exits 1 for "there were
+	// conflicts", with the merged tree and the conflict list already written
+	// (merge.go). That is a documented status rather than prose, so reading it
+	// is the same act as reading `merge-base --is-ancestor`'s.
+	Stdout []byte
+	Stderr string
 }
 
 func (e *CommandError) Error() string {
