@@ -1,9 +1,14 @@
 // Package vault holds what obsync knows about a vault directory itself, as
-// opposed to the repository inside it: the ignore floor, and the one question
-// bootstrap asks of a directory that holds no repo (§5, §7's gate 2).
+// opposed to the repository inside it: the ignore floor, the refusal layer, the
+// settle guard, and the one question bootstrap asks of a directory that holds
+// no repo (§5, §6, §7's gate 2).
 //
-// Nothing here runs git. A directory obsync has not adopted yet has no repo to
-// ask, which is exactly why gate 2 has to be answerable by looking.
+// Nothing here runs git, and that is the shape of the package rather than an
+// accident of it. A directory obsync has not adopted yet has no repo to ask,
+// which is exactly why gate 2 has to be answerable by looking; and a file
+// something else is still writing is a fact about the filesystem that git has
+// no opinion about at all, which is why the settle guard is two stats and a
+// gap.
 package vault
 
 import (
@@ -13,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/andyroberts2/obsync/internal/clock"
 	"github.com/andyroberts2/obsync/internal/config"
 )
 
@@ -241,44 +247,114 @@ type Refusal struct {
 	Reason string
 }
 
-// CommittableSet is the paths a sync run would actually stage, and the ones it
-// refuses (§5). It is what "commit if dirty" means to the loop: a tree holding
-// nothing but refused paths is quiet, and produces no commit, no push and no
-// repeated warning.
+// Committable is what one sync run may put in a commit, and what it took out on
+// the way there (§5's committable set).
+type Committable struct {
+	// Paths is the committable set itself. "Commit if dirty" is "commit if
+	// this is non-empty": a tree holding nothing but refused and unsettled
+	// paths is quiet, and produces no commit, no push and no repeated warning.
+	Paths []string
+
+	// Refused and Unsettled are the two subtractions obsync made, kept so the
+	// loop can say what it is not committing and why. They are different in
+	// kind: a refusal is a standing decision about a path, and an unsettled
+	// path is a fact about the last second.
+	Refused   []Refusal
+	Unsettled []string
+
+	root    string
+	sampled map[string]sample
+}
+
+// CommittableSet is the paths a sync run would actually stage (§5).
 //
-// Two of the three subtractions the glossary names have already happened by the
-// time changed arrives here, and neither is obsync's arithmetic:
+// One of the three subtractions the glossary names has already happened by the
+// time changed arrives here, and it is not obsync's arithmetic: the ignore
+// floor is git's, applied through the exclude file obsync wrote at startup.
+// That is load-bearing rather than incidental — the floor is a default rather
+// than a rule, and it is git reading .gitignore first that lets a vault's own
+// `!.obsidian/workspace.json` overrule it. A second subtraction here, in
+// obsync's own code, would be a floor that cannot be overruled, which is the
+// floor's whole purpose inverted.
 //
-//   - The ignore floor is git's, applied through the exclude file obsync wrote
-//     at startup. That is load-bearing rather than incidental — the floor is a
-//     default rather than a rule, and it is git reading .gitignore first that
-//     lets a vault's own `!.obsidian/workspace.json` overrule it. A second
-//     subtraction here, in obsync's own code, would be a floor that cannot be
-//     overruled, which is the floor's whole purpose inverted.
-//   - Unsettled paths are #29's, and are subtracted here when that lands.
+// The other two happen here, in this order, and the order is the cheap question
+// first: a path obsync will not commit whatever its state is not worth spending
+// a settle interval on.
 //
-// So what is left is the refusal layer, and it is deliberately the only one of
-// the three obsync applies itself: a credential reaching a repo that may be
-// public is the one unrecoverable mistake in this design, and a mechanism a
-// human can switch off is not one that prevents it.
-//
-// A refusal skips the path and never freezes the loop. If a 200MB video lands
-// in the vault and obsync stops, every note the user writes stops reaching the
-// remote because of an attachment, and a stopped sidecar is the failure that
-// gets a sync tool uninstalled. The stated consequence is that while a tracked
-// path is refused, the remote holds the last version that passed and the
-// working tree holds a newer one: stale, consistent, and visible.
-func CommittableSet(root string, changed []string, sizeCeiling int64) ([]string, []Refusal) {
-	committable := make([]string, 0, len(changed))
-	var refused []Refusal
+//   - The refusal layer, which is the one exclusion obsync applies itself: a
+//     credential reaching a repo that may be public is the one unrecoverable
+//     mistake in this design, and a mechanism a human can switch off is not one
+//     that prevents it. A refusal skips the path and never freezes the loop —
+//     if a 200MB video lands in the vault and obsync stops, every note the user
+//     writes stops reaching the remote because of an attachment, and a stopped
+//     sidecar is the failure that gets a sync tool uninstalled. The stated
+//     consequence is that while a tracked path is refused, the remote holds the
+//     last version that passed and the working tree holds a newer one: stale,
+//     consistent, and visible.
+//   - The settle guard (§6), which leaves out whatever is still being written.
+//     An unsettled path is excluded from *this* commit and the run carries on;
+//     it is never an aborted run. Aborting is disqualified outright: during
+//     continuous typing the quiet window never clears *and* the hot file is
+//     never settled, so every capped run would abort and nothing would commit
+//     for the whole session. A commit missing a file is a valid state, and a
+//     commit containing torn bytes is an invalid one.
+func CommittableSet(clk clock.Clock, root string, changed []string, sizeCeiling int64) Committable {
+	set := Committable{root: root}
+
+	candidates := make([]string, 0, len(changed))
 	for _, relative := range changed {
 		if reason := refuses(root, relative, sizeCeiling); reason != "" {
-			refused = append(refused, Refusal{Path: relative, Reason: reason})
+			set.Refused = append(set.Refused, Refusal{Path: relative, Reason: reason})
 			continue
 		}
-		committable = append(committable, relative)
+		candidates = append(candidates, relative)
 	}
-	return committable, refused
+
+	before, after := acrossTheSettleInterval(clk, root, candidates)
+	set.Paths = make([]string, 0, len(candidates))
+	for _, relative := range candidates {
+		if !before[relative].same(after[relative]) {
+			set.Unsettled = append(set.Unsettled, relative)
+			continue
+		}
+		set.Paths = append(set.Paths, relative)
+	}
+	set.sampled = after
+	return set
+}
+
+// StageVerify is §6's stage-verify: the first committable path that moved on
+// disk while obsync was staging it, or "" when none did.
+//
+// It re-stats against the sample the settle guard finished on, which is the one
+// taken immediately before the `git add`. Its constituency is the third writer,
+// whose writes no sampling window can anticipate — a path it touches can be
+// genuinely cold when sampled and hot during the add.
+//
+// Anything that moved aborts the run, and aborting is safe here in a way it is
+// not on the read side, because these paths were just verified stable across the
+// settle interval. With write-verify (§7), obsync verifies both ends of every
+// tree it touches.
+func (c Committable) StageVerify() string {
+	for _, relative := range c.Paths {
+		if !c.sampled[relative].same(sampleOf(c.root, relative)) {
+			return relative
+		}
+	}
+	return ""
+}
+
+// Refusals is which of these paths obsync will not commit, and why (§5). It is
+// the refusal layer on its own, for the caller that has to ask the question of
+// an index somebody else wrote rather than of a working tree obsync sampled.
+func Refusals(root string, paths []string, sizeCeiling int64) []Refusal {
+	var refused []Refusal
+	for _, relative := range paths {
+		if reason := refuses(root, relative, sizeCeiling); reason != "" {
+			refused = append(refused, Refusal{Path: relative, Reason: reason})
+		}
+	}
+	return refused
 }
 
 // refuses answers why obsync will not commit a path, or "" when it will.

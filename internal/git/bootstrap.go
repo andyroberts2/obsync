@@ -75,6 +75,7 @@ func Bootstrap(ctx context.Context, cfg config.Config, log *slog.Logger, clk clo
 		_ = repo.Close()
 		return nil, err
 	}
+	repo.sweepStagingDebris()
 	if err := repo.writeIgnoreFloor(); err != nil {
 		_ = repo.Close()
 		return nil, err

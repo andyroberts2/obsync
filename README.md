@@ -48,12 +48,18 @@ workspace churn, the trash and OS cruft out of every commit while the rest of
 API keys live and which obsync refuses on the `git add` itself. A short closed
 list of credential-shaped filenames, and any file over the size ceiling, are
 never committed — skipped, said once, and never a reason to stop syncing
-everything else. The **declared surface** — everything a version number will
-make a promise about — is written down ahead of the code that implements it.
+everything else. And a file that is still being written is left out of *this*
+commit rather than committed in half: obsync samples each changed path twice a
+second apart and leaves out anything that moved, so a note caught mid-save or a
+40MB attachment still copying arrives whole on the next run instead of torn.
+Nothing waives that check, and an incoming change is never applied over a path
+being written at all. The **declared surface** — everything a version number
+will make a promise about — is written down ahead of the code that implements
+it.
 
-Not yet: the rest of the safety interlocks, the settle guard, conflicts, the
-attention note, the status file and the container image. obsync is not something
-to point at a vault yet.
+Not yet: the rest of the safety interlocks, conflicts, the attention note, the
+status file and the container image. obsync is not something to point at a vault
+yet.
 
 ## What obsync will never do
 
