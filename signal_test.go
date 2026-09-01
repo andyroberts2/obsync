@@ -391,6 +391,77 @@ func TestAVaultWaitingOnADownRemoteHasNotAttemptedAPush(t *testing.T) {
 	}
 }
 
+// neverGotThrough is the WARN a network half that has never once worked says,
+// and the substring a test may hold on to: the rest of the line is a duration
+// and a remedy.
+const neverGotThrough = "obsync has not once reached the remote since it started"
+
+// The hole §9's quiet left, and the one an operator falls into on their very
+// first deployment: a network half that fails *before* the push rides the
+// abort tier, which reports nothing above debug, and stays healthy until the
+// 24h ceiling. A URL git cannot use, key material that was never mounted, a
+// token the remote will not take, no egress at all — every one of them is an
+// empty log and a healthy container for a day.
+//
+// So a network half that has never once got through says so, once, after five
+// ticks of it. Five because that is the persistence threshold: one failure is
+// bad luck, and five is long enough to stop believing in it (§2).
+//
+// It is a WARN and the health verdict is deliberately untouched. A remote that
+// is merely down is healthy until the ceiling however loudly obsync says it is
+// down, because an unhealthy container invites a restart and a restart during
+// an outage is a loop of them (§7, §9).
+func TestANetworkHalfThatHasNeverOnceGotThroughIsSaidRatherThanLeftToTheCeiling(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+	env.clockAnchoredToNow()
+	env.remoteAway()
+	env.writeNote("Daily/2026-08-24.md", "written before obsync ever reached the remote\n")
+	env.turn()
+	env.awaitIdle()
+	env.advance(70 * time.Second)
+
+	if said := env.saidSoFar(); strings.Contains(said, neverGotThrough) {
+		t.Errorf("obsync said %q one tick in, want nothing yet — one network half that failed is "+
+			"the abort tier, and making a transient loss news is how the signal becomes noise "+
+			"(§7)", said)
+	}
+
+	env.advance(5 * tick)
+
+	if said := env.saidSoFar(); !strings.Contains(said, neverGotThrough) {
+		t.Errorf("obsync said %q with a remote it has never once reached for five ticks, want the "+
+			"one WARN that says so — the log is the only channel this state has (§9)", said)
+	}
+	if got := env.healthcheck(); got != 0 {
+		t.Errorf("obsync healthcheck exited %d, want 0 — saying so is not a health verdict, and a "+
+			"remote that is merely down stays healthy until the ceiling (§9); it said:\n%s",
+			got, env.saidSoFar())
+	}
+
+	env.advance(5 * tick)
+
+	if got := strings.Count(env.saidSoFar(), neverGotThrough); got != 1 {
+		t.Errorf("obsync said it %d times, want exactly once — state entry is said once, and a "+
+			"line repeated once a tick is a log an operator stops reading (§9)", got)
+	}
+
+	// And the state exits the way every other one does: said once, when the
+	// fact that put obsync in it stops being true.
+	env.remoteBack()
+	env.advance(20 * time.Minute)
+
+	if got, _ := env.remoteContentYet("Daily/2026-08-24.md"); got != "written before obsync ever reached the remote\n" {
+		t.Fatalf("the remote holds %q once it was reachable, want the note obsync had been "+
+			"holding; it said:\n%s", got, env.saidSoFar())
+	}
+	if said := env.saidSoFar(); !strings.Contains(said, "the remote answered for the first time") {
+		t.Errorf("obsync said %q once the remote finally answered, want the state exit said once "+
+			"(§9)", said)
+	}
+}
+
 // Liveness is a fact about the loop rather than about the outcome, so every
 // wake-up refreshes it whatever the run turned out to be. A run that keeps
 // losing to a third writer's `index.lock` is aborting, which is not news — but

@@ -28,6 +28,30 @@ forms themselves are part of the declared surface, and they are stated on
 `OBSYNC_TOKEN_FILE` is required **if and only if** the repo URL is `http://` or
 `https://`. Set it for the others and obsync will not use it.
 
+### The credential follows the vault's own origin
+
+`OBSYNC_REPO` is what obsync clones from, and it decides which credential obsync
+*requires* at startup. It is not what git contacts afterwards. Once the vault is
+a repository, every fetch and every push goes to that repository's own `origin`,
+because obsync never writes your `.git/config` and never runs `git remote
+set-url`.
+
+So **which credential actually gets used follows the vault's own origin**, and
+the two can disagree without either being wrong about where your notes go:
+`https://` and `ssh://` against the same host and path are the same repository,
+which is why obsync does not refuse the pair. What differs is the credential:
+
+- an `ssh://` origin reads a key out of the home directory of the UID obsync
+  runs as, and never reads `OBSYNC_TOKEN_FILE`;
+- an `https://` origin asks obsync's credential helper for the token, and never
+  reads a key.
+
+A vault cloned by hand over SSH, with an `https://` `OBSYNC_REPO` and a token
+mounted, is the common way to end up with a token nothing reads and a key that
+was never mounted. obsync logs a WARN at bootstrap when the two take different
+credentials, and syncs anyway — a mounted deploy key under an `https://`
+`OBSYNC_REPO` works perfectly. Check the pair with `git remote -v` in the vault.
+
 ---
 
 ## The minimum scope

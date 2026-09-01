@@ -35,6 +35,11 @@ func (l *Loop) signal(now time.Time) {
 	// acts on and the line in the log cannot describe three different obsyncs.
 	l.reconcileAttentionNote(now)
 
+	// Said before the verdict and independently of it, because it is not one:
+	// a network half that has never once worked leaves obsync healthy, and the
+	// log is the whole of what it changes.
+	l.sayIfTheRemoteWasNeverReached(now)
+
 	// The verdict is derived from the same file a subcommand reads, by the same
 	// function, so that what obsync repeats to a human and what `obsync
 	// healthcheck` answers Docker cannot disagree.
@@ -46,6 +51,45 @@ func (l *Loop) signal(now time.Time) {
 		return
 	}
 	l.sayNeedsHuman(now, health)
+}
+
+// sayIfTheRemoteWasNeverReached says, once, that obsync has never once got a
+// network half all the way through since it started.
+//
+// It exists because §9's quiet has one shape it cannot tell apart from working:
+// a network half that fails *before* the push is an aborted run, which reports
+// nothing above debug, and it attempts no push, so the never-pushed state that
+// would have caught it is never reached either. A first deployment pointed at a
+// URL git cannot use, with key material nobody mounted, with a token the remote
+// will not take, or with no egress at all, is an empty log and a healthy
+// container for a day.
+//
+// A WARN and not a verdict, and the health surface is deliberately untouched:
+// an unreachable remote is healthy until the backoff ceiling, and making it
+// unhealthy sooner would invite the restart §7 refuses on a remote that is
+// merely down. What an operator needed was a line, and this is the line.
+//
+// Said once, at the persistence threshold, like every other state entry (§9).
+// The remedy names three places to look because obsync cannot tell which:
+// everything that fails here fails the same way, and the labelled reason git
+// gave is already on the run's own debug line.
+func (l *Loop) sayIfTheRemoteWasNeverReached(now time.Time) {
+	if l.networkGotThrough || l.saidNeverGotThrough {
+		return
+	}
+	failingFor := l.networkFailingFor(now)
+	if failingFor <= neverWorkedWindow {
+		return
+	}
+	l.saidNeverGotThrough = true
+	l.log.Warn("obsync has not once reached the remote since it started, so nothing has left this "+
+		"vault yet; the vault is still being committed locally meanwhile, and obsync keeps "+
+		"retrying",
+		"failing_for", failingFor.Round(time.Second), "branch", l.repo.TrackedBranch(),
+		"remedy", "check three things in this order: the URL git actually uses, which is `git "+
+			"remote -v` in the vault and not OBSYNC_REPO; what that URL needs to authenticate — a "+
+			"token for https, key material for ssh; and whether this container can reach the host "+
+			"at all. OBSYNC_LOG_LEVEL=debug carries git's own words for every one of them")
 }
 
 // sayNeedsHuman is the one line §9's hourly repeat says, and one spelling of it

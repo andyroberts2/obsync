@@ -382,6 +382,16 @@ go. A mismatch is a human's job to resolve; obsync never re-points a remote
 itself.
 _Avoid_: remote URL, upstream, origin
 
+**Credential path**:
+How a remote authenticates, which its URL scheme alone decides: the credential
+file obsync's helper serves, key material obsync knows nothing about, or
+nothing at all. The half of a scheme the configured remote is right to discard
+and obsync is not — where bytes go is a host and a path, and how obsync gets
+them there is this. The two are independent, so a vault whose own origin takes
+a different one is said rather than refused: it is as likely to be a deploy key
+that works as a token nothing reads.
+_Avoid_: auth method, transport, protocol
+
 **Commit identity**:
 The git author obsync writes under. Where provenance lives, which is why the
 name — not the address — is the part that carries meaning: it is what filtering

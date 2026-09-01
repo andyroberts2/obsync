@@ -486,6 +486,9 @@ func operationsOwes(t *testing.T) []struct{ fact, why string } {
 		{"relays, never diagnoses", "the remote-rejection recipe, and what obsync will not add to it"},
 		{"Swarm", "Swarm acts on health status"},
 		{"Compose", "plain Compose ignores it"},
+		{"git remote -v", "the URL git actually uses is the vault's own origin, which OBSYNC_REPO does not decide"},
+		{"has not once reached the remote", "the WARN a deployment nobody has ever seen work says, and the three things to check for it"},
+		{"empty folder", "git stores no empty directory, so a folder with no notes in it is not a thing obsync can sync"},
 	}
 }
 
@@ -651,6 +654,7 @@ func TestEachRequiredWarningStandsWhereItsSubjectIsConfigured(t *testing.T) {
 		{"compose.yaml", "WRITE_COALESCE_MS", "ignis's write coalescing is set on the ignis service, which is where it is configured"},
 		{"README.md", "Headless Sync", "whether you run it decides whether obsync is for you at all, which is the fit section's question"},
 		{"docs/credentials.md", "http://", "the plain-http warning stands beside the credential it sends in the clear"},
+		{"docs/credentials.md", "follows the vault's own origin", "which credential a vault takes is chosen by its own origin rather than by OBSYNC_REPO, so the warning stands beside the URL that chooses it"},
 	} {
 		if !strings.Contains(flattened(t, warning.file), warning.phrase) {
 			t.Errorf("%s does not carry the %q warning: %s (§11)", warning.file, warning.phrase, warning.why)

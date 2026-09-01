@@ -121,6 +121,30 @@ type Loop struct {
 	// not attempted one, and the first thing it does attempt answers again.
 	pushAttempted bool
 
+	// networkGotThrough is whether the network half has ever got all the way
+	// through since obsync started, and saidNeverGotThrough whether obsync has
+	// said that it has not.
+	//
+	// The pair is the fetch side of the question §9 asks about the push, and
+	// the hole the push's own answer leaves: a push that was attempted and
+	// never succeeded is a deployment nobody has ever seen work, and a network
+	// half that fails *before* the push never attempts one — so the same
+	// deployment reads as one that has had nothing to do, on the abort tier,
+	// which reports nothing above debug and stays healthy until the ceiling
+	// (§7, §9).
+	//
+	// What it changes is the log alone. A remote that is merely down is
+	// healthy for a day whatever obsync says about it, because an unhealthy
+	// container invites a restart and a restart during an outage is a loop of
+	// them — so this is a WARN, said once at the persistence threshold, and
+	// said once again when the remote finally answers.
+	//
+	// In-memory and process-lifetime, like every other record the loop keeps:
+	// the question is about this obsync rather than about the vault's history,
+	// and a restart asks it again.
+	networkGotThrough   bool
+	saidNeverGotThrough bool
+
 	// networkFailingSince is when the network half last went from working to
 	// not, and zero while it is working. It is what §9's backoff ceiling is
 	// measured against, and it is set where the backoff is rather than where a
@@ -1712,10 +1736,23 @@ func (l *Loop) networkSucceeded() {
 // successful fetch is what keeps it true — the remote has answered every
 // question this run asked it, including the one that publishes.
 func (l *Loop) networkHalfGotThrough() {
+	// Set before the early return, because a deployment whose very first
+	// network half works has never had a failing clock to clear and is exactly
+	// the deployment this records: the question is whether obsync has ever
+	// published, not whether it recovered.
+	l.networkGotThrough = true
 	if l.networkFailingSince.IsZero() {
 		return
 	}
-	if now := l.clock.Now(); now.Sub(l.networkFailingSince) > backoffCeiling {
+	now := l.clock.Now()
+	if l.saidNeverGotThrough {
+		// The other state exit, and the same rule: obsync said a deployment
+		// nobody had seen work, so it says once when somebody has. It is not
+		// the recovery below — nothing here came back, it arrived.
+		l.saidNeverGotThrough = false
+		l.log.Info("the remote answered for the first time", "after",
+			now.Sub(l.networkFailingSince).Round(time.Second), "branch", l.repo.TrackedBranch())
+	} else if now.Sub(l.networkFailingSince) > backoffCeiling {
 		l.log.Info("the remote answered again", "gone_for",
 			now.Sub(l.networkFailingSince).Round(time.Second), "branch", l.repo.TrackedBranch())
 	}

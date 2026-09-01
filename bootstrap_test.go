@@ -38,6 +38,40 @@ func TestAnEmptyVaultDirectoryIsClonedFromTheRemote(t *testing.T) {
 	}
 }
 
+// What obsync was *told* is not what obsync will use. OBSYNC_REPO is read for
+// the clone and for gate 5's comparison, and every fetch and every push after
+// that goes to the vault's own `origin`, because obsync never writes a human's
+// `.git/config` and never runs `git remote set-url` (§3, §8).
+//
+// So the pair is said rather than half of it: the configured remote on the
+// startup line, and the origin obsync resolved here. An operator diagnosing a
+// vault that is not syncing is otherwise reading a URL obsync may never have
+// contacted.
+//
+// The normalised pair and the scheme, never the URL itself: an operator may put
+// a token in an origin even though obsync never does, and gate 5 refuses to
+// echo one for the same reason (§8).
+func TestTheRepositoryObsyncResolvedIsSaidWithTheSchemeGitWillUse(t *testing.T) {
+	t.Parallel()
+
+	env := newVault(t)
+
+	env.wake()
+
+	said := env.said()
+	if !strings.Contains(said, `msg="resolved the vault's repository"`) {
+		t.Errorf("obsync said %q, want the line naming the repository it resolved — the startup "+
+			"line says what obsync was told, and this says what obsync will use (§8, §9)", said)
+	}
+	if want := "origin=file://" + strings.TrimSuffix(env.remote, ".git"); !strings.Contains(said, want) {
+		t.Errorf("obsync said %q, want it to carry %q: the transport is the half of the origin "+
+			"gate 5 discards, and the half an operator needs to see (§8)", said, want)
+	}
+	if !strings.Contains(said, "branch=main") {
+		t.Errorf("obsync said %q, want the tracked branch it resolved beside the origin (§3)", said)
+	}
+}
+
 // The tracked branch is the remote's *default* branch and not whichever branch
 // happens to be called main: taking main would silently start syncing a branch
 // nobody chose on a remote whose vault lives on another one (§3).

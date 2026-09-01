@@ -126,6 +126,64 @@ fix it. On top of that:
 
 ---
 
+## When nothing arrives on the remote
+
+The vault is committing — `git log` in the vault shows obsync's commits — and
+the remote never gains them. There are two shapes of this, and they are told
+apart in seconds.
+
+### obsync has never once reached the remote
+
+If obsync has not got a single network half all the way through since it
+started, it says so once, five minutes in:
+
+```
+level=WARN msg="obsync has not once reached the remote since it started, ..."
+```
+
+It is a WARN and not a freeze, and `docker ps` still says healthy, deliberately:
+a remote that is merely down is healthy until the 24-hour ceiling, and an
+unhealthy container invites the restart that destroys the diagnosis. Nothing is
+lost meanwhile — the vault goes on being committed locally, and everything held
+back is pushed by the first run that gets through.
+
+Three things to check, in this order:
+
+1. **The URL git actually uses**, which is `git remote -v` in the vault and
+   **not** `OBSYNC_REPO`. obsync clones from `OBSYNC_REPO`; after that it
+   fetches and pushes the vault's own `origin`, and it never rewrites your
+   `.git/config` to make the two agree. Only the host and the path have to
+   match, so a vault whose `origin` is `git@host:owner/vault.git` under an
+   `https://` `OBSYNC_REPO` passes every check obsync makes and still cannot
+   authenticate.
+2. **What that URL needs to authenticate with.** An `ssh://` origin needs a key
+   and a `known_hosts` mounted for the UID obsync runs as, plus a passwd entry;
+   an `https://` origin needs `OBSYNC_TOKEN_FILE`, scoped to write that one
+   repository. [`credentials.md`](credentials.md) states the minimum for each,
+   and obsync logs a WARN of its own at bootstrap when the origin and
+   `OBSYNC_REPO` take different credentials.
+3. **Whether the container can reach the host at all** — egress rules, DNS, a
+   proxy the rest of the machine has and this container does not.
+
+`OBSYNC_LOG_LEVEL=debug` carries git's own words for every one of them, with
+the full argv, the exit status and the duration of each invocation. The
+credential never appears in any of it.
+
+### A folder with no notes in it
+
+**git stores no empty folder, so obsync cannot sync one.** A commit records
+files; a directory exists in git only as the path of a file inside it. A folder
+you made in Obsidian and have not written a note into yet is not something
+obsync is declining to sync — there is nothing there for any git to record, and
+`git status` in the vault reports nothing for it either.
+
+It syncs the moment it holds a note. If you want the structure to arrive ahead
+of the writing, put a file in it: a `.gitkeep`, or a stub note, which Obsidian
+will also show you. obsync will not create one for you — writing files into your
+vault to make its own model tidier is not something it does.
+
+---
+
 ## The four things obsync cannot tell you itself
 
 Everything else is in the note. These four are not derivable from live state, so

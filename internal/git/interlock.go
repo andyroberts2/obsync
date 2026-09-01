@@ -418,26 +418,16 @@ const refDoesNotResolve = 1
 // the wrong place" failure, except worse, because the push *succeeds* and an
 // entire vault lands somewhere nobody chose.
 //
-// The URL is read the way git itself resolves it, rather than from the
-// repository's own file alone, because where bytes go is the question and git's
-// resolution is the answer to it. Reading it is the only thing obsync ever does
-// with the vault's `.git/config`: obsync never writes that file.
-//
-// `--get-all -z`, and the *first* record, because a remote may legally carry
-// more than one url and git fetches from the first. Measured at both matrix
-// points: `--get-all -z` lists them NUL-separated in the order the config sets
-// them, and plain `--get` answers with the *last* — which would have obsync
-// comparing against a URL git never uses.
+// The URL is originURL's, which is the URL git resolves and therefore the one
+// bytes actually go to. Reading it is the only thing obsync ever does with the
+// vault's `.git/config`: obsync never writes that file.
 //
 // Nothing here echoes the URL. An operator may put a token in one even though
 // obsync never does, and a fact written into a log line and an attention note
 // is the last place a secret should be reconstructable from — so what is said
 // is the normalised pair, which has no credentials in it by construction.
 func (r *Repo) originMatches() (*InterlockFailure, error) {
-	out, err := r.run(invocation{
-		dir:  r.vault,
-		args: []string{"config", "-z", "--get-all", "remote." + config.RemoteName + ".url"},
-	})
+	first, err := r.originURL()
 	if err != nil {
 		var command *CommandError
 		if !errors.As(err, &command) || command.ExitCode != configKeyUnset {
@@ -454,8 +444,7 @@ func (r *Repo) originMatches() (*InterlockFailure, error) {
 		}, nil
 	}
 
-	first, _, _ := strings.Cut(string(out), "\x00")
-	origin, err := config.ParseRemote(first)
+	_, origin, err := config.ParseRemote(first)
 	if err != nil {
 		return &InterlockFailure{
 			Interlock: freezeRemoteMismatch,
@@ -479,6 +468,34 @@ func (r *Repo) originMatches() (*InterlockFailure, error) {
 			"path are compared, so swapping https for ssh against the same repository is not " +
 			"this" + SelfClearing,
 	}, nil
+}
+
+// originURL is the URL git resolves for `origin`, which is the URL every fetch
+// and every push obsync runs actually goes to.
+//
+// It is read the way git itself resolves it, rather than from the repository's
+// own file alone, because where bytes go is the question and git's resolution
+// is the answer to it.
+//
+// `--get-all -z`, and the *first* record, because a remote may legally carry
+// more than one url and git fetches from the first. Measured at both matrix
+// points: `--get-all -z` lists them NUL-separated in the order the config sets
+// them, and plain `--get` answers with the *last* — which would have obsync
+// comparing against a URL git never uses.
+//
+// It is one read for the two questions asked of an origin — the pair gate 5
+// compares, and the credential path bootstrap reports — so the two can never
+// be answered about different URLs.
+func (r *Repo) originURL() (string, error) {
+	out, err := r.run(invocation{
+		dir:  r.vault,
+		args: []string{"config", "-z", "--get-all", "remote." + config.RemoteName + ".url"},
+	})
+	if err != nil {
+		return "", err
+	}
+	first, _, _ := strings.Cut(string(out), "\x00")
+	return first, nil
 }
 
 // configKeyUnset is the status `git config --get` gives for a key that is not

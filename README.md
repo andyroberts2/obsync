@@ -150,6 +150,9 @@ vault, and `docker ps` turns unhealthy.
 - A short closed list of credential-shaped filenames, and any file over the size
   ceiling, are never committed. obsync says so once and keeps syncing everything
   else.
+- A folder with no notes in it does not arrive on the other side, and nothing
+  obsync could do would change that: git records files, and an empty folder is
+  not one. Put a note or a `.gitkeep` in it and it syncs like anything else.
 
 **It stops rather than guess.**
 

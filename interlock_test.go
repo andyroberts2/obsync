@@ -367,6 +367,59 @@ func TestAnOriginSwappedFromHttpsToSshIsTheSameRepoAndNotAFreeze(t *testing.T) {
 	}
 }
 
+// credentialPathMismatch is the WARN an origin that authenticates differently
+// from OBSYNC_REPO says, and the substring a test may hold on to.
+const credentialPathMismatch = "the vault's origin authenticates differently from the remote obsync was given"
+
+// The other side of *that*: not a freeze, and not silence either.
+//
+// The scheme is not where bytes go, so it is right that gate 5 ignores it — and
+// it is the whole of *how obsync authenticates*, which is not a detail. An ssh
+// origin under an https configuration reads key material obsync knows nothing
+// about, while the token obsync was given, and required at startup (§8), is
+// never read by anything. Both facts are true at once, and the deployment
+// either works or fails silently on the abort tier depending on something
+// obsync never looked at.
+//
+// So it is said once, at bootstrap, and nothing is refused: a deploy key that
+// is mounted works perfectly, and freezing over it would refuse a deployment
+// that syncs (§8).
+func TestAnOriginThatAuthenticatesDifferentlyFromTheConfiguredRemoteIsSaidOnce(t *testing.T) {
+	t.Parallel()
+
+	// The same unreachable host the swap test uses: what this is about is what
+	// obsync says about the pair, not what a network does with it.
+	env := newVaultReachedBy(t, func(e *vaultEnv) (string, []string) {
+		return "https://127.0.0.1:1/owner/vault.git",
+			[]string{"OBSYNC_TOKEN_FILE=" + writeCredential(t, "ghp_the_operators_token\n")}
+	})
+	env.mustGit(env.vault, "remote", "set-url", config.RemoteName, "ssh://git@127.0.0.1:1/owner/vault.git")
+	env.turn()
+	env.awaitIdle()
+
+	said := env.saidSoFar()
+	if !strings.Contains(said, credentialPathMismatch) {
+		t.Errorf("obsync said %q about an ssh origin under an https configuration, want the one "+
+			"WARN that says the credential it holds is never read — the alternative is a "+
+			"deployment that fails on the abort tier and says nothing at all (§8, §9)", said)
+	}
+	if !strings.Contains(said, "level=WARN") {
+		t.Errorf("obsync said %q, want it at WARN: it is true, advisory, and refuses nothing (§9)", said)
+	}
+	if strings.Contains(said, frozenAndTouchingNothing) {
+		t.Errorf("obsync said %q about an origin that authenticates differently, want no freeze — "+
+			"a mounted deploy key syncs perfectly, and only the host and the path decide where "+
+			"bytes go (§8)", said)
+	}
+
+	env.advance(70 * time.Second)
+
+	if got := strings.Count(env.saidSoFar(), credentialPathMismatch); got != 1 {
+		t.Errorf("obsync said it %d times, want exactly once — it is a fact about the deployment, "+
+			"said at bootstrap rather than once a tick (§9)", got)
+	}
+}
+
 // Gate 1, and the exception §7 names: an unwritable vault is the one refusal
 // where obsync cannot write an attention note either, so logs are the only
 // channel. It is also what catches a UID mismatch conclusively, which is why

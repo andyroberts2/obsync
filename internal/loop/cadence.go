@@ -106,6 +106,21 @@ const hourly = time.Hour
 // answers to one question, waiting to drift.
 const backoffCeiling = 24 * time.Hour
 
+// neverWorkedWindow is how long a network half that has never once got through
+// may go on failing before obsync says so: five ticks, which is five minutes
+// (§9).
+//
+// It is the persistence threshold in time, like the staleness window beside it
+// and for the same reason — five wake-ups is what "long enough to stop
+// believing in bad luck" means for a loop whose wake-ups are a tick apart. One
+// network half that failed is the abort tier and is not news; five minutes of a
+// deployment that has never once reached its remote is.
+//
+// It gates a line and nothing else. The health verdict is untouched, because a
+// remote that is merely down is healthy until the backoff ceiling however
+// loudly obsync says it is down (§9).
+const neverWorkedWindow = persistenceThreshold * tick
+
 // stalenessWindow is how long the status file may go unwritten before that is
 // evidence the sync loop has stopped turning: five ticks, which is five
 // minutes (§9).
