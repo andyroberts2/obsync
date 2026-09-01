@@ -357,7 +357,7 @@ func TestAWakeUpOverACleanVaultCommitsNothingAndSaysNothing(t *testing.T) {
 	if got, want := env.commitsOn(env.remote), "1"; got != want {
 		t.Errorf("the remote holds %s commits after a wake-up over a clean tree, want %s", got, want)
 	}
-	if said := env.said(); said != "" {
+	if said := env.saidByARun(); said != "" {
 		t.Errorf("obsync said %q about a wake-up that found nothing, want silence: only runs that "+
 			"changed something are INFO, and an empty `docker logs --since 1h` is a designed "+
 			"signal (§9)", said)

@@ -918,6 +918,27 @@ func (e *vaultEnv) said() string {
 	return e.log.String()
 }
 
+// saidByARun is said with bootstrap's own lines taken off: what obsync resolved
+// about the vault's repository, which it says once per process.
+//
+// §9's quiet is a property of a *run* — a run that changed nothing says nothing
+// — and bootstrap is not a run. It says what obsync resolved beside the startup
+// line that says what obsync was told, and that line does not reach this buffer
+// either: the harness resolves its configuration into io.Discard. This is the
+// same exclusion for the same reason, for the one line that is written by the
+// loop's own logger.
+func (e *vaultEnv) saidByARun() string {
+	e.t.Helper()
+
+	var kept []string
+	for _, line := range strings.SplitAfter(e.said(), "\n") {
+		if line != "" && !strings.Contains(line, `msg="resolved the vault's repository"`) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "")
+}
+
 // git runs real git and returns its stdout and exit status. The harness drives
 // git exactly as obsync does — as a subprocess — and pins its configuration
 // too, so that a developer's own ~/.gitconfig cannot change what a test means.

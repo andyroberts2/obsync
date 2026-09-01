@@ -88,13 +88,20 @@ var retired = map[string]string{}
 // out of an environment block that had no config error in it, so there is no
 // half-resolved value here to mistake for a setting.
 type Config struct {
-	// RepoURL is OBSYNC_REPO exactly as it was set, which is what git is
-	// handed for clone, fetch and push.
+	// RepoURL is OBSYNC_REPO exactly as it was set, and it is what git is
+	// handed for the clone — and only for the clone. Every fetch and every
+	// push afterwards names `origin`, which is the vault's own and is a URL
+	// obsync never writes: what keeps the two the same repository is gate 5
+	// rather than this value (§3, §8).
 	RepoURL string
 	// ConfiguredRemote is RepoURL reduced to what identifies where bytes go —
 	// the pair gate 5 compares the vault's own origin against every run (§8).
 	ConfiguredRemote ConfiguredRemote
-	VaultPath        string
+	// RemoteScheme is RepoURL's scheme, which is the half ConfiguredRemote
+	// discards: it decides the credential path rather than the destination,
+	// and obsync says so when the vault's origin takes a different one (§8).
+	RemoteScheme string
+	VaultPath    string
 	// Branch is the operator's override and is empty when there is none, in
 	// which case the tracked branch is resolved at startup — from the vault
 	// when attaching to a repo, from the remote when cloning into an empty
@@ -199,11 +206,12 @@ func Resolve(environ []string, stderr io.Writer) (Config, *slog.Logger, error) {
 		problems = append(problems, fmt.Errorf("%s is required: it is the one value nothing can "+
 			"infer, and the only variable obsync cannot start without", repoVar))
 	default:
-		parsedScheme, remote, err := parseRemote(raw)
+		parsedScheme, remote, err := ParseRemote(raw)
 		if err != nil {
 			problems = append(problems, fmt.Errorf("%s: %w", repoVar, err))
 		} else {
-			cfg.RepoURL, cfg.ConfiguredRemote, scheme = raw, remote, parsedScheme
+			cfg.RepoURL, cfg.ConfiguredRemote, cfg.RemoteScheme = raw, remote, parsedScheme
+			scheme = parsedScheme
 		}
 	}
 
@@ -372,7 +380,7 @@ func valueOr(set map[string]string, name, fallback string) string {
 // nothing, which is why OBSYNC_TOKEN_FILE is required iff the URL is
 // http(s):// and why SSH needs no knobs at all (§8).
 func needsCredential(scheme string) bool {
-	return scheme == "http" || scheme == "https"
+	return CredentialPathOf(scheme) == ACredentialFile
 }
 
 // readable reports whether obsync's UID can read a file, without reading it —

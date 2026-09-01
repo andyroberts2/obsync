@@ -350,7 +350,7 @@ func TestARunThatChangedNothingSaysNothingAndCommitsNothing(t *testing.T) {
 
 	env.wake()
 
-	if said := env.said(); said != "" {
+	if said := env.saidByARun(); said != "" {
 		t.Errorf("obsync said %q on a run that changed nothing, want silence (§9)", said)
 	}
 	if got, want := env.commitsOn(env.vault), "1"; got != want {
@@ -377,7 +377,7 @@ func TestAChangeThatCancelsItselfOutProducesNoCommitAndNoFailure(t *testing.T) {
 		t.Errorf("the vault holds %s commits, want %s — the index matches HEAD, so there is nothing "+
 			"to commit", got, want)
 	}
-	if said := env.said(); said != "" {
+	if said := env.saidByARun(); said != "" {
 		t.Errorf("obsync said %q about a vault whose changes cancelled out, want silence (§9)", said)
 	}
 }

@@ -27,12 +27,40 @@ func (r ConfiguredRemote) String() string { return r.Host + "/" + r.Path }
 // LogValue keeps a remote one field in logfmt rather than two.
 func (r ConfiguredRemote) LogValue() slog.Value { return slog.StringValue(r.String()) }
 
-// ParseRemote normalises a git remote URL to the pair gate 5 compares. It is
-// the same function for both sides of that comparison: what obsync was
-// configured with, and what the vault's own origin says.
-func ParseRemote(raw string) (ConfiguredRemote, error) {
-	_, remote, err := parseRemote(raw)
-	return remote, err
+// CredentialPath is how a remote authenticates, which the URL scheme alone
+// decides (§8, docs/credentials.md): with the credential file obsync's helper
+// serves, with key material obsync knows nothing about, or with nothing at all.
+//
+// It is the half of a scheme that ConfiguredRemote is right to discard and
+// obsync is not. Where bytes go is a host and a path; how obsync gets them
+// there is this, and the two are independent — an operator may swap a PAT for a
+// deploy key against the same repository, and the same swap leaves the token
+// obsync was given, and required at startup, read by nothing.
+type CredentialPath int
+
+const (
+	// NoCredential is file://, which authenticates with nothing at all.
+	NoCredential CredentialPath = iota
+	// ACredentialFile is http:// and https://: obsync is git's credential
+	// helper and serves OBSYNC_TOKEN_FILE when git asks.
+	ACredentialFile
+	// KeyMaterial is ssh:// and its scp-style spelling: ssh reads a key out of
+	// the home directory of the UID obsync runs as, and obsync neither
+	// supplies it nor knows whether it is there.
+	KeyMaterial
+)
+
+// CredentialPathOf answers the credential path a scheme takes. The scheme is
+// the whole input, which is what makes this decidable without touching a
+// network or a disk.
+func CredentialPathOf(scheme string) CredentialPath {
+	switch scheme {
+	case "http", "https":
+		return ACredentialFile
+	case "ssh":
+		return KeyMaterial
+	}
+	return NoCredential
 }
 
 // acceptedForms is what an operator is told when a URL is refused, and it is
@@ -41,10 +69,17 @@ func ParseRemote(raw string) (ConfiguredRemote, error) {
 // remote over it, and a form obsync tests is a form obsync supports.
 const acceptedForms = `obsync accepts https://, http://, ssh://, file:// and scp-style git@host:owner/repo`
 
-// parseRemote returns the URL's scheme alongside the normalised remote. The
-// scheme is dropped from the comparison and still decides two things: whether
-// a credential file is required, and whether the http:// warning fires.
-func parseRemote(raw string) (scheme string, remote ConfiguredRemote, err error) {
+// ParseRemote normalises a git remote URL to the pair gate 5 compares, and
+// answers with the scheme beside it. It is the same function for both sides of
+// that comparison: what obsync was configured with, and what the vault's own
+// origin says.
+//
+// The scheme travels separately rather than inside ConfiguredRemote, and that
+// is load-bearing: the pair is compared with `==`, so a scheme inside it would
+// make the transport part of where bytes go and turn a swapped credential into
+// gate 5's freeze. What the scheme decides is the credential path above, which
+// is a different question asked in a different place.
+func ParseRemote(raw string) (scheme string, remote ConfiguredRemote, err error) {
 	// scp-style git@host:owner/repo is rewritten rather than parsed
 	// separately, which is how it comes out equal to ssh://git@host/owner/repo
 	// rather than merely being asserted to be.

@@ -87,7 +87,67 @@ func Bootstrap(ctx context.Context, cfg config.Config, log *slog.Logger, clk clo
 		return nil, err
 	}
 	repo.reportTrackedPluginData()
+	repo.reportTheOrigin(cfg.RemoteScheme)
 	return repo, nil
+}
+
+// reportTheOrigin says what obsync resolved, once, and it is the other half of
+// the startup line: that one says what obsync was *told*, and OBSYNC_REPO is
+// read for the clone and for gate 5's comparison alone. Every fetch and every
+// push names `origin`, which is the vault's own (§3, §8).
+//
+// The two are the same repository or gate 5 freezes, so this is not a second
+// destination — it is the transport, the half of a URL that gate 5 discards
+// because it is not where bytes go. An operator diagnosing a vault that is not
+// syncing is otherwise reading a URL obsync may never have contacted, with no
+// way to tell from the log which transport git actually used.
+//
+// The normalised pair and the scheme, never the URL itself: an operator may put
+// a token in an origin even though obsync never does, and a fact written into a
+// log line is the last place a secret should be reconstructable from (§8).
+//
+// An origin git cannot be asked about is a debug line and nothing more. This
+// says what obsync resolved, and its absence is not news about anything — the
+// run that follows asks the same question as gate 5, where an unreadable origin
+// is a refusal with a remedy.
+func (r *Repo) reportTheOrigin(configuredScheme string) {
+	raw, err := r.originURL()
+	if err != nil {
+		r.log.Debug("obsync could not ask git which URL the vault's origin resolves to",
+			"problem", err)
+		return
+	}
+	scheme, origin, err := config.ParseRemote(raw)
+	if err != nil {
+		r.log.Debug("obsync could not read the vault's origin as a URL", "problem", err)
+		return
+	}
+
+	r.log.Info("resolved the vault's repository", "origin", scheme+"://"+origin.String(),
+		"branch", r.branch)
+
+	// The credential path is what the scheme decides, and the one thing a
+	// difference in it costs: obsync required a token file at startup for an
+	// https remote and serves it from its own credential helper, and an ssh
+	// origin reads neither — it reads key material out of the home directory
+	// of the UID obsync runs as, which obsync neither supplies nor can see.
+	//
+	// It is a WARN and it refuses nothing, because both halves of it can be a
+	// working deployment: a mounted deploy key syncs perfectly under an https
+	// OBSYNC_REPO. What it cannot be is silent — the failure it is warning
+	// about is a network half that never once works, which rides the abort
+	// tier and says nothing above debug (§7, §9).
+	if config.CredentialPathOf(scheme) == config.CredentialPathOf(configuredScheme) {
+		return
+	}
+	r.log.Warn("the vault's origin authenticates differently from the remote obsync was given: "+
+		"git uses the origin, so an ssh origin needs key material mounted for the UID obsync runs "+
+		"as and never reads OBSYNC_TOKEN_FILE, and an https origin needs that token and never "+
+		"reads a key. obsync syncs it either way and refuses nothing — only the host and the path "+
+		"decide where bytes go — but if nothing is leaving the vault, this is the first thing to "+
+		"look at",
+		"origin", scheme+"://"+origin.String(),
+		"repo", configuredScheme+"://"+r.configuredRemote.String())
 }
 
 // reportTrackedPluginData says, once and loudly, that this vault's history
