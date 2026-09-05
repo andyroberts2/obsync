@@ -51,7 +51,9 @@ services:
     # Pin the floating major, never `latest` and never a patch version. obsync
     # runs unattended for months, so a pin that never moves leaves it on a
     # stale base image. Before 1.0 there is no floating major, so this reads
-    image: ghcr.io/andyroberts2/obsync:0.4.0
+    # `:0.4` today and becomes `:1` at 1.0. It moves with every release, and
+    # the suite fails until it does.
+    image: ghcr.io/andyroberts2/obsync:0.4
 
     # **Load-bearing documentation** (#12 —
     # https://github.com/andyroberts2/obsync/issues/12). This line replaces a

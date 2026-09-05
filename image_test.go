@@ -1192,16 +1192,46 @@ func TestTheReferenceComposeIsWhatItPromises(t *testing.T) {
 			"value is running unattended for months on a base that does (§12)", tag)
 	}
 
-	// And it resolves — once there is something to resolve. obsync publishes
-	// nothing until the release pipeline cuts the first tag (#43), so a pin
-	// nothing answers for is recorded here rather than failed, and the day a
-	// tag exists this becomes the check that the file an operator copies names
-	// an image they can actually pull. It is the reason the pin's *form* is
-	// asserted above rather than left to this.
-	if _, _, code := dockerRun(t, "manifest", "inspect", image); code != 0 {
-		t.Logf("%s pins %s, which no registry answers for yet: obsync has published no release, "+
-			"and the first pushed tag is #43's. The pin's form is checked above; that it resolves "+
-			"is checkable from the first release onwards.", referenceCompose, image)
+	// And it is the *newest* line's floating name rather than a finished one.
+	// The form check above cannot see the difference: `0.3` is as well-formed a
+	// floating pin as `0.4`, and an operator copying a normative file (§11)
+	// after 0.4 is out would get 0.3's code with nothing to read about it.
+	//
+	// The number is read from this checkout's release tags rather than written
+	// here, because that is where the release pipeline reads it too: release.sh
+	// derives the floating names a release publishes from the tag it is cutting
+	// (§12), so a pin measured against the newest of those tags cannot disagree
+	// with what was pushed. One source, two readers, rather than a number in a
+	// file and a promise to remember it.
+	//
+	// The consequence is deliberate: the release that publishes 0.4 turns this
+	// red until the reference compose says 0.4. That is the forcing function —
+	// the file an operator copies names the release they would get today, or
+	// the suite says so.
+	if newest, released := newestRelease(t); released {
+		if want := newest.floatingName(); tag != want {
+			t.Errorf("the obsync service pins %q and the newest release is %s, whose floating name "+
+				"is %q: the reference compose is normative, so a pin left on a finished line hands "+
+				"an operator older code with nothing to read about it (§11, §12)",
+				tag, newest, want)
+		}
+	} else {
+		t.Logf("%s pins %s and this checkout has no release tag to measure it against: obsync "+
+			"publishes nothing until the release pipeline cuts one (#43). The pin's form is "+
+			"checked above.", referenceCompose, image)
+	}
+
+	// And it resolves, which is recorded rather than failed. Until the first
+	// release there was nothing to resolve (#43); there is now, but the two
+	// reasons this can answer nothing are "the pipeline did not push that name"
+	// and "GHCR was unreachable for ninety seconds", and only the first is a
+	// fact about the change underneath the run. A red that says nothing about
+	// the change teaches everyone to re-run rather than read (§12), and the
+	// first reason is already gated: release.sh's tag set is asserted in
+	// release_test.go, and the name it must equal is asserted above.
+	if _, said, code := dockerRun(t, "manifest", "inspect", image); code != 0 {
+		t.Logf("%s pins %s, which no registry answered for: %s", referenceCompose, image,
+			strings.TrimSpace(said))
 	}
 
 	// The vault mount lands on obsync's default vault path, which is what makes
@@ -1232,6 +1262,99 @@ func TestTheReferenceComposeIsWhatItPromises(t *testing.T) {
 	case !token.ReadOnly:
 		t.Errorf("the credential is mounted writable at %q; obsync only ever reads it (§8)", credential)
 	}
+}
+
+// releaseVersion is a released version of obsync: the `MAJOR.MINOR.PATCH` that
+// one pushed annotated `vMAJOR.MINOR.PATCH` tag cuts, and nothing else (§12).
+type releaseVersion struct{ major, minor, patch int }
+
+func (v releaseVersion) String() string {
+	return fmt.Sprintf("v%d.%d.%d", v.major, v.minor, v.patch)
+}
+
+// newer reports whether v is a higher version than other.
+//
+// Numerically throughout. Compared as strings, 0.10.0 is older than 0.9.0, and
+// the tenth minor is exactly where a project that has run unattended for a year
+// finds itself — which is the same trap release.sh compares numerically to
+// avoid, in the same order, for the same reason.
+func (v releaseVersion) newer(other releaseVersion) bool {
+	switch {
+	case v.major != other.major:
+		return v.major > other.major
+	case v.minor != other.minor:
+		return v.minor > other.minor
+	default:
+		return v.patch > other.patch
+	}
+}
+
+// floatingName is the name §12 tells an operator to pin: the floating major,
+// or — before 1.0, where there is no meaningful floating major — the `0.x`
+// minor line that stands in for one.
+func (v releaseVersion) floatingName() string {
+	if v.major == 0 {
+		return fmt.Sprintf("0.%d", v.minor)
+	}
+	return strconv.Itoa(v.major)
+}
+
+// releaseTag matches the only tag shape that publishes anything. A `v1.5.0-rc1`
+// holds no floating name and is therefore not a release — the same rule
+// release.sh applies when it works out which floating names a tag may take.
+var releaseTag = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)$`)
+
+// newestRelease is the highest release tag in this checkout, and false when
+// there is none.
+//
+// From git rather than from the registry or the releases API: git is the thing
+// the release pipeline itself acts on, and the other two are answers about it
+// fetched over a network.
+func newestRelease(t *testing.T) (releaseVersion, bool) {
+	t.Helper()
+
+	// A shallow checkout carries no tags, and reading none of them would make
+	// this pass while measuring nothing — green and worthless, which is the one
+	// outcome worse than red. CI fetches the full history for this job; a
+	// checkout that did not says so here rather than quietly agreeing.
+	if strings.TrimSpace(gitOutput(t, "rev-parse", "--is-shallow-repository")) == "true" {
+		t.Fatalf("this checkout is shallow, so it carries no release tags and %s's pin cannot be "+
+			"measured against the newest release. Fetch the full history — actions/checkout with "+
+			"`fetch-depth: 0` — before running seam 2 (§12)", referenceCompose)
+	}
+
+	var newest releaseVersion
+	var released bool
+	for _, tag := range strings.Fields(gitOutput(t, "tag", "--list", "v[0-9]*.[0-9]*.[0-9]*")) {
+		fields := releaseTag.FindStringSubmatch(tag)
+		if fields == nil {
+			continue
+		}
+		var version releaseVersion
+		for i, into := range []*int{&version.major, &version.minor, &version.patch} {
+			n, err := strconv.Atoi(fields[i+1])
+			if err != nil {
+				t.Fatalf("reading the release tag %s: %v", tag, err)
+			}
+			*into = n
+		}
+		if !released || version.newer(newest) {
+			newest, released = version, true
+		}
+	}
+	return newest, released
+}
+
+// gitOutput runs git in this checkout — the tests run in the package directory,
+// which is the repository root — and returns what it said.
+func gitOutput(t *testing.T, args ...string) string {
+	t.Helper()
+
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+	}
+	return string(out)
 }
 
 // composeStack is as much of Compose's own canonical output as this suite
