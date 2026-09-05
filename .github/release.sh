@@ -207,10 +207,10 @@ fi
 #
 # The major is published pre-1.0 too, where §12 says there is no meaningful
 # floating major. The docs decide what is *quoted* — the reference compose pins
-# `0.3` today and `1` from 1.0 — and a pipeline special case that fires exactly
-# once, at the most dangerous release there is, is worse than a tag nothing
-# points at. `latest` is here for the same reason: people expect it, and no
-# document quotes it.
+# the current `0.x` line today and `1` from 1.0 — and a pipeline special case
+# that fires exactly once, at the most dangerous release there is, is worse than
+# a tag nothing points at. `latest` is here for the same reason: people expect
+# it, and no document quotes it.
 #
 # **A floating name is published only by the release that is newest under it**,
 # which is that same rejected alternative arriving from the other side. A

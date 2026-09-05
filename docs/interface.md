@@ -39,10 +39,11 @@ SBOM beside it.
 
 **Pin the floating major.** It is the name that follows a base image patch, and
 an unattended sidecar on a pin that never moves ends up on a stale base. Before
-1.0 there is no floating major, so [`compose.yaml`](../compose.yaml) pins `0.3`
-today and changes to `1` at 1.0. `latest` is published because people expect it
-to exist. Nothing here points at it, and nothing you run unattended needs
-to.
+1.0 there is no floating major, so [`compose.yaml`](../compose.yaml) pins `0.4`
+today and changes to `1` at 1.0. It moves with every release: the suite asserts
+the reference stack pins the newest release's floating name, and fails until it
+does. `latest` is published because people expect it to exist. Nothing here
+points at it, and nothing you run unattended needs to.
 
 **A floating name only ever moves forward.** A release publishes the floating
 names it is the newest under, and no others. A backport cut from an older line
@@ -57,8 +58,8 @@ obsync, with notes, like everything else on this page.
 Every release carries a build-provenance attestation and an SBOM:
 
 ```bash
-gh attestation verify oci://ghcr.io/andyroberts2/obsync:0.3 --owner andyroberts2
-docker buildx imagetools inspect ghcr.io/andyroberts2/obsync:0.3
+gh attestation verify oci://ghcr.io/andyroberts2/obsync:0.4 --owner andyroberts2
+docker buildx imagetools inspect ghcr.io/andyroberts2/obsync:0.4
 ```
 
 ---

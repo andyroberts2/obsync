@@ -294,8 +294,16 @@ jobs:
     name: Seam 2 — the image and the reference compose
     runs-on: ubuntu-latest
     steps:
+      # The whole history, and it is the tags this job is after. The reference
+      # compose's pin is asserted to be the floating name of the newest release
+      # (§12), and the newest release is a `vMAJOR.MINOR.PATCH` tag — which the
+      # default shallow checkout does not fetch. The suite refuses to run that
+      # assertion against a shallow checkout rather than pass while measuring
+      # nothing, so this line is what the assertion stands on.
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
